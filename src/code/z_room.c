@@ -586,6 +586,16 @@ void Room_Init(PlayState* play, Room* room) {
     room->segment = NULL;
 }
 
+static u32 Room_GetRomFileSize(RomFile* roomFile) {
+#if PLATFORM_PSP
+    if ((roomFile->vromStart != 0) && (roomFile->vromEnd == 0)) {
+        return 0;
+    }
+#endif
+
+    return roomFile->vromEnd - roomFile->vromStart;
+}
+
 /**
  * Allocates memory for rooms and fetches the first room that the player will spawn into.
  *
@@ -608,7 +618,7 @@ u32 Room_SetupFirstRoom(PlayState* play, RoomContext* roomCtx) {
         RomFile* roomList = play->roomList.romFiles;
 
         for (i = 0; i < play->roomList.count; i++) {
-            roomSize = roomList[i].vromEnd - roomList[i].vromStart;
+            roomSize = Room_GetRomFileSize(&roomList[i]);
             PRINTF("ROOM%d size=%d\n", i, roomSize);
             if (roomBufferSize < roomSize) {
                 roomBufferSize = roomSize;
@@ -626,8 +636,8 @@ u32 Room_SetupFirstRoom(PlayState* play, RoomContext* roomCtx) {
         for (j = 0; j < play->transitionActors.count; j++) {
             frontRoom = transitionActor->sides[0].room;
             backRoom = transitionActor->sides[1].room;
-            frontRoomSize = (frontRoom < 0) ? 0 : roomList[frontRoom].vromEnd - roomList[frontRoom].vromStart;
-            backRoomSize = (backRoom < 0) ? 0 : roomList[backRoom].vromEnd - roomList[backRoom].vromStart;
+            frontRoomSize = (frontRoom < 0) ? 0 : Room_GetRomFileSize(&roomList[frontRoom]);
+            backRoomSize = (backRoom < 0) ? 0 : Room_GetRomFileSize(&roomList[backRoom]);
             cumulRoomSize = (frontRoom != backRoom) ? frontRoomSize + backRoomSize : frontRoomSize;
 
             PRINTF("DOOR%d=<%d> ROOM1=<%d, %d> ROOM2=<%d, %d>\n", j, cumulRoomSize, frontRoom, frontRoomSize, backRoom,
@@ -640,6 +650,11 @@ u32 Room_SetupFirstRoom(PlayState* play, RoomContext* roomCtx) {
     }
 
     PRINTF_COLOR_YELLOW();
+#if PLATFORM_PSP
+    if (roomBufferSize == 0) {
+        roomBufferSize = 16;
+    }
+#endif
     PRINTF(T("部屋バッファサイズ=%08x(%5.1fK)\n", "Room buffer size=%08x(%5.1fK)\n"), roomBufferSize,
            roomBufferSize / 1024.0f);
     roomCtx->bufPtrs[0] = GAME_STATE_ALLOC(&play->state, roomBufferSize, "../z_room.c", 946);
@@ -679,6 +694,7 @@ u32 Room_SetupFirstRoom(PlayState* play, RoomContext* roomCtx) {
  */
 s32 Room_RequestNewRoom(PlayState* play, RoomContext* roomCtx, s32 roomNum) {
     if (roomCtx->status == 0) {
+        RomFile* roomFile = &play->roomList.romFiles[roomNum];
         u32 size;
 
         roomCtx->prevRoom = roomCtx->curRoom;
@@ -688,7 +704,17 @@ s32 Room_RequestNewRoom(PlayState* play, RoomContext* roomCtx, s32 roomNum) {
 
         ASSERT(roomNum < play->roomList.count, "read_room_ID < game_play->room_rom_address.num", "../z_room.c", 1009);
 
-        size = play->roomList.romFiles[roomNum].vromEnd - play->roomList.romFiles[roomNum].vromStart;
+#if PLATFORM_PSP
+        if ((roomFile->vromStart != 0) && (roomFile->vromEnd == 0)) {
+            roomCtx->roomRequestAddr = (void*)roomFile->vromStart;
+            osCreateMesgQueue(&roomCtx->loadQueue, &roomCtx->loadMsg, 1);
+            osSendMesg(&roomCtx->loadQueue, NULL, OS_MESG_NOBLOCK);
+            roomCtx->activeBufPage ^= 1;
+            return true;
+        }
+#endif
+
+        size = roomFile->vromEnd - roomFile->vromStart;
         roomCtx->roomRequestAddr = (void*)ALIGN16((uintptr_t)roomCtx->bufPtrs[roomCtx->activeBufPage] -
                                                   ((size + 8) * roomCtx->activeBufPage + 7));
 
@@ -703,8 +729,8 @@ s32 Room_RequestNewRoom(PlayState* play, RoomContext* roomCtx, s32 roomNum) {
                               "../z_room.c", 1036);
         }
 #else
-        DMA_REQUEST_ASYNC(&roomCtx->dmaRequest, roomCtx->roomRequestAddr, play->roomList.romFiles[roomNum].vromStart,
-                          size, 0, &roomCtx->loadQueue, NULL, "../z_room.c", 1036);
+        DMA_REQUEST_ASYNC(&roomCtx->dmaRequest, roomCtx->roomRequestAddr, roomFile->vromStart, size, 0,
+                          &roomCtx->loadQueue, NULL, "../z_room.c", 1036);
 #endif
 
         roomCtx->activeBufPage ^= 1;

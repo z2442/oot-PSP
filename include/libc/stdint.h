@@ -1,6 +1,9 @@
 #ifndef STDINT_H
 #define STDINT_H
 
+#if defined(TARGET_PSP) || defined(PLATFORM_PSP)
+#include_next <stdint.h>
+#else
 typedef signed long intptr_t;
 typedef unsigned long uintptr_t;
 
@@ -22,5 +25,6 @@ typedef unsigned long uintptr_t;
 #define INTPTR_MIN  INT32_MIN
 #define INTPTR_MAX  INT32_MAX
 #define UINTPTR_MAX UINT32_MAX
+#endif
 
 #endif

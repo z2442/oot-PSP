@@ -95,6 +95,8 @@ void Scene_DrawConfigFishingPond(PlayState* play);
 void Scene_DrawConfigGanonsTowerCollapseInterior(PlayState* play);
 void Scene_DrawConfigInsideGanonsCastleCollapse(PlayState* play);
 
+#if !PLATFORM_PSP
+
 // Entrance Table definition
 #define DEFINE_ENTRANCE(_0, sceneId, spawn, continueBgm, displayTitleCard, endTransType, startTransType) \
     { sceneId, spawn,                                                                                    \
@@ -134,6 +136,8 @@ SceneTableEntry gSceneTable[] = {
 #undef _noneSegmentRomEnd
 
 #undef DEFINE_SCENE
+
+#endif
 
 Gfx sDefaultDisplayList[] = {
     gsSPSegment(0x08, gEmptyDL),

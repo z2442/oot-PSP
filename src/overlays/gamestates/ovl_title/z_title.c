@@ -217,8 +217,10 @@ void ConsoleLogo_Destroy(GameState* thisx) {
 }
 
 void ConsoleLogo_Init(GameState* thisx) {
-    u32 size = (uintptr_t)_nintendo_rogo_staticSegmentRomEnd - (uintptr_t)_nintendo_rogo_staticSegmentRomStart;
     ConsoleLogoState* this = (ConsoleLogoState*)thisx;
+#if !PLATFORM_PSP
+    u32 size = (uintptr_t)_nintendo_rogo_staticSegmentRomEnd - (uintptr_t)_nintendo_rogo_staticSegmentRomStart;
+#endif
 
 #if PLATFORM_N64
     if ((D_80121210 != 0) && (D_80121211 != 0) && (D_80121212 == 0)) {
@@ -231,10 +233,14 @@ void ConsoleLogo_Init(GameState* thisx) {
     }
 #endif
 
+#if PLATFORM_PSP
+    this->staticSegment = (void*)nintendo_rogo_static_Tex_000000;
+#else
     this->staticSegment = GAME_STATE_ALLOC(&this->state, size, "../z_title.c", 611);
     PRINTF("z_title.c\n");
     ASSERT(this->staticSegment != NULL, "this->staticSegment != NULL", "../z_title.c", 614);
     DMA_REQUEST_SYNC(this->staticSegment, (uintptr_t)_nintendo_rogo_staticSegmentRomStart, size, "../z_title.c", 615);
+#endif
     R_UPDATE_RATE = 1;
     Matrix_Init(&this->state);
     View_Init(&this->view, this->state.gfxCtx);

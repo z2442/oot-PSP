@@ -8,8 +8,13 @@
 #include "translation.h"
 #include "play_state.h"
 
+#if PLATFORM_PSP
+#define KALEIDO_OVERLAY(name, nameString) \
+    { NULL, ROM_FILE_UNSET, NULL, NULL, 0, nameString, }
+#else
 #define KALEIDO_OVERLAY(name, nameString) \
     { NULL, ROM_FILE(ovl_##name), _ovl_##name##SegmentStart, _ovl_##name##SegmentEnd, 0, nameString, }
+#endif
 
 KaleidoMgrOverlay gKaleidoMgrOverlayTable[] = {
     KALEIDO_OVERLAY(kaleido_scope, "kaleido_scope"),
@@ -19,6 +24,43 @@ KaleidoMgrOverlay gKaleidoMgrOverlayTable[] = {
 void* sKaleidoAreaPtr = NULL;
 KaleidoMgrOverlay* gKaleidoMgrCurOvl = NULL;
 u8 gBossMarkState = 0;
+
+#if PLATFORM_PSP
+
+void KaleidoManager_LoadOvl(KaleidoMgrOverlay* ovl) {
+    if (ovl != NULL) {
+        ovl->loadedRamAddr = NULL;
+        ovl->offset = 0;
+    }
+    gKaleidoMgrCurOvl = ovl;
+}
+
+void KaleidoManager_ClearOvl(KaleidoMgrOverlay* ovl) {
+    if (ovl != NULL) {
+        ovl->loadedRamAddr = NULL;
+        ovl->offset = 0;
+    }
+    if (gKaleidoMgrCurOvl == ovl) {
+        gKaleidoMgrCurOvl = NULL;
+    }
+}
+
+void KaleidoManager_Init(PlayState* play) {
+    (void)play;
+    sKaleidoAreaPtr = NULL;
+    gKaleidoMgrCurOvl = NULL;
+}
+
+void KaleidoManager_Destroy(void) {
+    sKaleidoAreaPtr = NULL;
+    gKaleidoMgrCurOvl = NULL;
+}
+
+void* KaleidoManager_GetRamAddr(void* vram) {
+    return vram;
+}
+
+#else
 
 void KaleidoManager_LoadOvl(KaleidoMgrOverlay* ovl) {
     LOG_UTILS_CHECK_NULL_POINTER("KaleidoArea_allocp", sKaleidoAreaPtr, "../z_kaleido_manager.c", 99);
@@ -111,3 +153,5 @@ KaleidoManager_GetRamAddr_end:
 
     return (void*)((uintptr_t)vram + ovl->offset);
 }
+
+#endif

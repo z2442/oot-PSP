@@ -19,6 +19,12 @@
 SceneCmdHandlerFunc sSceneCmdHandlers[SCENE_CMD_ID_MAX];
 RomFile sNaviQuestHintFiles[];
 
+#if PLATFORM_PSP
+extern u8 gOverworldNaviQuestHints[];
+extern u8 gDungeonNaviQuestHints[];
+void OotPsp_ResolveRoomList(RomFile* roomFiles, s32 count);
+#endif
+
 /**
  * Spawn an object file of a specified ID that will persist through room changes.
  *
@@ -36,6 +42,16 @@ s32 Object_SpawnPersistent(ObjectContext* objectCtx, s16 objectId) {
 
     objectCtx->slots[objectCtx->numEntries].id = objectId;
     size = gObjectTable[objectId].vromEnd - gObjectTable[objectId].vromStart;
+
+#if PLATFORM_PSP
+    objectCtx->slots[objectCtx->numEntries].segment = (void*)gObjectTable[objectId].vromStart;
+    if (objectCtx->numEntries < (ARRAY_COUNT(objectCtx->slots) - 1)) {
+        objectCtx->slots[objectCtx->numEntries + 1].segment = NULL;
+    }
+    objectCtx->numEntries++;
+    objectCtx->numPersistentEntries = objectCtx->numEntries;
+    return objectCtx->numEntries - 1;
+#endif
 
     PRINTF("OBJECT[%d] SIZE %fK SEG=%x\n", objectId, size / 1024.0f, objectCtx->slots[objectCtx->numEntries].segment);
 
@@ -179,6 +195,13 @@ void* func_800982FC(ObjectContext* objectCtx, s32 slot, s16 objectId) {
     u32 size;
     void* nextPtr;
 
+#if PLATFORM_PSP
+    entry->id = objectId;
+    entry->segment = (void*)objectFile->vromStart;
+    entry->dmaRequest.vromAddr = 0;
+    return NULL;
+#endif
+
     entry->id = -objectId;
     entry->dmaRequest.vromAddr = 0;
 
@@ -257,6 +280,9 @@ BAD_RETURN(s32) Scene_CommandCollisionHeader(PlayState* play, SceneCmd* cmd) {
 BAD_RETURN(s32) Scene_CommandRoomList(PlayState* play, SceneCmd* cmd) {
     play->roomList.count = cmd->roomList.length;
     play->roomList.romFiles = SEGMENTED_TO_VIRTUAL(cmd->roomList.data);
+#if PLATFORM_PSP
+    OotPsp_ResolveRoomList(play->roomList.romFiles, play->roomList.count);
+#endif
 }
 
 BAD_RETURN(s32) Scene_CommandSpawnList(PlayState* play, SceneCmd* cmd) {
@@ -560,6 +586,11 @@ SceneCmdHandlerFunc sSceneCmdHandlers[SCENE_CMD_ID_MAX] = {
 };
 
 RomFile sNaviQuestHintFiles[] = {
+#if PLATFORM_PSP
+    { (uintptr_t)gOverworldNaviQuestHints, 0 },
+    { (uintptr_t)gDungeonNaviQuestHints, 0 },
+#else
     ROM_FILE(elf_message_field),
     ROM_FILE(elf_message_ydan),
+#endif
 };

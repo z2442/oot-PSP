@@ -7,6 +7,21 @@
 #include "dma.h"
 #include "font.h"
 #include "message.h"
+#if PLATFORM_PSP
+#include "oot_psp_asset_loader.h"
+#endif
+
+#if PLATFORM_PSP
+static void Font_SwapWideMessageBufferPsp(u16* buffer, s32 count) {
+    s32 i;
+
+    for (i = 0; i < count; i++) {
+        u16 value = buffer[i];
+
+        buffer[i] = (value << 8) | (value >> 8);
+    }
+}
+#endif
 
 /**
  * Loads a texture from kanji for the requested `character` into the character texture buffer
@@ -64,14 +79,32 @@ void Font_LoadOrderedFont(Font* font) {
     u32 offset;
     const char* messageDataStart;
     u16* msgBufWide;
+#if PLATFORM_PSP
+    const OotPspMessageEntry* pspMessageEntry;
+#endif
 
 #if OOT_NTSC && !PLATFORM_IQUE
+#if PLATFORM_PSP
+    pspMessageEntry = OotPsp_FindMessageEntry(gOotPspJpnMessageEntries, gOotPspJpnMessageEntriesCount, 0xFFFC);
+    if (pspMessageEntry == NULL) {
+        PRINTF("oot-psp font message 0xFFFC missing\n");
+        return;
+    }
+
+    font->msgOffset = pspMessageEntry->vromStart -
+                      OotPsp_NormalizeVrom((uintptr_t)_jpn_message_data_staticSegmentRomStart);
+    size = font->msgLength = pspMessageEntry->vromEnd - pspMessageEntry->vromStart;
+#else
     messageDataStart = (const char*)_jpn_message_data_staticSegmentStart;
     font->msgOffset = _message_0xFFFC_jpn - messageDataStart;
     size = font->msgLength = _message_0xFFFD_jpn - _message_0xFFFC_jpn;
+#endif
     len = (u32)size / 2;
     DMA_REQUEST_SYNC(font->msgBufWide, (uintptr_t)_jpn_message_data_staticSegmentRomStart + font->msgOffset, size,
                      "../z_kanfont.c", UNK_LINE);
+#if PLATFORM_PSP
+    Font_SwapWideMessageBufferPsp(font->msgBufWide, len);
+#endif
 
     PRINTF("msg_data=%x,  msg_data0=%x   jj=%x\n", font->msgOffset, font->msgLength, len);
 
@@ -90,9 +123,21 @@ void Font_LoadOrderedFont(Font* font) {
         }
     }
 #elif OOT_PAL
+#if PLATFORM_PSP
+    pspMessageEntry = OotPsp_FindMessageEntry(gOotPspNesMessageEntries, gOotPspNesMessageEntriesCount, 0xFFFC);
+    if (pspMessageEntry == NULL) {
+        PRINTF("oot-psp font message 0xFFFC missing\n");
+        return;
+    }
+
+    font->msgOffset = pspMessageEntry->vromStart -
+                      OotPsp_NormalizeVrom((uintptr_t)_nes_message_data_staticSegmentRomStart);
+    size = font->msgLength = pspMessageEntry->vromEnd - pspMessageEntry->vromStart;
+#else
     messageDataStart = (const char*)_nes_message_data_staticSegmentStart;
     font->msgOffset = _message_0xFFFC_nes - messageDataStart;
     size = font->msgLength = _message_0xFFFD_nes - _message_0xFFFC_nes;
+#endif
     len = size;
     DMA_REQUEST_SYNC(font->msgBuf, (uintptr_t)_nes_message_data_staticSegmentRomStart + font->msgOffset, len,
                      "../z_kanfont.c", 122);
@@ -116,12 +161,27 @@ void Font_LoadOrderedFont(Font* font) {
         }
     }
 #elif PLATFORM_IQUE
+#if PLATFORM_PSP
+    pspMessageEntry = OotPsp_FindMessageEntry(gOotPspJpnMessageEntries, gOotPspJpnMessageEntriesCount, 0xFFFC);
+    if (pspMessageEntry == NULL) {
+        PRINTF("oot-psp font message 0xFFFC missing\n");
+        return;
+    }
+
+    font->msgOffset = pspMessageEntry->vromStart -
+                      OotPsp_NormalizeVrom((uintptr_t)_jpn_message_data_staticSegmentRomStart);
+    size = font->msgLength = pspMessageEntry->vromEnd - pspMessageEntry->vromStart;
+#else
     messageDataStart = (const char*)_jpn_message_data_staticSegmentStart;
     font->msgOffset = _message_0xFFFC_jpn - messageDataStart;
     size = font->msgLength = _message_0xFFFD_jpn - _message_0xFFFC_jpn;
+#endif
     len = (u32)size / 2;
     DMA_REQUEST_SYNC(font->msgBufWide, (uintptr_t)_jpn_message_data_staticSegmentRomStart + font->msgOffset, size,
                      "../z_kanfont.c", UNK_LINE);
+#if PLATFORM_PSP
+    Font_SwapWideMessageBufferPsp(font->msgBufWide, len);
+#endif
 
     PRINTF("msg_data=%x,  msg_data0=%x   jj=%x\n", font->msgOffset, font->msgLength, len);
 

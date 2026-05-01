@@ -6,6 +6,11 @@
 
 extern uintptr_t gSegments[NUM_SEGMENTS];
 
+#if PLATFORM_PSP
+void* SegmentedToVirtualCompat(uintptr_t addr);
+#define SEGMENTED_TO_VIRTUAL(addr) SegmentedToVirtualCompat((uintptr_t)(addr))
+#else
 #define SEGMENTED_TO_VIRTUAL(addr) (void*)(gSegments[SEGMENT_NUMBER(addr)] + SEGMENT_OFFSET(addr) + K0BASE)
+#endif
 
 #endif

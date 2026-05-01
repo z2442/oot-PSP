@@ -6,15 +6,26 @@
 #endif
 
 // Runtime assertions
-
+#if defined(TARGET_PSP) || defined(PLATFORM_PSP)
+__attribute__((noreturn)) void oot_psp_assert(const char* assertion, const char* file, int line);
+#else
 __attribute__((noreturn)) void __assert(const char* assertion, const char* file, int line);
+#endif
 
 // assert for matching
 #ifndef NDEBUG
 # ifndef NON_MATCHING
-#  define ASSERT(cond, msg, file, line) ((cond) ? ((void)0) : __assert(msg, file, line))
+#  if defined(TARGET_PSP) || defined(PLATFORM_PSP)
+#   define ASSERT(cond, msg, file, line) ((cond) ? ((void)0) : oot_psp_assert(msg, file, line))
+#  else
+#   define ASSERT(cond, msg, file, line) ((cond) ? ((void)0) : __assert(msg, file, line))
+#  endif
 # else
-#  define ASSERT(cond, msg, file, line) ((cond) ? ((void)0) : __assert(#cond, __FILE__, __LINE__))
+#  if defined(TARGET_PSP) || defined(PLATFORM_PSP)
+#   define ASSERT(cond, msg, file, line) ((cond) ? ((void)0) : oot_psp_assert(#cond, __FILE__, __LINE__))
+#  else
+#   define ASSERT(cond, msg, file, line) ((cond) ? ((void)0) : __assert(#cond, __FILE__, __LINE__))
+#  endif
 # endif
 #else
 # define ASSERT(cond, msg, file, line) ((void)0)

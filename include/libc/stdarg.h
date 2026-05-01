@@ -1,6 +1,10 @@
 #ifndef STDARG_H
 #define STDARG_H
 
+#if defined(TARGET_PSP) || defined(PLATFORM_PSP)
+#include_next <stdarg.h>
+#else
+
 #if defined(__sgi) /* IDO */
 
 #ifndef _VA_LIST_
@@ -73,6 +77,8 @@ typedef __gnuc_va_list va_list;
 #define va_start __builtin_va_start
 #define va_arg   __builtin_va_arg
 #define va_end   __builtin_va_end
+
+#endif
 
 #endif
 

@@ -44,7 +44,12 @@ ActorProfile Bg_Mjin_Profile = {
     /**/ NULL,
 };
 
+#if PLATFORM_PSP
+#define BG_MJIN_OBJECT_SEGMENT_START ((void*)0x06000000)
+#else
 extern UNK_TYPE D_06000000;
+#define BG_MJIN_OBJECT_SEGMENT_START (&D_06000000)
+#endif
 
 static InitChainEntry sInitChain[] = {
     ICHAIN_VEC3F_DIV1000(scale, 1000, ICHAIN_CONTINUE),
@@ -120,7 +125,7 @@ void BgMjin_Draw(Actor* thisx, PlayState* play) {
             gSegments[6] = OS_K0_TO_PHYSICAL(play->objectCtx.slots[objectSlot].segment);
         }
 
-        gSPSegment(POLY_OPA_DISP++, 0x08, SEGMENTED_TO_VIRTUAL(&D_06000000));
+        gSPSegment(POLY_OPA_DISP++, 0x08, SEGMENTED_TO_VIRTUAL(BG_MJIN_OBJECT_SEGMENT_START));
         dlist = gWarpPadBaseDL;
     } else {
         dlist = gOcarinaWarpPadDL;

@@ -234,6 +234,13 @@ void EffectSs_Spawn(PlayState* play, s32 type, s32 priority, void* initParams) {
                                          : NULL);
     }
 
+    if (profile == NULL) {
+        PRINTF(T("EffectSoftSprite2_makeEffect():未対応エフェクト%dのため追加を中止します。\n",
+                 "EffectSoftSprite2_makeEffect(): skipping unsupported effect %d.\n"),
+               type);
+        return;
+    }
+
     if (profile->init == NULL) {
         PRINTF(T("EffectSoftSprite2_makeEffect():すでにエフェクトはロード済みで\n"
                  "すが,コンストラクターがNULLなので追加をやめます。\n"

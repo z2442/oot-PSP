@@ -26,7 +26,23 @@
 #undef DEFINE_ACTOR_UNSET
 
 // Actor Overlay Table definition
-#if DEBUG_FEATURES
+#if PLATFORM_PSP
+
+// PSP links actor code directly into the executable, so the original table can
+// point at every real profile without using runtime overlay loading.
+#define DEFINE_ACTOR(name, _1, allocType, nameString)                  \
+    {                                                                  \
+        ROM_FILE_UNSET, NULL, NULL, NULL, &name##_Profile, nameString, \
+        allocType, 0,                                                  \
+    },
+
+#define DEFINE_ACTOR_INTERNAL(name, _1, allocType, nameString)         \
+    {                                                                  \
+        ROM_FILE_UNSET, NULL, NULL, NULL, &name##_Profile, nameString, \
+        allocType, 0,                                                  \
+    },
+
+#elif DEBUG_FEATURES
 
 #define DEFINE_ACTOR(name, _1, allocType, nameString) \
     {                                                 \

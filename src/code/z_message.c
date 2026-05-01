@@ -23,6 +23,9 @@
 #include "play_state.h"
 #include "player.h"
 #include "save.h"
+#if PLATFORM_PSP
+#include "oot_psp_asset_loader.h"
+#endif
 
 #include "assets/textures/parameter_static/parameter_static.h"
 
@@ -477,9 +480,45 @@ void Message_GrowTextbox(MessageContext* msgCtx) {
     R_TEXTBOX_X = R_TEXTBOX_WIDTH_TARGET - (R_TEXTBOX_WIDTH / 2) + R_TEXTBOX_X_TARGET;
 }
 
+#if PLATFORM_PSP
+static void Message_FindMessagePsp(Font* font, const OotPspMessageEntry* entries, size_t count,
+                                   uintptr_t segmentRomStart, u16 textId) {
+    const OotPspMessageEntry* entry = OotPsp_FindMessageEntry(entries, count, textId);
+
+    if (entry == NULL) {
+        if (count == 0) {
+            font->msgOffset = 0;
+            font->msgLength = 0;
+            return;
+        }
+
+        PRINTF("oot-psp message missing textId=%04x\n", textId);
+        entry = &entries[0];
+    }
+
+    font->charTexBuf[0] = entry->typePos;
+    font->msgOffset = entry->vromStart - OotPsp_NormalizeVrom(segmentRomStart);
+    font->msgLength = entry->vromEnd - entry->vromStart;
+}
+
+static void Message_SwapWideMessageBufferPsp(u16* buffer, s32 count) {
+    s32 i;
+
+    for (i = 0; i < count; i++) {
+        u16 value = buffer[i];
+
+        buffer[i] = (value << 8) | (value >> 8);
+    }
+}
+#endif
+
 #if OOT_NTSC
 
 void Message_FindMessageJPN(PlayState* play, u16 textId) {
+#if PLATFORM_PSP
+    Message_FindMessagePsp(&play->msgCtx.font, gOotPspJpnMessageEntries, gOotPspJpnMessageEntriesCount,
+                           (uintptr_t)_jpn_message_data_staticSegmentRomStart, textId);
+#else
     const char* foundSeg;
     const char* nextSeg;
     const char* seg;
@@ -514,9 +553,14 @@ void Message_FindMessageJPN(PlayState* play, u16 textId) {
 
     font->msgOffset = foundSeg - seg;
     font->msgLength = nextSeg - foundSeg;
+#endif
 }
 
 void Message_FindMessageNES(PlayState* play, u16 textId) {
+#if PLATFORM_PSP
+    Message_FindMessagePsp(&play->msgCtx.font, gOotPspNesMessageEntries, gOotPspNesMessageEntriesCount,
+                           (uintptr_t)_nes_message_data_staticSegmentRomStart, textId);
+#else
     const char* foundSeg;
     const char* nextSeg;
     const char* seg;
@@ -549,11 +593,26 @@ void Message_FindMessageNES(PlayState* play, u16 textId) {
     nextSeg = messageTableEntry->segment;
     font->msgOffset = foundSeg - seg;
     font->msgLength = nextSeg - foundSeg;
+#endif
 }
 
 #else
 
 void Message_FindMessagePAL(PlayState* play, u16 textId) {
+#if PLATFORM_PSP
+    Font* font = &play->msgCtx.font;
+
+    if (gSaveContext.language == LANGUAGE_ENG) {
+        Message_FindMessagePsp(font, gOotPspNesMessageEntries, gOotPspNesMessageEntriesCount,
+                               (uintptr_t)_nes_message_data_staticSegmentRomStart, textId);
+    } else if (gSaveContext.language == LANGUAGE_GER) {
+        Message_FindMessagePsp(font, gOotPspGerMessageEntries, gOotPspGerMessageEntriesCount,
+                               (uintptr_t)_ger_message_data_staticSegmentRomStart, textId);
+    } else {
+        Message_FindMessagePsp(font, gOotPspFraMessageEntries, gOotPspFraMessageEntriesCount,
+                               (uintptr_t)_fra_message_data_staticSegmentRomStart, textId);
+    }
+#else
     const char* foundSeg;
     const char* nextSeg;
     Font* font = &play->msgCtx.font;
@@ -619,11 +678,16 @@ void Message_FindMessagePAL(PlayState* play, u16 textId) {
     }
     font->msgOffset = foundSeg - seg;
     font->msgLength = nextSeg - foundSeg;
+#endif
 }
 
 #endif
 
 void Message_FindCreditsMessage(PlayState* play, u16 textId) {
+#if PLATFORM_PSP
+    Message_FindMessagePsp(&play->msgCtx.font, gOotPspStaffMessageEntries, gOotPspStaffMessageEntriesCount,
+                           (uintptr_t)_staff_message_data_staticSegmentRomStart, textId);
+#else
     const char* foundSeg;
     const char* nextSeg;
     const char* seg;
@@ -646,6 +710,7 @@ void Message_FindCreditsMessage(PlayState* play, u16 textId) {
         }
         messageTableEntry++;
     }
+#endif
 }
 
 void Message_SetTextColor(MessageContext* msgCtx, u16 colorParameter) {
@@ -2638,6 +2703,9 @@ void Message_OpenText(PlayState* play, u16 textId) {
 #else
             DMA_REQUEST_SYNC(MSG_BUF, (uintptr_t)_jpn_message_data_staticSegmentRomStart + font->msgOffset,
                              font->msgLength, "../z_message_PAL.c", UNK_LINE);
+#endif
+#if PLATFORM_PSP
+            Message_SwapWideMessageBufferPsp(MSG_BUF_WIDE, font->msgLength / 2);
 #endif
         } else {
             Message_FindMessageNES(play, textId);

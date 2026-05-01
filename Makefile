@@ -1168,6 +1168,387 @@ $(BUILD_DIR)/assets/audio/sequence_sizes.h: $(SEQUENCE_O_FILES)
 $(BUILD_DIR)/assets/audio/audiobank_padding.o:
 	echo ".section .rodata; .fill 0x20" | $(AS) $(ASFLAGS) -o $@
 
+#### PSP Port Probe ####
+
+PSP_PORT_BUILD_DIR := build/psp-port/$(VERSION)
+PSP_PORT_PSPSDK := $(shell psp-config -p 2>/dev/null)
+PSP_PORT_PREFIX := $(shell psp-config -P 2>/dev/null)
+PSP_PORT_CC := psp-gcc
+PSP_PORT_AR := psp-ar
+
+PSP_PORT_ACTOR_SOURCES := $(sort $(filter-out %.inc.c,$(wildcard src/overlays/actors/*/*.c)))
+PSP_PORT_EFFECT_SOURCES := $(sort $(filter-out %.inc.c,$(wildcard src/overlays/effects/*/*.c)))
+PSP_PORT_KALEIDO_SOURCES := $(sort $(filter-out %.inc.c,$(wildcard src/overlays/misc/ovl_kaleido_scope/*.c)))
+PSP_PORT_RUNTIME_ASM_SOURCES := \
+	src/code/kanread.s \
+	src/port/psp/oot_psp_ucode_assets.s
+PSP_PORT_ROOT_ASSET_SOURCES := $(sort $(filter-out %.inc.c,$(wildcard assets/objects/*/*.c)))
+PSP_PORT_ROOT_TEXTURE_SOURCES := \
+	assets/textures/do_action_static/do_action_static.c \
+	assets/textures/icon_item_24_static/icon_item_24_static.c \
+	assets/textures/icon_item_jpn_static/icon_item_jpn_static.c \
+	assets/textures/icon_item_nes_static/icon_item_nes_static.c
+PSP_PORT_TEXT_ASSET_SOURCES := $(sort $(filter-out %.inc.c,$(wildcard assets/text/*message_data_static.c)))
+PSP_PORT_EXTRACTED_OBJECT_SOURCES := $(sort $(filter-out %.inc.c,$(wildcard extracted/$(VERSION)/assets/objects/*/*.c)))
+PSP_PORT_EXTRACTED_SCENE_SOURCES := $(sort $(filter-out %.inc.c,$(wildcard extracted/$(VERSION)/assets/scenes/*/*/*.c)))
+PSP_PORT_EXTRACTED_TEXTURE_SOURCES := $(sort $(filter-out %.inc.c,$(wildcard extracted/$(VERSION)/assets/textures/*/*.c)))
+PSP_PORT_EXTRACTED_MISC_SOURCES := $(sort $(filter-out %.inc.c,$(wildcard extracted/$(VERSION)/assets/misc/*/*.c)))
+
+PSP_PORT_RUNTIME_SOURCES := \
+	src/buffers/gfxbuffers.c \
+	src/buffers/zbuffer.c \
+	src/code/TwoHeadArena.c \
+	src/code/TwoHeadGfxArena.c \
+	src/code/game.c \
+	src/code/gamealloc.c \
+	src/code/gfxalloc.c \
+	src/code/graph.c \
+	src/code/jpegdecoder.c \
+	src/code/jpegutils.c \
+	src/code/listalloc.c \
+	src/code/PreRender.c \
+	src/code/z_cutscene_spline.c \
+	src/code/sys_math.c \
+	src/code/sys_math_atan.c \
+	src/code/shrink_window.c \
+	src/code/sys_matrix.c \
+	src/code/sys_math3d.c \
+	src/code/title_setup.c \
+	src/code/z_actor.c \
+	src/code/z_actor_dlftbls.c \
+	src/code/z_bgcheck.c \
+	src/code/z_bg_collect.c \
+	src/code/z_bg_item.c \
+	src/code/z_camera.c \
+	src/code/z_common_data.c \
+	src/code/z_collision_check.c \
+	src/code/z_collision_btltbls.c \
+	src/code/z_construct.c \
+	src/code/z_DLF.c \
+	src/code/z_debug_display.c \
+	src/code/z_demo.c \
+	src/code/z_en_a_keep.c \
+	src/code/z_en_item00.c \
+	src/code/z_env_flags.c \
+	src/code/z_elf_message.c \
+	src/code/z_draw.c \
+	src/code/z_eff_blure.c \
+	src/code/z_eff_shield_particle.c \
+	src/code/z_eff_spark.c \
+	src/code/z_eff_ss_dead.c \
+	src/code/z_effect.c \
+	src/code/z_effect_soft_sprite.c \
+	src/code/z_effect_soft_sprite_dlftbls.c \
+	src/code/z_effect_soft_sprite_old_init.c \
+	src/code/z_fbdemo.c \
+	src/code/z_fbdemo_circle.c \
+	src/code/z_fbdemo_fade.c \
+	src/code/z_fbdemo_triforce.c \
+	src/code/z_fbdemo_wipe1.c \
+	src/code/z_frame_advance.c \
+	src/code/z_face_reaction.c \
+	src/code/z_fcurve_data.c \
+	src/code/z_fcurve_data_skelanime.c \
+	src/code/z_game_over.c \
+	src/code/z_horse.c \
+	src/code/z_inventory.c \
+	src/code/z_jpeg.c \
+	src/code/z_kaleido_manager.c \
+	src/code/z_kaleido_scope_call.c \
+	src/code/z_kaleido_setup.c \
+	src/code/z_kankyo.c \
+	src/code/z_kanfont.c \
+	src/code/z_lib.c \
+	src/code/z_lifemeter.c \
+	src/code/z_lights.c \
+	src/code/z_malloc.c \
+	src/code/z_map_data.c \
+	src/code/z_map_exp.c \
+	src/code/z_map_mark.c \
+	src/code/z_memory_utils.c \
+	src/code/z_message.c \
+	src/code/z_olib.c \
+	src/code/z_onepointdemo.c \
+	src/code/z_parameter.c \
+	src/code/z_path.c \
+	src/code/z_player_call.c \
+	src/code/z_player_lib.c \
+	src/code/z_play.c \
+	src/code/z_prenmi_buff.c \
+	src/code/z_quake.c \
+	src/code/z_rcp.c \
+	src/code/z_rumble.c \
+	src/code/z_room.c \
+	src/code/z_scene.c \
+	src/code/z_scene_table.c \
+	src/code/z_skin.c \
+	src/code/z_skin_awb.c \
+	src/code/z_skin_matrix.c \
+	src/code/z_skelanime.c \
+	src/code/z_sfx_source.c \
+	src/code/z_sram.c \
+	src/code/sys_rumble.c \
+	src/code/z_vimode.c \
+	src/code/z_view.c \
+	src/code/z_vismono.c \
+	src/code/z_viszbuf.c \
+	src/code/z_viscvg.c \
+	src/code/z_vr_box.c \
+	src/code/z_vr_box_draw.c \
+	src/elf_message/elf_message_field.c \
+	src/elf_message/elf_message_ydan.c \
+	src/libc64/__osMalloc_gc.c \
+	src/libc64/aprintf.c \
+	src/libc64/math64.c \
+	src/libc64/malloc.c \
+	src/libc64/qrand.c \
+	src/libc64/sleep.c \
+	src/libu64/gfxprint.c \
+	src/libu64/loadfragment2_n64.c \
+	src/libu64/mtxuty-cvt.c \
+	src/libu64/pad.c \
+	src/libu64/runtime.c \
+	src/libultra/gu/coss.c \
+	src/libultra/gu/lookat.c \
+	src/libultra/gu/lookathil.c \
+	src/libultra/gu/mtxutil.c \
+	src/libultra/gu/normalize.c \
+	src/libultra/gu/ortho.c \
+	src/libultra/gu/perspective.c \
+	src/libultra/gu/rotate.c \
+	src/libultra/gu/scale.c \
+	src/libultra/gu/sins.c \
+	src/libultra/gu/translate.c \
+	src/libultra/gu/us2dex.c \
+	src/libultra/libc/xldtob.c \
+	src/libultra/libc/xlitob.c \
+	src/libultra/libc/xprintf.c \
+	$(PSP_PORT_ACTOR_SOURCES) \
+	$(PSP_PORT_EFFECT_SOURCES) \
+	$(PSP_PORT_KALEIDO_SOURCES) \
+	src/overlays/gamestates/ovl_file_choose/z_file_choose.c \
+	src/overlays/gamestates/ovl_file_choose/z_file_copy_erase.c \
+	src/overlays/gamestates/ovl_file_choose/z_file_nameset.c \
+	src/overlays/gamestates/ovl_file_choose/z_file_nameset_data.c \
+	src/overlays/gamestates/ovl_opening/z_opening.c \
+	src/overlays/gamestates/ovl_select/z_select.c \
+	src/overlays/gamestates/ovl_title/z_title.c \
+	src/overlays/misc/ovl_map_mark_data/z_map_mark_data.c \
+	src/port/psp/gfx/gfx_cc.c \
+	src/port/psp/gfx/gfx_fast3d.c \
+	src/port/psp/gfx/gfx_scegu.c \
+	src/port/psp/gfx/gfx_window_psp.c \
+	src/port/psp/gfx/psp_texture_manager.c \
+	src/port/psp/oot_psp_asset_loader.c \
+	src/port/psp/oot_psp_audio.c \
+	src/port/psp/oot_psp_game.c \
+	src/port/psp/oot_psp_renderer.c \
+	src/port/psp/sys_ucode_psp.c \
+	src/port/psp/libultra_psp.c \
+	src/port/psp/sched_psp.c
+
+PSP_PORT_ASSET_SOURCES := \
+	$(PSP_PORT_ROOT_ASSET_SOURCES) \
+	$(PSP_PORT_ROOT_TEXTURE_SOURCES) \
+	$(PSP_PORT_TEXT_ASSET_SOURCES) \
+	$(PSP_PORT_EXTRACTED_OBJECT_SOURCES) \
+	$(PSP_PORT_EXTRACTED_SCENE_SOURCES) \
+	$(PSP_PORT_EXTRACTED_TEXTURE_SOURCES) \
+	$(PSP_PORT_EXTRACTED_MISC_SOURCES)
+
+PSP_PORT_PROBE_SOURCE := src/port/psp/oot_psp_probe.c
+
+PSP_PORT_SETUP_STAMP := $(PSP_PORT_BUILD_DIR)/setup.stamp
+PSP_PORT_BASEROM := $(BASEROM_DIR)/baserom-decompressed.z64
+PSP_PORT_ROMINFO_SOURCE := $(PSP_PORT_BUILD_DIR)/oot_psp_rominfo.c
+PSP_PORT_ROMINFO_OBJECT := $(PSP_PORT_BUILD_DIR)/oot_psp_rominfo.o
+PSP_PORT_ASSET_TABLE_SOURCE := $(PSP_PORT_BUILD_DIR)/oot_psp_asset_tables.c
+PSP_PORT_ASSET_TABLE_OBJECT := $(PSP_PORT_BUILD_DIR)/oot_psp_asset_tables.o
+PSP_PORT_ASSET_SEGMENT_SOURCE := $(PSP_PORT_BUILD_DIR)/oot_psp_asset_segments.S
+PSP_PORT_ASSET_SEGMENT_TABLE_SOURCE := $(PSP_PORT_BUILD_DIR)/oot_psp_asset_segments.c
+PSP_PORT_ASSET_SEGMENT_STAMP := $(PSP_PORT_BUILD_DIR)/oot_psp_asset_segments.stamp
+PSP_PORT_ASSET_SEGMENT_DATA_DIR := $(PSP_PORT_BUILD_DIR)/data/segments
+PSP_PORT_ASSET_SEGMENT_DATA_STAMP := $(PSP_PORT_ASSET_SEGMENT_DATA_DIR)/.stamp
+PSP_PORT_ASSET_SEGMENT_OBJECT := $(PSP_PORT_BUILD_DIR)/oot_psp_asset_segments.o
+PSP_PORT_ASSET_SEGMENT_TABLE_OBJECT := $(PSP_PORT_BUILD_DIR)/oot_psp_asset_segments_table.o
+PSP_PORT_RUNTIME_OBJECTS := $(patsubst %.c,$(PSP_PORT_BUILD_DIR)/%.o,$(PSP_PORT_RUNTIME_SOURCES))
+PSP_PORT_RUNTIME_ASM_OBJECTS := $(patsubst %.s,$(PSP_PORT_BUILD_DIR)/%.o,$(PSP_PORT_RUNTIME_ASM_SOURCES))
+PSP_PORT_ASSET_OBJECTS := $(patsubst %.c,$(PSP_PORT_BUILD_DIR)/%.o,$(PSP_PORT_ASSET_SOURCES))
+PSP_PORT_PROBE_OBJECT := $(PSP_PORT_BUILD_DIR)/$(PSP_PORT_PROBE_SOURCE:.c=.o)
+PSP_PORT_LIBRARY := $(PSP_PORT_BUILD_DIR)/liboot_psp_platform.a
+PSP_PORT_ELF := $(PSP_PORT_BUILD_DIR)/oot-psp-port.elf
+PSP_PORT_PRX := $(PSP_PORT_BUILD_DIR)/oot-psp-port.prx
+PSP_PORT_PBP := $(PSP_PORT_BUILD_DIR)/EBOOT.PBP
+
+$(PSP_PORT_BUILD_DIR)/assets/text/jpn_message_data_static.o: $(BUILD_DIR)/assets/text/message_data.enc.jpn.h
+$(PSP_PORT_BUILD_DIR)/assets/text/nes_message_data_static.o: $(BUILD_DIR)/assets/text/message_data.enc.nes.h
+$(PSP_PORT_BUILD_DIR)/assets/text/ger_message_data_static.o: $(BUILD_DIR)/assets/text/message_data.enc.nes.h
+$(PSP_PORT_BUILD_DIR)/assets/text/fra_message_data_static.o: $(BUILD_DIR)/assets/text/message_data.enc.nes.h
+$(PSP_PORT_BUILD_DIR)/assets/text/staff_message_data_static.o: $(BUILD_DIR)/assets/text/message_data_staff.enc.nes.h
+
+PSP_PORT_EXTRACTED_ASSET_FILES := \
+	$(EXTRACTED_DIR)/assets/objects/object_timeblock/gSongOfTimeBlockDL.inc.c \
+	$(EXTRACTED_DIR)/assets/objects/object_timeblock/gSongOfTimeBlockVtx.inc.c \
+	$(EXTRACTED_DIR)/assets/objects/object_timeblock/gSongOfTimeBlockTex.i4.png \
+	$(EXTRACTED_DIR)/assets/textures/nintendo_rogo_static/nintendo_rogo_static.c \
+	$(EXTRACTED_DIR)/assets/textures/nintendo_rogo_static/nintendo_rogo_static.h \
+	$(EXTRACTED_DIR)/assets/textures/nintendo_rogo_static/gNintendo64LogoDL.inc.c \
+	$(EXTRACTED_DIR)/assets/textures/nintendo_rogo_static/gNintendo64LogoVtx.inc.c \
+	$(EXTRACTED_DIR)/assets/textures/nintendo_rogo_static/nintendo_rogo_static_Tex_000000.i8.png \
+	$(EXTRACTED_DIR)/assets/textures/nintendo_rogo_static/nintendo_rogo_static_Tex_001800.i8.png
+
+PSP_PORT_GENERATED_ASSET_FILES := \
+	$(BUILD_DIR)/assets/objects/gameplay_dangeon_keep/gameplay_dangeon_keep_000000_Tex.i8.inc.c \
+	$(BUILD_DIR)/assets/objects/gameplay_dangeon_keep/gameplay_dangeon_keep_000200_Tex.i8.inc.c \
+	$(BUILD_DIR)/assets/objects/gameplay_dangeon_keep/gameplay_dangeon_keep_0005C0_Tex.rgba16.inc.c \
+	$(BUILD_DIR)/assets/objects/gameplay_dangeon_keep/gameplay_dangeon_keep_001280_Tex.rgba16.inc.c \
+	$(BUILD_DIR)/assets/objects/gameplay_dangeon_keep/gDoorChainTex.rgba16.inc.c \
+	$(BUILD_DIR)/assets/objects/gameplay_dangeon_keep/gPushBlockBaseTex.i4.inc.c \
+	$(BUILD_DIR)/assets/objects/gameplay_dangeon_keep/gPushBlockGrayTex.i4.inc.c \
+	$(BUILD_DIR)/assets/objects/gameplay_dangeon_keep/gPushBlockSilverTex.i4.inc.c \
+	$(BUILD_DIR)/assets/objects/gameplay_dangeon_keep/gUnusedGoldLockTex.rgba16.inc.c \
+	$(BUILD_DIR)/assets/objects/gameplay_dangeon_keep/gUnusedStoneTex.rgba16.inc.c \
+	$(BUILD_DIR)/assets/objects/object_bdoor/gBossDoorDefaultTex.rgba16.inc.c \
+	$(BUILD_DIR)/assets/objects/object_bdoor/gBossDoorFireTex.rgba16.inc.c \
+	$(BUILD_DIR)/assets/objects/object_bdoor/gBossDoorForestTex.rgba16.inc.c \
+	$(BUILD_DIR)/assets/objects/object_bdoor/gBossDoorGanonsCastleTex.rgba16.inc.c \
+	$(BUILD_DIR)/assets/objects/object_bdoor/gBossDoorShadowTex.rgba16.inc.c \
+	$(BUILD_DIR)/assets/objects/object_bdoor/gBossDoorSpiritTex.rgba16.inc.c \
+	$(BUILD_DIR)/assets/objects/object_bdoor/gBossDoorWaterTex.rgba16.inc.c \
+	$(BUILD_DIR)/assets/objects/object_timeblock/gSongOfTimeBlockTex.i4.inc.c \
+	$(BUILD_DIR)/assets/textures/nintendo_rogo_static/nintendo_rogo_static_Tex_000000.i8.inc.c \
+	$(BUILD_DIR)/assets/textures/nintendo_rogo_static/nintendo_rogo_static_Tex_001800.i8.inc.c
+
+PSP_PORT_DEFINES := \
+	-D_LANGUAGE_C \
+	-DNON_MATCHING \
+	-DAVOID_UB \
+	-DDEBUG_FEATURES=$(DEBUG_FEATURES) \
+	-DOOT_VERSION=$(VERSION_MACRO) \
+	-DOOT_REVISION=$(REVISION) \
+	-DOOT_REGION=REGION_$(REGION) \
+	-DLIBULTRA_VERSION=LIBULTRA_VERSION_L \
+	-DLIBULTRA_PATCH=0 \
+	-DPLATFORM_PSP=1 \
+	-DPLATFORM_N64=0 \
+	-DPLATFORM_GC=0 \
+	-DPLATFORM_IQUE=0 \
+	-DF3DEX_GBI_2 \
+	-DF3DEX_GBI_PL \
+	-DGBI_DOWHILE \
+	-DTARGET_PSP=1 \
+	-D_PSP_FW_VERSION=500
+PSP_PORT_ASM_DEFINES := $(filter-out -D_LANGUAGE_C,$(PSP_PORT_DEFINES))
+
+PSP_PORT_INCLUDES := \
+	-Iinclude \
+	-Iinclude/libc \
+	-Isrc \
+	-I$(BUILD_DIR) \
+	-I. \
+	-I$(EXTRACTED_DIR) \
+	-Isrc/port/psp \
+	-Isrc/port/psp/gfx \
+	-I$(PSP_PORT_PSPSDK)/include \
+	-I$(PSP_PORT_PREFIX)/include
+
+PSP_PORT_CFLAGS := -G0 -O2 -g3 -Wall -Wextra -Wno-format-security -Wno-unused-parameter -Wno-unused-variable \
+	-Wno-missing-braces \
+	-Wno-int-to-pointer-cast -Wno-pointer-to-int-cast -fno-strict-aliasing -fwrapv -fno-common -fsigned-char \
+	-ffunction-sections -fdata-sections -include src/port/psp/oot_psp_compat.h \
+	$(PSP_PORT_DEFINES) $(PSP_PORT_INCLUDES)
+
+PSP_PORT_LDFLAGS := -specs=$(PSP_PORT_PSPSDK)/lib/prxspecs -Wl,-q,-T$(PSP_PORT_PSPSDK)/lib/linkfile.prx \
+	-Wl,-zmax-page-size=128 -Wl,-u,module_info $(PSP_PORT_PSPSDK)/lib/prxexports.o -L$(PSP_PORT_PSPSDK)/lib -L$(PSP_PORT_PREFIX)/lib -lpspgu -lpspgum \
+	-lpspdisplay -lpspge -lpspctrl -lpsprtc -lpsppower -lpspdebug -lpspsdk -lpspuser -lm -lc
+
+psp-port: $(PSP_PORT_PBP) $(PSP_PORT_ASSET_SEGMENT_DATA_STAMP)
+	@echo "PSP port is up to date: $(PSP_PORT_PBP)"
+
+$(PSP_PORT_BUILD_DIR)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(PSP_PORT_CC) -c $(PSP_PORT_CFLAGS) -o $@ $<
+
+$(PSP_PORT_BUILD_DIR)/%.o: %.s
+	@mkdir -p $(dir $@)
+	$(PSP_PORT_CC) -c -x assembler-with-cpp $(PSP_PORT_ASM_DEFINES) $(PSP_PORT_INCLUDES) -Wa,-I$(EXTRACTED_DIR) -o $@ $<
+
+$(PSP_PORT_RUNTIME_OBJECTS) $(PSP_PORT_ASSET_OBJECTS): include/command_macros_base.h include/cutscene_commands.h include/scene.h
+
+$(PSP_PORT_SETUP_STAMP): $(BASEROM_DIR)/baserom.z64
+	@mkdir -p $(dir $@)
+	$(MAKE) -C tools
+	$(PYTHON) tools/decompress_baserom.py $(VERSION)
+	$(PYTHON) tools/extract_baserom.py $(PSP_PORT_BASEROM) $(EXTRACTED_DIR)/baserom -v $(VERSION)
+	$(PYTHON) -m tools.assets.extract $(EXTRACTED_DIR)/baserom $(EXTRACTED_DIR) -v $(VERSION) -j$(N_THREADS)
+	$(PYTHON) tools/extract_incbins.py $(EXTRACTED_DIR)/baserom $(EXTRACTED_DIR)/incbin -v $(VERSION)
+	$(PYTHON) tools/extract_text.py $(EXTRACTED_DIR)/baserom $(EXTRACTED_DIR)/text -v $(VERSION)
+	$(PYTHON) tools/extract_audio.py -b $(EXTRACTED_DIR)/baserom -o $(EXTRACTED_DIR) -v $(VERSION) --read-xml
+	@touch $@
+
+$(PSP_PORT_BASEROM): $(PSP_PORT_SETUP_STAMP)
+	@:
+
+$(PSP_PORT_ROMINFO_SOURCE): $(PSP_PORT_BASEROM) tools/psp_port_rom_info.py
+	$(PYTHON) tools/psp_port_rom_info.py $< $@
+
+$(PSP_PORT_ROMINFO_OBJECT): $(PSP_PORT_ROMINFO_SOURCE)
+	@mkdir -p $(dir $@)
+	$(PSP_PORT_CC) -c $(PSP_PORT_CFLAGS) -o $@ $<
+
+$(PSP_PORT_ASSET_TABLE_SOURCE): $(PSP_PORT_SETUP_STAMP) tools/psp_port_asset_tables.py include/tables/object_table.h include/tables/scene_table.h include/segment_symbols.h
+	$(PYTHON) tools/psp_port_asset_tables.py $(VERSION) $@
+
+$(PSP_PORT_ASSET_TABLE_OBJECT): $(PSP_PORT_ASSET_TABLE_SOURCE)
+	@mkdir -p $(dir $@)
+	$(PSP_PORT_CC) -c $(PSP_PORT_CFLAGS) -o $@ $<
+
+$(PSP_PORT_ASSET_SEGMENT_STAMP): $(PSP_PORT_SETUP_STAMP) tools/psp_port_asset_segments.py include/segment_symbols.h
+	$(PYTHON) tools/psp_port_asset_segments.py $(VERSION) $(PSP_PORT_ASSET_SEGMENT_SOURCE) $(PSP_PORT_ASSET_SEGMENT_TABLE_SOURCE) $(PSP_PORT_ASSET_SEGMENT_DATA_DIR)
+	@touch $@
+
+$(PSP_PORT_ASSET_SEGMENT_SOURCE) $(PSP_PORT_ASSET_SEGMENT_TABLE_SOURCE): $(PSP_PORT_ASSET_SEGMENT_STAMP)
+	@:
+
+$(PSP_PORT_ASSET_SEGMENT_DATA_STAMP): $(PSP_PORT_ASSET_SEGMENT_STAMP)
+	@touch $@
+
+$(PSP_PORT_ASSET_SEGMENT_OBJECT): $(PSP_PORT_ASSET_SEGMENT_SOURCE)
+	@mkdir -p $(dir $@)
+	$(PSP_PORT_CC) -c -x assembler-with-cpp $(PSP_PORT_DEFINES) $(PSP_PORT_INCLUDES) -o $@ $<
+
+$(PSP_PORT_ASSET_SEGMENT_TABLE_OBJECT): $(PSP_PORT_ASSET_SEGMENT_TABLE_SOURCE)
+	@mkdir -p $(dir $@)
+	$(PSP_PORT_CC) -c $(PSP_PORT_CFLAGS) -o $@ $<
+
+$(PSP_PORT_EXTRACTED_ASSET_FILES): $(PSP_PORT_SETUP_STAMP)
+	@test -f $@
+
+$(PSP_PORT_ASSET_OBJECTS): $(PSP_PORT_SETUP_STAMP) $(PSP_PORT_EXTRACTED_ASSET_FILES) $(PSP_PORT_GENERATED_ASSET_FILES)
+
+$(PSP_PORT_LIBRARY): $(PSP_PORT_RUNTIME_OBJECTS) $(PSP_PORT_RUNTIME_ASM_OBJECTS) $(PSP_PORT_ASSET_OBJECTS) $(PSP_PORT_ROMINFO_OBJECT) $(PSP_PORT_ASSET_TABLE_OBJECT) $(PSP_PORT_ASSET_SEGMENT_OBJECT) $(PSP_PORT_ASSET_SEGMENT_TABLE_OBJECT)
+	@mkdir -p $(dir $@)
+	$(file >$@.rsp,$^)
+	$(RM) $@
+	$(PSP_PORT_AR) rcs $@ @$@.rsp
+
+$(PSP_PORT_ELF): $(PSP_PORT_LIBRARY) $(PSP_PORT_PROBE_OBJECT)
+	@mkdir -p $(dir $@)
+	$(PSP_PORT_CC) -o $@ $(PSP_PORT_PROBE_OBJECT) $(PSP_PORT_LIBRARY) $(PSP_PORT_LDFLAGS)
+	-psp-fixup-imports $@
+
+$(PSP_PORT_PRX): $(PSP_PORT_ELF)
+	psp-prxgen $< $@
+
+$(PSP_PORT_PBP): $(PSP_PORT_PRX)
+	mksfoex -d MEMSIZE=1 "OOT PSP Port" $(PSP_PORT_BUILD_DIR)/PARAM.SFO
+	pack-pbp $@ $(PSP_PORT_BUILD_DIR)/PARAM.SFO NULL NULL NULL NULL NULL $< NULL
+
+psp-port-clean:
+	$(RM) -r $(PSP_PORT_BUILD_DIR)
+
+.PHONY: psp-port psp-port-clean
+
 -include $(DEP_FILES)
 
 # Print target for debugging

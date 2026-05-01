@@ -1,3 +1,12 @@
+#if defined(TARGET_PSP) || defined(PLATFORM_PSP)
+#if !defined(STDDEF_H) || defined(__need_wint_t) || defined(__need_size_t) || defined(__need_ptrdiff_t) || \
+    defined(__need_NULL)
+#if !defined(__need_wint_t) && !defined(__need_size_t) && !defined(__need_ptrdiff_t) && !defined(__need_NULL)
+#define STDDEF_H
+#endif
+#include_next <stddef.h>
+#else
+
 #ifndef STDDEF_H
 #define STDDEF_H
 
@@ -19,6 +28,9 @@ typedef unsigned long   size_t;
 #define offsetof(structure, member) __builtin_offsetof (structure, member)
 #else
 #define offsetof(structure, member) ((size_t)&(((structure*)0)->member))
+#endif
+
+#endif
 #endif
 
 #endif

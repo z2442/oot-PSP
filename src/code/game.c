@@ -408,6 +408,9 @@ void GameState_InitArena(GameState* gameState, size_t size) {
 
     PRINTF(T("ハイラル確保 サイズ＝%u バイト\n", "Hyrule reserved size = %u bytes\n"), size);
     arena = GAME_ALLOC_MALLOC(&gameState->alloc, size, "../game.c", 992);
+#if PLATFORM_PSP
+    osSyncPrintf("oot-psp game arena init request=%lu arena=%p\n", (unsigned long)size, arena);
+#endif
 
     if (arena != NULL) {
         THA_Init(&gameState->tha, arena, size);
@@ -431,6 +434,10 @@ void GameState_Realloc(GameState* gameState, size_t size) {
     GameAlloc_Free(alloc, thaStart);
     PRINTF(T("ハイラル一時解放!!\n", "Hyrule temporarily released!!\n"));
     SystemArena_GetSizes(&systemMaxFree, &systemFree, &systemAlloc);
+#if PLATFORM_PSP
+    osSyncPrintf("oot-psp game realloc request=%lu max=%lu free=%lu alloc=%lu old=%p\n", (unsigned long)size,
+                 (unsigned long)systemMaxFree, (unsigned long)systemFree, (unsigned long)systemAlloc, thaStart);
+#endif
     if ((systemMaxFree - 0x10) < size) {
         PRINTF("%c", BEL);
         PRINTF_COLOR_RED();
@@ -447,6 +454,9 @@ void GameState_Realloc(GameState* gameState, size_t size) {
     gameArena = GAME_ALLOC_MALLOC(alloc, size, "../game.c", 1033);
     if (gameArena != NULL) {
         THA_Init(&gameState->tha, gameArena, size);
+#if PLATFORM_PSP
+        osSyncPrintf("oot-psp game realloc done arena=%p size=%lu\n", gameArena, (unsigned long)size);
+#endif
         PRINTF(T("ハイラル再確保成功\n", "Successful reacquisition of Hyrule\n"));
     } else {
         THA_Init(&gameState->tha, NULL, 0);

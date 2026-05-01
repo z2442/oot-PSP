@@ -2393,6 +2393,34 @@ u32 sCategoryFreezeMasks[ACTORCAT_MAX] = {
     PLAYER_STATE1_TALKING | PLAYER_STATE1_DEAD | PLAYER_STATE1_28,
 };
 
+#if PLATFORM_PSP
+static s32 sOotPspActorUpdateLogCount = 0;
+static s32 sOotPspActorSpawnLogCount = 0;
+
+static void OotPsp_ActorUpdateLog(const char* tag, s32 category, Actor* actor) {
+    if (sOotPspActorUpdateLogCount < 128) {
+        osSyncPrintf("oot-psp actor %s cat=%d id=%04x actor=%08lx objSlot=%d init=%08lx update=%08lx next=%08lx\n",
+                     tag, category, actor->id, (unsigned long)(uintptr_t)actor, actor->objectSlot,
+                     (unsigned long)(uintptr_t)actor->init, (unsigned long)(uintptr_t)actor->update,
+                     (unsigned long)(uintptr_t)actor->next);
+        sOotPspActorUpdateLogCount++;
+    }
+}
+
+static void OotPsp_ActorSpawnLog(const char* tag, s16 actorId, s16 params, s32 objectSlot, Actor* actor,
+                                 ActorProfile* profile) {
+    if (sOotPspActorSpawnLogCount < 128) {
+        osSyncPrintf("oot-psp actor spawn.%s id=%04x params=%04x objSlot=%d actor=%08lx profile=%08lx\n", tag,
+                     (u16)actorId, (u16)params, objectSlot, (unsigned long)(uintptr_t)actor,
+                     (unsigned long)(uintptr_t)profile);
+        sOotPspActorSpawnLogCount++;
+    }
+}
+#else
+#define OotPsp_ActorUpdateLog(tag, category, actor) (void)0
+#define OotPsp_ActorSpawnLog(tag, actorId, params, objectSlot, actor, profile) (void)0
+#endif
+
 void Actor_UpdateAll(PlayState* play, ActorContext* actorCtx) {
     s32 i;
     Actor* actor;
@@ -2506,7 +2534,9 @@ void Actor_UpdateAll(PlayState* play, ActorContext* actorCtx) {
                     if (actor->colorFilterTimer != 0) {
                         actor->colorFilterTimer--;
                     }
+                    OotPsp_ActorUpdateLog("before_update", i, actor);
                     actor->update(actor, play);
+                    OotPsp_ActorUpdateLog("after_update", i, actor);
                     DynaPoly_UnsetAllInteractFlags(play, &play->colCtx.dyna, actor);
                 }
 
@@ -3172,6 +3202,16 @@ Actor* Actor_Spawn(ActorContext* actorCtx, PlayState* play, s16 actorId, f32 pos
     char* name;
     u32 overlaySize;
 
+    OotPsp_ActorSpawnLog("request", actorId, params, -1, NULL, NULL);
+
+#if PLATFORM_PSP
+    if ((actorId < 0) || (actorId >= ACTOR_ID_MAX)) {
+        osSyncPrintf("oot-psp actor spawn invalid id=%d pos=(%.1f %.1f %.1f) params=%04x\n", actorId, posX, posY,
+                     posZ, (u16)params);
+        return NULL;
+    }
+#endif
+
     overlayEntry = &gActorOverlayTable[actorId];
     ASSERT(actorId < ACTOR_ID_MAX, "profile < ACTOR_DLF_MAX", "../z_actor.c", 6883);
 
@@ -3242,7 +3282,16 @@ Actor* Actor_Spawn(ActorContext* actorCtx, PlayState* play, s16 actorId, f32 pos
                                          : NULL);
     }
 
+#if PLATFORM_PSP
+    if (profile == NULL) {
+        osSyncPrintf("oot-psp actor missing profile id=%d pos=(%.1f %.1f %.1f) params=%04x\n", actorId, posX, posY,
+                     posZ, (u16)params);
+        return NULL;
+    }
+#endif
+
     objectSlot = Object_GetSlot(&play->objectCtx, profile->objectId);
+    OotPsp_ActorSpawnLog("profile", actorId, params, objectSlot, NULL, profile);
 
     if ((objectSlot < 0) ||
         ((profile->category == ACTORCAT_ENEMY) && Flags_GetClear(play, play->roomCtx.curRoom.num))) {
@@ -3304,7 +3353,9 @@ Actor* Actor_Spawn(ActorContext* actorCtx, PlayState* play, s16 actorId, f32 pos
     Actor_AddToCategory(actorCtx, actor, profile->category);
 
     temp = gSegments[6];
+    OotPsp_ActorSpawnLog("before_init", actorId, params, objectSlot, actor, profile);
     Actor_Init(actor, play);
+    OotPsp_ActorSpawnLog("done", actorId, params, objectSlot, actor, profile);
     gSegments[6] = temp;
 
     return actor;

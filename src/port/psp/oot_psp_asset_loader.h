@@ -1,0 +1,45 @@
+#ifndef OOT_PSP_ASSET_LOADER_H
+#define OOT_PSP_ASSET_LOADER_H
+
+#include "ultra64.h"
+
+#include <stddef.h>
+#include <stdint.h>
+
+#define OOT_PSP_ASSET_READ_FAILED (-1)
+#define OOT_PSP_ASSET_READ_OK 0
+#define OOT_PSP_ASSET_READ_NOT_EXTERNAL 1
+
+typedef struct OotPspExternalAsset {
+    uintptr_t vromStart;
+    uintptr_t vromEnd;
+    const char* path;
+} OotPspExternalAsset;
+
+typedef struct OotPspMessageEntry {
+    u16 textId;
+    u8 typePos;
+    u8 pad;
+    uintptr_t vromStart;
+    uintptr_t vromEnd;
+} OotPspMessageEntry;
+
+extern const OotPspExternalAsset gOotPspExternalAssets[];
+extern const size_t gOotPspExternalAssetCount;
+extern const OotPspMessageEntry gOotPspJpnMessageEntries[];
+extern const size_t gOotPspJpnMessageEntriesCount;
+extern const OotPspMessageEntry gOotPspNesMessageEntries[];
+extern const size_t gOotPspNesMessageEntriesCount;
+extern const OotPspMessageEntry gOotPspGerMessageEntries[];
+extern const size_t gOotPspGerMessageEntriesCount;
+extern const OotPspMessageEntry gOotPspFraMessageEntries[];
+extern const size_t gOotPspFraMessageEntriesCount;
+extern const OotPspMessageEntry gOotPspStaffMessageEntries[];
+extern const size_t gOotPspStaffMessageEntriesCount;
+
+void OotPsp_AssetInit(const char* executablePath);
+uintptr_t OotPsp_NormalizeVrom(uintptr_t vrom);
+s32 OotPsp_AssetRead(void* ram, uintptr_t vrom, size_t size);
+const OotPspMessageEntry* OotPsp_FindMessageEntry(const OotPspMessageEntry* entries, size_t count, u16 textId);
+
+#endif

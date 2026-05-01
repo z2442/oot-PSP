@@ -51,6 +51,10 @@ static MapMarkDataOverlay sMapMarkDataOvl = {
 static MapMarkData** sLoadedMarkDataTable;
 
 void MapMark_Init(PlayState* play) {
+#if PLATFORM_PSP
+    sMapMarkDataOvl.loadedRamAddr = NULL;
+    sLoadedMarkDataTable = gMapMarkDataTable;
+#else
     MapMarkDataOverlay* overlay = &sMapMarkDataOvl;
     u32 overlaySize = (uintptr_t)overlay->vramEnd - (uintptr_t)overlay->vramStart;
 
@@ -66,6 +70,7 @@ void MapMark_Init(PlayState* play) {
                                ? (void*)((uintptr_t)overlay->vramTable -
                                          (intptr_t)((uintptr_t)overlay->vramStart - (uintptr_t)overlay->loadedRamAddr))
                                : NULL);
+#endif
 
 #if PLATFORM_N64
     if ((B_80121220 != NULL) && (B_80121220->unk_2C != NULL)) {

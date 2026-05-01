@@ -83,6 +83,29 @@ void Play_SpawnScene(PlayState* this, s32 sceneId, s32 spawn);
 #define PLAY_LOG(line) (void)0
 #endif
 
+#if PLATFORM_PSP
+#define OOT_PSP_PLAY_INIT_LOG(tag)                                                                                 \
+    osSyncPrintf("oot-psp play init.%s entrance=%04x mode=%d cutscene=%04x layer=%d\n", tag,                       \
+                 gSaveContext.save.entranceIndex, gSaveContext.gameMode, gSaveContext.save.cutsceneIndex,          \
+                 gSaveContext.sceneLayer)
+
+static void OotPsp_PlayStateLog(const char* tag, PlayState* play) {
+    osSyncPrintf("oot-psp play %s scene=%d room=%d roomSeg=%08lx player=%08lx trans=%d/%d/%d cs=%d/%u "
+                 "flags=%d/%d fill=%d/%d frames=%u objs=%d\n",
+                 tag, play->sceneId, play->roomCtx.curRoom.num,
+                 (unsigned long)(uintptr_t)play->roomCtx.curRoom.segment,
+                 (unsigned long)(uintptr_t)GET_PLAYER(play), play->transitionMode, play->transitionTrigger,
+                 play->transitionType, play->csCtx.state, (unsigned int)play->csCtx.curFrame,
+                 CutsceneFlags_Get(play, 3), CutsceneFlags_Get(play, 4), play->envCtx.fillScreen,
+                 play->envCtx.screenFillColor[3], (unsigned int)play->gameplayFrames, play->objectCtx.numEntries);
+}
+
+#define OOT_PSP_PLAY_STATE_LOG(tag, play) OotPsp_PlayStateLog(tag, play)
+#else
+#define OOT_PSP_PLAY_INIT_LOG(tag) (void)0
+#define OOT_PSP_PLAY_STATE_LOG(tag, play) (void)0
+#endif
+
 void Play_RequestViewpointBgCam(PlayState* this) {
     Camera_RequestBgCam(GET_ACTIVE_CAM(this), this->viewpoint - 1);
 }
@@ -297,6 +320,8 @@ void Play_Init(GameState* thisx) {
     u8 baseSceneLayer;
     s32 pad[2];
 
+    OOT_PSP_PLAY_INIT_LOG("enter");
+
     if (gSaveContext.save.entranceIndex == ENTR_LOAD_OPENING) {
         gSaveContext.save.entranceIndex = 0;
         this->state.running = false;
@@ -309,6 +334,7 @@ void Play_Init(GameState* thisx) {
 #endif
 
     GameState_Realloc(&this->state, 0x1D4790);
+    OOT_PSP_PLAY_INIT_LOG("after_realloc");
 
 #if PLATFORM_N64
     if ((B_80121220 != NULL) && (B_80121220->unk_10 != NULL)) {
@@ -342,6 +368,7 @@ void Play_Init(GameState* thisx) {
     Sram_Init(&this->state, &this->sramCtx);
     Regs_InitData(this);
     Message_Init(this);
+    OOT_PSP_PLAY_INIT_LOG("after_message");
     GameOver_Init(this);
     SfxSource_InitAll(this);
     Effect_InitContext(this);
@@ -402,9 +429,11 @@ void Play_Init(GameState* thisx) {
         gSaveContext.sceneLayer = GET_EVENTCHKINF(EVENTCHKINF_48) ? 3 : 2;
     }
 
+    OOT_PSP_PLAY_INIT_LOG("before_spawn_scene");
     Play_SpawnScene(
         this, gEntranceTable[((void)0, gSaveContext.save.entranceIndex) + ((void)0, gSaveContext.sceneLayer)].sceneId,
         gEntranceTable[((void)0, gSaveContext.save.entranceIndex) + ((void)0, gSaveContext.sceneLayer)].spawn);
+    OOT_PSP_PLAY_INIT_LOG("after_spawn_scene");
 
     PRINTF("\nSCENE_NO=%d COUNTER=%d\n", ((void)0, gSaveContext.save.entranceIndex), gSaveContext.sceneLayer);
 
@@ -430,6 +459,7 @@ void Play_Init(GameState* thisx) {
 
     KaleidoScopeCall_Init(this);
     Interface_Init(this);
+    OOT_PSP_PLAY_INIT_LOG("after_interface");
 
     if (gSaveContext.nextDayTime != NEXT_TIME_NONE) {
         if (gSaveContext.nextDayTime == NEXT_TIME_DAY) {
@@ -464,6 +494,7 @@ void Play_Init(GameState* thisx) {
     this->unk_11E16 = 0xFF;
     this->bgCoverAlpha = 0;
     this->haltAllActors = false;
+    OOT_PSP_PLAY_STATE_LOG("init.after_prerender", this);
 
     if (gSaveContext.gameMode != GAMEMODE_TITLE_SCREEN) {
         if (gSaveContext.nextTransitionType == TRANS_NEXT_TYPE_DEFAULT) {
@@ -485,6 +516,7 @@ void Play_Init(GameState* thisx) {
     VisMono_Init(&gPlayVisMono);
     gVisMonoColor.a = 0;
     CutsceneFlags_UnsetAll(this);
+    OOT_PSP_PLAY_STATE_LOG("init.after_transition_setup", this);
 
     PRINTF("ZELDA ALLOC SIZE=%x\n", THA_GetRemaining(&this->state.tha));
     zAllocSize = THA_GetRemaining(&this->state.tha);
@@ -498,16 +530,21 @@ void Play_Init(GameState* thisx) {
     Fault_AddClient(&D_801614B8, ZeldaArena_Display, NULL, NULL);
 #endif
 
+    OOT_PSP_PLAY_STATE_LOG("init.before_actor", this);
     Actor_InitContext(this, &this->actorCtx, this->playerEntry);
+    OOT_PSP_PLAY_STATE_LOG("init.after_actor", this);
 
     // Busyloop until the room loads
+    OOT_PSP_PLAY_STATE_LOG("init.before_room", this);
     while (!Room_ProcessRoomRequest(this, &this->roomCtx)) {
         ; // Empty Loop
     }
+    OOT_PSP_PLAY_STATE_LOG("init.after_room", this);
 
     player = GET_PLAYER(this);
     Camera_InitDataUsingPlayer(&this->mainCamera, player);
     Camera_RequestMode(&this->mainCamera, CAM_MODE_NORMAL);
+    OOT_PSP_PLAY_STATE_LOG("init.after_camera", this);
 
     playerStartBgCamIndex = PLAYER_GET_START_BG_CAM_INDEX(&player->actor);
 
@@ -528,9 +565,11 @@ void Play_Init(GameState* thisx) {
     Environment_PlaySceneSequence(this);
     gSaveContext.seqId = this->sceneSequences.seqId;
     gSaveContext.natureAmbienceId = this->sceneSequences.natureAmbienceId;
+    OOT_PSP_PLAY_STATE_LOG("init.after_sequence", this);
     Actor_InitPlayerHorse(this, GET_PLAYER(this));
     AnimTaskQueue_Update(this, &this->animTaskQueue);
     gSaveContext.respawnFlag = 0;
+    OOT_PSP_PLAY_STATE_LOG("init.done", this);
 
 #if DEBUG_FEATURES
     if (R_USE_DEBUG_CUTSCENE) {
@@ -548,8 +587,21 @@ void Play_Init(GameState* thisx) {
 
 void Play_Update(PlayState* this) {
     Input* input = this->state.input;
-    s32 isPaused;
+    s32 isPaused = false;
     s32 pad1;
+#if PLATFORM_PSP
+    s32 ootPspLogUpdate;
+#endif
+
+#if PLATFORM_PSP
+    static s32 sOotPspPlayUpdateLogCount = 0;
+
+    ootPspLogUpdate = sOotPspPlayUpdateLogCount < 20;
+    if (ootPspLogUpdate) {
+        OOT_PSP_PLAY_STATE_LOG("update.enter", this);
+        sOotPspPlayUpdateLogCount++;
+    }
+#endif
 
 #if DEBUG_FEATURES
     if ((SREG(1) < 0) || (DREG(0) != 0)) {
@@ -589,8 +641,18 @@ void Play_Update(PlayState* this) {
     gSegments[4] = OS_K0_TO_PHYSICAL(this->objectCtx.slots[this->objectCtx.mainKeepSlot].segment);
     gSegments[5] = OS_K0_TO_PHYSICAL(this->objectCtx.slots[this->objectCtx.subKeepSlot].segment);
     gSegments[2] = OS_K0_TO_PHYSICAL(this->sceneSegment);
+#if PLATFORM_PSP
+    if (ootPspLogUpdate) {
+        OOT_PSP_PLAY_STATE_LOG("update.after_segments", this);
+    }
+#endif
 
     if (FrameAdvance_Update(&this->frameAdvCtx, &input[1])) {
+#if PLATFORM_PSP
+        if (ootPspLogUpdate) {
+            OOT_PSP_PLAY_STATE_LOG("update.frame_advance", this);
+        }
+#endif
         if ((this->transitionMode == TRANS_MODE_OFF) && (this->transitionTrigger != TRANS_TRIGGER_OFF)) {
             this->transitionMode = TRANS_MODE_SETUP;
         }
@@ -941,6 +1003,11 @@ void Play_Update(PlayState* this) {
                     break;
             }
         }
+#if PLATFORM_PSP
+        if (ootPspLogUpdate) {
+            OOT_PSP_PLAY_STATE_LOG("update.after_transition", this);
+        }
+#endif
 
         PLAY_LOG(3533);
 
@@ -961,7 +1028,17 @@ void Play_Update(PlayState* this) {
             if (!DEBUG_FEATURES) {}
 
             PLAY_LOG(3561);
+            #if PLATFORM_PSP
+            if (ootPspLogUpdate) {
+                OOT_PSP_PLAY_STATE_LOG("update.before_objects", this);
+            }
+            #endif
             Object_UpdateEntries(&this->objectCtx);
+            #if PLATFORM_PSP
+            if (ootPspLogUpdate) {
+                OOT_PSP_PLAY_STATE_LOG("update.after_objects", this);
+            }
+            #endif
 
             PLAY_LOG(3577);
 
@@ -984,7 +1061,17 @@ void Play_Update(PlayState* this) {
                     }
                 } else {
                     PLAY_LOG(3606);
+                    #if PLATFORM_PSP
+                    if (ootPspLogUpdate) {
+                        OOT_PSP_PLAY_STATE_LOG("update.before_room", this);
+                    }
+                    #endif
                     Room_ProcessRoomRequest(this, &this->roomCtx);
+                    #if PLATFORM_PSP
+                    if (ootPspLogUpdate) {
+                        OOT_PSP_PLAY_STATE_LOG("update.after_room", this);
+                    }
+                    #endif
 
                     PLAY_LOG(3612);
                     CollisionCheck_AT(this, &this->colChkCtx);
@@ -1001,14 +1088,34 @@ void Play_Update(PlayState* this) {
                     PLAY_LOG(3637);
 
                     if (!this->haltAllActors) {
+                        #if PLATFORM_PSP
+                        if (ootPspLogUpdate) {
+                            OOT_PSP_PLAY_STATE_LOG("update.before_actors", this);
+                        }
+                        #endif
                         Actor_UpdateAll(this, &this->actorCtx);
+                        #if PLATFORM_PSP
+                        if (ootPspLogUpdate) {
+                            OOT_PSP_PLAY_STATE_LOG("update.after_actors", this);
+                        }
+                        #endif
                     }
 
                     PLAY_LOG(3643);
                     Cutscene_UpdateManual(this, &this->csCtx);
 
                     PLAY_LOG(3648);
+                    #if PLATFORM_PSP
+                    if (ootPspLogUpdate) {
+                        OOT_PSP_PLAY_STATE_LOG("update.before_cutscene", this);
+                    }
+                    #endif
                     Cutscene_UpdateScripted(this, &this->csCtx);
+                    #if PLATFORM_PSP
+                    if (ootPspLogUpdate) {
+                        OOT_PSP_PLAY_STATE_LOG("update.after_cutscene", this);
+                    }
+                    #endif
 
                     PLAY_LOG(3651);
                     Effect_UpdateAll(this);
@@ -1072,7 +1179,17 @@ void Play_Update(PlayState* this) {
             Interface_Update(this);
 
             PLAY_LOG(3765);
+            #if PLATFORM_PSP
+            if (ootPspLogUpdate) {
+                OOT_PSP_PLAY_STATE_LOG("update.before_anim_tasks", this);
+            }
+            #endif
             AnimTaskQueue_Update(this, &this->animTaskQueue);
+            #if PLATFORM_PSP
+            if (ootPspLogUpdate) {
+                OOT_PSP_PLAY_STATE_LOG("update.after_anim_tasks", this);
+            }
+            #endif
 
             PLAY_LOG(3771);
             SfxSource_UpdateAll(this);
@@ -1115,6 +1232,11 @@ skip:
     PLAY_LOG(3816);
     Environment_Update(this, &this->envCtx, &this->lightCtx, &this->pauseCtx, &this->msgCtx, &this->gameOverCtx,
                        this->state.gfxCtx);
+#if PLATFORM_PSP
+    if (ootPspLogUpdate) {
+        OOT_PSP_PLAY_STATE_LOG("update.done", this);
+    }
+#endif
 }
 
 void Play_DrawOverlayElements(PlayState* this) {
@@ -1141,6 +1263,15 @@ void Play_Draw(PlayState* this) {
     GraphicsContext* gfxCtx = this->state.gfxCtx;
     Lights* sp228;
     Vec3f sp21C;
+
+#if PLATFORM_PSP
+    static s32 sOotPspPlayDrawLogCount = 0;
+
+    if (sOotPspPlayDrawLogCount < 20) {
+        OOT_PSP_PLAY_STATE_LOG("draw.enter", this);
+        sOotPspPlayDrawLogCount++;
+    }
+#endif
 
     OPEN_DISPS(gfxCtx, "../z_play.c", 3907);
 
@@ -1517,11 +1648,27 @@ f32 func_800BFCB8(PlayState* this, MtxF* mf, Vec3f* pos) {
     return floorY;
 }
 
+static u32 Play_GetRomFileSize(RomFile* file) {
+#if PLATFORM_PSP
+    if ((file->vromStart != 0) && (file->vromEnd == 0)) {
+        return 0;
+    }
+#endif
+
+    return file->vromEnd - file->vromStart;
+}
+
 void* Play_LoadFile(PlayState* this, RomFile* file) {
     u32 size;
     void* allocp;
 
-    size = file->vromEnd - file->vromStart;
+#if PLATFORM_PSP
+    if ((file->vromStart != 0) && (file->vromEnd == 0)) {
+        return (void*)file->vromStart;
+    }
+#endif
+
+    size = Play_GetRomFileSize(file);
     allocp = GAME_STATE_ALLOC(&this->state, size, "../z_play.c", 4692);
     DMA_REQUEST_SYNC(allocp, file->vromStart, size, "../z_play.c", 4694);
 
@@ -1588,7 +1735,7 @@ void Play_SpawnScene(PlayState* this, s32 sceneId, s32 spawn) {
     this->sceneId = sceneId;
     this->sceneDrawConfig = scene->drawConfig;
 
-    PRINTF("\nSCENE SIZE %fK\n", (scene->sceneFile.vromEnd - scene->sceneFile.vromStart) / 1024.0f);
+    PRINTF("\nSCENE SIZE %fK\n", Play_GetRomFileSize(&scene->sceneFile) / 1024.0f);
 
 #if PLATFORM_N64
     if ((B_80121220 != NULL) && (scene->unk_12 > 0)) {

@@ -543,6 +543,10 @@ void Matrix_SetTranslateRotateYXZ(f32 translateX, f32 translateY, f32 translateZ
 }
 
 Mtx* Matrix_MtxFToMtx(MtxF* src, Mtx* dest) {
+#if PLATFORM_PSP
+    guMtxF2L(src->mf, dest);
+    return dest;
+#else
     s32 temp;
     u16* m1 = (u16*)&dest->m[0][0];
     u16* m2 = (u16*)&dest->m[2][0];
@@ -611,6 +615,7 @@ Mtx* Matrix_MtxFToMtx(MtxF* src, Mtx* dest) {
     m1[15] = (temp >> 0x10);
     m2[15] = temp & 0xFFFF;
     return dest;
+#endif
 }
 
 #if DEBUG_FEATURES
@@ -683,6 +688,9 @@ void Matrix_MtxFCopy(MtxF* dest, MtxF* src) {
 }
 
 void Matrix_MtxToMtxF(Mtx* src, MtxF* dest) {
+#if PLATFORM_PSP
+    guMtxL2F(dest->mf, src);
+#else
     u16* m1 = (u16*)&src->m[0][0];
     u16* m2 = (u16*)&src->m[2][0];
 
@@ -702,6 +710,7 @@ void Matrix_MtxToMtxF(Mtx* src, MtxF* dest) {
     dest->yw = ((m1[13] << 0x10) | m2[13]) * (1 / 65536.0f);
     dest->zw = ((m1[14] << 0x10) | m2[14]) * (1 / 65536.0f);
     dest->ww = ((m1[15] << 0x10) | m2[15]) * (1 / 65536.0f);
+#endif
 }
 
 void Matrix_MultVec3fExt(Vec3f* src, Vec3f* dest, MtxF* mf) {
