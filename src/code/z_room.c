@@ -694,15 +694,27 @@ u32 Room_SetupFirstRoom(PlayState* play, RoomContext* roomCtx) {
  */
 s32 Room_RequestNewRoom(PlayState* play, RoomContext* roomCtx, s32 roomNum) {
     if (roomCtx->status == 0) {
+#if PLATFORM_PSP
+        RomFile* roomFile;
+#else
         RomFile* roomFile = &play->roomList.romFiles[roomNum];
+#endif
         u32 size;
+
+#if PLATFORM_PSP
+        ASSERT((roomNum >= 0) && (roomNum < play->roomList.count),
+               "read_room_ID < game_play->room_rom_address.num", "../z_room.c", 1009);
+        roomFile = &play->roomList.romFiles[roomNum];
+#endif
 
         roomCtx->prevRoom = roomCtx->curRoom;
         roomCtx->curRoom.num = roomNum;
         roomCtx->curRoom.segment = NULL;
         roomCtx->status = 1;
 
+#if !PLATFORM_PSP
         ASSERT(roomNum < play->roomList.count, "read_room_ID < game_play->room_rom_address.num", "../z_room.c", 1009);
+#endif
 
 #if PLATFORM_PSP
         if ((roomFile->vromStart != 0) && (roomFile->vromEnd == 0)) {

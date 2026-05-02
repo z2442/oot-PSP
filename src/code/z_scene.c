@@ -23,6 +23,7 @@ RomFile sNaviQuestHintFiles[];
 extern u8 gOverworldNaviQuestHints[];
 extern u8 gDungeonNaviQuestHints[];
 void OotPsp_ResolveRoomList(RomFile* roomFiles, s32 count);
+static s32 sStopSceneCommandsAfterAlternateHeader;
 #endif
 
 /**
@@ -219,6 +220,12 @@ void* func_800982FC(ObjectContext* objectCtx, s32 slot, s16 objectId) {
 }
 
 s32 Scene_ExecuteCommands(PlayState* play, SceneCmd* sceneCmd) {
+#if PLATFORM_PSP
+    s32 prevStopSceneCommands = sStopSceneCommandsAfterAlternateHeader;
+
+    sStopSceneCommandsAfterAlternateHeader = 0;
+#endif
+
     while (true) {
         u32 cmdCode = sceneCmd->base.code;
 
@@ -231,6 +238,11 @@ s32 Scene_ExecuteCommands(PlayState* play, SceneCmd* sceneCmd) {
 
         if (cmdCode < ARRAY_COUNT(sSceneCmdHandlers)) {
             sSceneCmdHandlers[cmdCode](play, sceneCmd);
+#if PLATFORM_PSP
+            if (sStopSceneCommandsAfterAlternateHeader) {
+                break;
+            }
+#endif
         } else {
             PRINTF_COLOR_RED();
             PRINTF(T("code の値が異常です\n", "code variable is abnormal\n"));
@@ -239,6 +251,10 @@ s32 Scene_ExecuteCommands(PlayState* play, SceneCmd* sceneCmd) {
 
         sceneCmd++;
     }
+
+#if PLATFORM_PSP
+    sStopSceneCommandsAfterAlternateHeader = prevStopSceneCommands;
+#endif
 
     return 0;
 }
@@ -490,7 +506,11 @@ BAD_RETURN(s32) Scene_CommandAlternateHeaderList(PlayState* play, SceneCmd* cmd)
 
         if (altHeader != NULL) {
             Scene_ExecuteCommands(play, SEGMENTED_TO_VIRTUAL(altHeader));
+#if PLATFORM_PSP
+            sStopSceneCommandsAfterAlternateHeader = true;
+#else
             (cmd + 1)->base.code = SCENE_CMD_ID_END;
+#endif
         } else {
             PRINTF(T("\nげぼはっ！ 指定されたデータがないでええっす！", "\nCoughh! There is no specified dataaaaa!"));
 
@@ -504,7 +524,11 @@ BAD_RETURN(s32) Scene_CommandAlternateHeaderList(PlayState* play, SceneCmd* cmd)
 
                 if (altHeader != NULL) {
                     Scene_ExecuteCommands(play, SEGMENTED_TO_VIRTUAL(altHeader));
+#if PLATFORM_PSP
+                    sStopSceneCommandsAfterAlternateHeader = true;
+#else
                     (cmd + 1)->base.code = SCENE_CMD_ID_END;
+#endif
                 }
             }
         }
