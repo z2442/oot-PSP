@@ -14,6 +14,8 @@
 #include "animation_legacy.h"
 #include "play_state.h"
 
+#include <string.h>
+
 #define ANIM_INTERP 1
 
 s32 LinkAnimation_Loop(PlayState* play, SkelAnime* skelAnime);
@@ -882,13 +884,26 @@ void AnimTaskQueue_AddLoadPlayerFrame(PlayState* play, LinkAnimationHeader* anim
 
     if (task != NULL) {
         LinkAnimationHeader* linkAnimHeader = SEGMENTED_TO_VIRTUAL(animation);
-        s32 pad;
+        size_t frameSize = sizeof(Vec3s) * limbCount + 2;
+        uintptr_t frameOffset = frameSize * frame;
 
         osCreateMesgQueue(&task->data.loadPlayerFrame.msgQueue, &task->data.loadPlayerFrame.msg, 1);
+#if PLATFORM_PSP
+        memcpy(frameTable, (u8*)linkAnimHeader->segment + frameOffset, frameSize);
+        task->data.loadPlayerFrame.req.vromAddr = (uintptr_t)linkAnimHeader->segment + frameOffset;
+        task->data.loadPlayerFrame.req.dramAddr = frameTable;
+        task->data.loadPlayerFrame.req.size = frameSize;
+        task->data.loadPlayerFrame.req.filename = "../z_skelanime.c";
+        task->data.loadPlayerFrame.req.line = 2004;
+        task->data.loadPlayerFrame.req.unk_14 = 0;
+        task->data.loadPlayerFrame.req.notifyQueue = &task->data.loadPlayerFrame.msgQueue;
+        task->data.loadPlayerFrame.req.notifyMsg = NULL;
+        osSendMesg(&task->data.loadPlayerFrame.msgQueue, NULL, OS_MESG_NOBLOCK);
+#else
         DMA_REQUEST_ASYNC(&task->data.loadPlayerFrame.req, frameTable,
-                          LINK_ANIMATION_OFFSET(linkAnimHeader->segment, ((sizeof(Vec3s) * limbCount + 2) * frame)),
-                          sizeof(Vec3s) * limbCount + 2, 0, &task->data.loadPlayerFrame.msgQueue, NULL,
-                          "../z_skelanime.c", 2004);
+                          LINK_ANIMATION_OFFSET(linkAnimHeader->segment, frameOffset), frameSize, 0,
+                          &task->data.loadPlayerFrame.msgQueue, NULL, "../z_skelanime.c", 2004);
+#endif
     }
 }
 

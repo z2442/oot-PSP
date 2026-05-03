@@ -1084,6 +1084,8 @@ Gfx* sBootDListGroups[][2] = {
     { gLinkAdultLeftHoverBootDL, gLinkAdultRightHoverBootDL }, // PLAYER_BOOTS_HOVER
 };
 
+#define PLAYER_FACE_TEXTURE_SEGMENT(texture) SEGMENTED_TO_VIRTUAL(texture)
+
 void Player_DrawImpl(PlayState* play, void** skeleton, Vec3s* jointTable, s32 dListCount, s32 lod, s32 tunic, s32 boots,
                      s32 face, OverrideLimbDrawOpa overrideLimbDraw, PostLimbDrawOpa postLimbDraw, void* data) {
     Color_RGB8* color;
@@ -1096,28 +1098,32 @@ void Player_DrawImpl(PlayState* play, void** skeleton, Vec3s* jointTable, s32 dL
     eyesIndex = (jointTable[22].x & 0xF) - 1;
     mouthIndex = (jointTable[22].x >> 4) - 1;
 
+    if ((face < 0) || (face >= PLAYER_FACE_MAX)) {
+        face = PLAYER_FACE_NEUTRAL;
+    }
+
     OPEN_DISPS(play->state.gfxCtx, "../z_player_lib.c", 1721);
 
-    // If the eyes index provided by the animation is negative, use the value provided by the `face` argument instead
-    if (eyesIndex < 0) {
+    // If the animation does not provide a valid eyes index, use the value provided by the `face` argument instead.
+    if ((eyesIndex < 0) || (eyesIndex >= PLAYER_EYES_MAX)) {
         eyesIndex = sPlayerFaces[face].eyeIndex;
     }
 
 #ifndef AVOID_UB
-    gSPSegment(POLY_OPA_DISP++, 0x08, SEGMENTED_TO_VIRTUAL(sEyeTextures[eyesIndex]));
+    gSPSegment(POLY_OPA_DISP++, 0x08, PLAYER_FACE_TEXTURE_SEGMENT(sEyeTextures[eyesIndex]));
 #else
-    gSPSegment(POLY_OPA_DISP++, 0x08, SEGMENTED_TO_VIRTUAL(sEyeTextures[gSaveContext.save.linkAge][eyesIndex]));
+    gSPSegment(POLY_OPA_DISP++, 0x08, PLAYER_FACE_TEXTURE_SEGMENT(sEyeTextures[gSaveContext.save.linkAge][eyesIndex]));
 #endif
 
-    // If the mouth index provided by the animation is negative, use the value provided by the `face` argument instead
-    if (mouthIndex < 0) {
+    // If the animation does not provide a valid mouth index, use the value provided by the `face` argument instead.
+    if ((mouthIndex < 0) || (mouthIndex >= PLAYER_MOUTH_MAX)) {
         mouthIndex = sPlayerFaces[face].mouthIndex;
     }
 
 #ifndef AVOID_UB
-    gSPSegment(POLY_OPA_DISP++, 0x09, SEGMENTED_TO_VIRTUAL(sMouthTextures[mouthIndex]));
+    gSPSegment(POLY_OPA_DISP++, 0x09, PLAYER_FACE_TEXTURE_SEGMENT(sMouthTextures[mouthIndex]));
 #else
-    gSPSegment(POLY_OPA_DISP++, 0x09, SEGMENTED_TO_VIRTUAL(sMouthTextures[gSaveContext.save.linkAge][mouthIndex]));
+    gSPSegment(POLY_OPA_DISP++, 0x09, PLAYER_FACE_TEXTURE_SEGMENT(sMouthTextures[gSaveContext.save.linkAge][mouthIndex]));
 #endif
 
     color = &sTunicColors[tunic];

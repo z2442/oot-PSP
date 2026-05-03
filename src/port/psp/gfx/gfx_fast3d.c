@@ -57,6 +57,7 @@
 #define MAX_LIGHTS 2
 #define MAX_VERTICES 64
 #define GFX_TLUT_SIZE_BYTES 512
+#define MODELVIEW_STACK_SIZE 11
 
 #define PSP_NATIVE_ADDR_START 0x08800000U
 #define PSP_NATIVE_ADDR_END 0x0C000000U
@@ -73,6 +74,14 @@
 #define GU_PSM_T32		(7) /* Texture */
 extern void gfx_scegu_draw_triangles_2d(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris);
 extern float identity_matrix[4][4];
+
+#if defined(TARGET_PSP)
+struct GfxCmdSnapshot {
+    uintptr_t addr;
+    uint32_t w0;
+    uint32_t w1;
+};
+#endif
 
 struct RGBA {
     uint8_t r, g, b, a;
@@ -138,7 +147,7 @@ struct TriPipelineState {
 } __attribute__((packed, aligned(4)));
 
 static struct RSP {
-    float modelview_matrix_stack[11][4][4]__attribute__((aligned(16)));
+    float modelview_matrix_stack[MODELVIEW_STACK_SIZE][4][4]__attribute__((aligned(16)));
 
     float MP_matrix[4][4] __attribute__((aligned(16)));
     float P_matrix[4][4] __attribute__((aligned(16)));
@@ -159,6 +168,9 @@ static struct RSP {
     } texture_scaling_factor;
 
     void *segments[NUM_SEGMENTS];
+#if defined(TARGET_PSP)
+    struct GfxCmdSnapshot segment_cmd[NUM_SEGMENTS];
+#endif
     
     struct VertexColor loaded_vertices_2D[4];
     struct LoadedVertex loaded_vertices[MAX_VERTICES];
@@ -172,6 +184,9 @@ static struct RDP {
         uint8_t siz;
         uint32_t width;
         uint8_t tile_number;
+#if defined(TARGET_PSP)
+        struct GfxCmdSnapshot image_cmd;
+#endif
     } texture_to_load;
     struct {
         const uint8_t *addr;
@@ -179,6 +194,10 @@ static struct RDP {
         uint32_t source_size_bytes;
         uint32_t row_stride_bytes;
         uint8_t source_nibble_offset;
+#if defined(TARGET_PSP)
+        struct GfxCmdSnapshot image_cmd;
+        struct GfxCmdSnapshot load_cmd;
+#endif
     } loaded_texture[2];
     struct {
         uint8_t fmt;
@@ -222,29 +241,20 @@ static const struct RGBA white_color = {0xff, 0xff, 0xff, 0xff};
 #if defined(TARGET_PSP)
 static uint8_t sInvalidTextureBuf[256] __attribute__((aligned(16))) = { 0xff, 0xff, 0xff, 0xff };
 static uint8_t sInvalidPaletteBuf[512] __attribute__((aligned(16))) = { 0xff, 0xff };
+static struct GfxCmdSnapshot sCurrentCmd;
 
-static void gfx_log_bad_texture_source(int tile, const char* context, const uint8_t* addr, uint32_t sizeBytes) {
-    static s32 sBadTextureSourceLogCount = 0;
-
-    if (sBadTextureSourceLogCount < 16) {
-        printf("oot-psp gfx bad texture source context=%s tile=%d addr=%08lx size=%lu\n", context, tile,
-               (unsigned long)(uintptr_t)addr, (unsigned long)sizeBytes);
-    } else if (sBadTextureSourceLogCount == 16) {
-        printf("oot-psp gfx bad texture source logs suppressed\n");
-    }
-
-    sBadTextureSourceLogCount++;
+static inline bool gfx_addr_is_native(uintptr_t addr) {
+    return (addr >= PSP_NATIVE_ADDR_START) && (addr < PSP_NATIVE_ADDR_END);
 }
 
-static bool gfx_texture_source_is_readable(const uint8_t* addr, uint32_t sizeBytes) {
-    uintptr_t value = (uintptr_t)addr;
+static bool gfx_native_range_contains(uintptr_t value, size_t size) {
     uintptr_t end;
 
-    if (sizeBytes == 0) {
+    if (size == 0) {
         return false;
     }
 
-    end = value + sizeBytes;
+    end = value + size;
     if (end < value) {
         return false;
     }
@@ -252,8 +262,81 @@ static bool gfx_texture_source_is_readable(const uint8_t* addr, uint32_t sizeByt
     return (value >= PSP_NATIVE_ADDR_START) && (end <= PSP_NATIVE_ADDR_END);
 }
 
+static uintptr_t gfx_bswap32(uintptr_t value) {
+    uint32_t v = (uint32_t)value;
+
+    return ((v & 0x000000FFU) << 24) | ((v & 0x0000FF00U) << 8) | ((v & 0x00FF0000U) >> 8) |
+           ((v & 0xFF000000U) >> 24);
+}
+
+static bool gfx_normalize_native_range(uintptr_t value, size_t size, uintptr_t* normalized) {
+    uintptr_t candidates[4];
+    bool allowByteswap = value >= 0x00010000U;
+
+    candidates[0] = value;
+    candidates[1] = value & 0x0FFFFFFFU;
+    candidates[2] = allowByteswap ? gfx_bswap32(value) : 0;
+    candidates[3] = candidates[2] & 0x0FFFFFFFU;
+
+    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+        if (gfx_native_range_contains(candidates[i], size)) {
+            *normalized = candidates[i];
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool gfx_normalize_native_addr(uintptr_t value, uintptr_t* normalized) {
+    return gfx_normalize_native_range(value, 1, normalized);
+}
+
+static void gfx_log_bad_texture_source(int tile, const char* context, const uint8_t* addr, uint32_t sizeBytes) {
+    static s32 sBadTextureSourceLogCount = 0;
+
+    if (sBadTextureSourceLogCount < 16) {
+        const struct GfxCmdSnapshot emptyCmd = { 0 };
+        const struct GfxCmdSnapshot* imageCmd = &rdp.texture_to_load.image_cmd;
+        const struct GfxCmdSnapshot* loadCmd = &emptyCmd;
+
+        if (tile >= 0 && tile < 2) {
+            imageCmd = &rdp.loaded_texture[tile].image_cmd;
+            loadCmd = &rdp.loaded_texture[tile].load_cmd;
+        }
+
+        printf("oot-psp gfx bad texture source context=%s tile=%d addr=%08lx size=%lu cur=%08lx/%08lx/%08lx "
+               "setimg=%08lx/%08lx/%08lx load=%08lx/%08lx/%08lx seg8=%08lx seg9=%08lx segd=%08lx "
+               "seg8cmd=%08lx/%08lx/%08lx seg9cmd=%08lx/%08lx/%08lx\n",
+               context, tile, (unsigned long)(uintptr_t)addr, (unsigned long)sizeBytes,
+               (unsigned long)sCurrentCmd.addr, (unsigned long)sCurrentCmd.w0, (unsigned long)sCurrentCmd.w1,
+               (unsigned long)imageCmd->addr, (unsigned long)imageCmd->w0, (unsigned long)imageCmd->w1,
+               (unsigned long)loadCmd->addr, (unsigned long)loadCmd->w0, (unsigned long)loadCmd->w1,
+               (unsigned long)(uintptr_t)rsp.segments[8], (unsigned long)(uintptr_t)rsp.segments[9],
+               (unsigned long)(uintptr_t)rsp.segments[13],
+               (unsigned long)rsp.segment_cmd[8].addr, (unsigned long)rsp.segment_cmd[8].w0,
+               (unsigned long)rsp.segment_cmd[8].w1, (unsigned long)rsp.segment_cmd[9].addr,
+               (unsigned long)rsp.segment_cmd[9].w0, (unsigned long)rsp.segment_cmd[9].w1);
+    } else if (sBadTextureSourceLogCount == 16) {
+        printf("oot-psp gfx bad texture source logs suppressed\n");
+    }
+
+    sBadTextureSourceLogCount++;
+}
+
+static bool gfx_normalize_texture_source(const uint8_t** addr, uint32_t sizeBytes) {
+    uintptr_t normalized;
+
+    if (gfx_normalize_native_range((uintptr_t)*addr, sizeBytes, &normalized)) {
+        *addr = (const uint8_t*)normalized;
+        return true;
+    }
+
+    return false;
+}
+
 static void gfx_validate_palette_source(const char* context) {
-    if (gfx_texture_source_is_readable(rdp.palette, sizeof(sInvalidPaletteBuf))) {
+    if (gfx_normalize_texture_source(&rdp.palette, sizeof(sInvalidPaletteBuf))) {
         return;
     }
 
@@ -270,7 +353,8 @@ static bool gfx_validate_texture_source(int tile, const char* context) {
     const uint8_t* addr = rdp.loaded_texture[tile].addr;
     uint32_t sizeBytes = gfx_loaded_texture_source_size(tile);
 
-    if (gfx_texture_source_is_readable(addr, sizeBytes)) {
+    if (gfx_normalize_texture_source(&addr, sizeBytes)) {
+        rdp.loaded_texture[tile].addr = addr;
         return true;
     }
 
@@ -346,6 +430,8 @@ static size_t buf_vbo_num_tris;
 
 static struct GfxWindowManagerAPI *gfx_wapi;
 static struct GfxRenderingAPI *gfx_rapi;
+
+static void gfx_upload_gu_matrix(int type, const float matrix[4][4]);
 
 #if defined(TARGET_PSP)
 static uint8_t psp_texture_stage_buf[256 * 256 * 4] __attribute__((aligned(16)));
@@ -476,12 +562,12 @@ static inline void vec4_sub(float *out, const float* lhs, const float*rhs){
 
 void gfx_clip_interpolate_vert(struct LoadedVertex* out, const struct  LoadedVertex* lhs, const struct LoadedVertex* rhs, const float factor )
 {
-    // projected pos
+    // clip-space pos emitted to the PSP after perspective divide
     out->x = lhs->x + (rhs->x - lhs->x) * factor;
     out->y = lhs->y + (rhs->y - lhs->y) * factor;
     out->z = lhs->z + (rhs->z - lhs->z) * factor;
-    //out->w = lhs->w + (rhs->w - lhs->w) * factor;
-    // transfomed pos
+    out->w = lhs->w + (rhs->w - lhs->w) * factor;
+    // duplicate clip-space pos used by the frustum clipper
     out->_x = lhs->_x + (rhs->_x - lhs->_x) * factor;
     out->_y = lhs->_y + (rhs->_y - lhs->_y) * factor;
     out->_z = lhs->_z + (rhs->_z - lhs->_z) * factor;
@@ -1356,7 +1442,6 @@ static void calculate_normal_dir(const Light_t *light, float coeffs[3]) {
     gfx_normalize_vector(coeffs);
 }
 
-#if !defined(TARGET_PSP)
 static void gfx_matrix_mul(float res[4][4], const float a[4][4], const float b[4][4]) {
     float tmp[4][4];
     for (int i = 0; i < 4; i++) {
@@ -1369,31 +1454,31 @@ static void gfx_matrix_mul(float res[4][4], const float a[4][4], const float b[4
     }
     memcpy(res, tmp, sizeof(tmp));
 }
-#else 
-static void gfx_matrix_mul(float res[4][4], const float a[4][4], const float b[4][4]) {
-  	__asm__ volatile (
-        ".set			push\n"					// save assember option
-        ".set			noreorder\n"			// suppress reordering
-		"lv.q   R000, 0  + %1\n"
-		"lv.q   R001, 16 + %1\n"
-		"lv.q   R002, 32 + %1\n"
-		"lv.q   R003, 48 + %1\n"
 
-		"lv.q   R100, 0  + %2\n"
-		"lv.q   R101, 16 + %2\n"
-		"lv.q   R102, 32 + %2\n"
-		"lv.q   R103, 48 + %2\n"
-
-		"vmmul.q   M700, M000, M100\n"
-
-		"sv.q   R700, 0  + %0\n"
-		"sv.q   R701, 16 + %0\n"
-		"sv.q   R702, 32 + %0\n"
-		"sv.q   R703, 48 + %0\n"
-        ".set			pop\n"					// restore assember option
-		: "=m" (*res) : "m" (*a) ,"m" (*b) : "memory" );
+static inline void gfx_transform_vec4(float out[4], const float matrix[4][4], const float in[4]) {
+    out[0] = (in[0] * matrix[0][0]) + (in[1] * matrix[1][0]) + (in[2] * matrix[2][0]) + (in[3] * matrix[3][0]);
+    out[1] = (in[0] * matrix[0][1]) + (in[1] * matrix[1][1]) + (in[2] * matrix[2][1]) + (in[3] * matrix[3][1]);
+    out[2] = (in[0] * matrix[0][2]) + (in[1] * matrix[1][2]) + (in[2] * matrix[2][2]) + (in[3] * matrix[3][2]);
+    out[3] = (in[0] * matrix[0][3]) + (in[1] * matrix[1][3]) + (in[2] * matrix[2][3]) + (in[3] * matrix[3][3]);
 }
-#endif
+
+static void gfx_upload_gu_matrix(int type, const float matrix[4][4]) {
+    void *matrix_inline = (void *)ALIGN((uintptr_t)sceGuGetMemory(sizeof(rsp.P_matrix) + 15), 16);
+
+    memcpy(matrix_inline, matrix, sizeof(rsp.P_matrix));
+    sceGuSetMatrix(type, (const ScePspFMatrix4 *)matrix_inline);
+}
+
+static void gfx_apply_projection_matrix(void) {
+    gfx_upload_gu_matrix(GU_PROJECTION, rsp.P_matrix);
+    gfx_matrix_mul(rsp.MP_matrix, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], rsp.P_matrix);
+}
+
+static void gfx_apply_modelview_matrix(void) {
+    gfx_upload_gu_matrix(GU_MODEL, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1]);
+    gfx_matrix_mul(rsp.MP_matrix, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], rsp.P_matrix);
+    rsp.lights_changed = true;
+}
 
 static void gfx_sp_matrix(uint8_t parameters, const int32_t *addr) {
     float matrix[4][4] __attribute__((aligned(16)));
@@ -1418,12 +1503,9 @@ static void gfx_sp_matrix(uint8_t parameters, const int32_t *addr) {
         } else {
             gfx_matrix_mul(rsp.P_matrix, matrix, rsp.P_matrix);
         }
-        /* Allocate space in DL for current proj matrix */
-        void *matrix_inline = (void *)ALIGN((unsigned int)sceGuGetMemory(sizeof(rsp.P_matrix)+15), 16);
-        memcpy(matrix_inline, rsp.P_matrix, sizeof(rsp.P_matrix));
-        sceGuSetMatrix(GU_PROJECTION, (const ScePspFMatrix4 *)matrix_inline);
+        gfx_apply_projection_matrix();
     } else { // G_MTX_MODELVIEW
-        if ((parameters & G_MTX_PUSH) && rsp.modelview_matrix_stack_size < 11) {
+        if ((parameters & G_MTX_PUSH) && rsp.modelview_matrix_stack_size < MODELVIEW_STACK_SIZE) {
             ++rsp.modelview_matrix_stack_size;
             memcpy(rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 2], sizeof(matrix));
         }
@@ -1432,24 +1514,23 @@ static void gfx_sp_matrix(uint8_t parameters, const int32_t *addr) {
         } else {
             gfx_matrix_mul(rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], matrix, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1]);
         }
-        /* Allocate space in DL for current model matrix */
-        void *matrix_inline = (void *)ALIGN((unsigned int)sceGuGetMemory(sizeof(rsp.P_matrix)+15), 16);
-        memcpy(matrix_inline, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], sizeof(rsp.P_matrix));
-        sceGuSetMatrix(GU_MODEL, (const ScePspFMatrix4 *)matrix_inline);
-        rsp.lights_changed = 1;
+        gfx_apply_modelview_matrix();
     }
-    gfx_matrix_mul(rsp.MP_matrix, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], rsp.P_matrix);
 }
 
 static void gfx_sp_pop_matrix(uint32_t count) {
+    if (count == 0) {
+        return;
+    }
+
+    gfx_flush();
+
     while (count--) {
-        if (rsp.modelview_matrix_stack_size > 0) {
+        if (rsp.modelview_matrix_stack_size > 1) {
             --rsp.modelview_matrix_stack_size;
         }
     }
-    if (rsp.modelview_matrix_stack_size > 0) {
-        gfx_matrix_mul(rsp.MP_matrix, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], rsp.P_matrix);
-    }
+    gfx_apply_modelview_matrix();
 }
 
 static float gfx_adjust_x_for_aspect_ratio(float x) {
@@ -1479,20 +1560,7 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
         temp_vec[2] = v->ob[2];
         temp_vec[3] = 1.0f;
 
-        __asm__ volatile (
-            ".set			push\n"					// save assember option
-            ".set			noreorder\n"			// suppress reordering
-            "lv.q			c700,  0 + %1\n"		// c700 = MP_matrix->x
-            "lv.q			c710, 16 + %1\n"		// c710 = MP_matrix->y
-            "lv.q			c720, 32 + %1\n"		// c720 = MP_matrix->z
-            "lv.q			c730, 48 + %1\n"		// c730 = MP_matrix->w
-            "lv.q			c200, %2\n"				// c200 = *temp_vec
-            "vtfm4.q		c000, e700, c200\n"		// c000 = e700 * c200
-            "sv.q			c000, %0\n"				// *proj_vec = c000
-            ".set			pop\n"					// restore assember option
-            : "=m"(*proj_vec)
-            : "m"(*rsp.MP_matrix), "m"(*temp_vec)
-        );
+        gfx_transform_vec4(proj_vec, rsp.MP_matrix, temp_vec);
 
         //const float x = proj_vec[0];
         const float x = gfx_adjust_x_for_aspect_ratio(proj_vec[0]);
@@ -1569,6 +1637,7 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
         d->x = v->ob[0];
         d->y = v->ob[1];
         d->z = v->ob[2];
+        d->w = w;
 
         d->_x = x;
         d->_y = y;
@@ -1687,6 +1756,7 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
     for (i = 0; i < clipped_vertices_num; i++) {
         const struct LoadedVertex *vertex = clipped_vertices[i];
         psp_fast_t *out = &buf_vbo[buf_num_vert];
+
         out->x = vertex->x;
         out->y = vertex->y;
         out->z = vertex->z;
@@ -1708,7 +1778,7 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
             buf_vbo[buf_vbo_len++] = clipped_vertices[i].color.a / 255.0f; // fog factor (not alpha)
         }
         */
-        out->color = gfx_get_vertex_color(comb, use_alpha, &vertex->color, v1->w, true);
+        out->color = gfx_get_vertex_color(comb, use_alpha, &vertex->color, vertex->w, true);
 
         /*@Note: Blue Star color */
         if (shader_program_id == 0x01200200) {
@@ -1861,9 +1931,15 @@ static void gfx_sp_moveword(uint8_t index, uint16_t offset, uint32_t data) {
         case G_MW_SEGMENT:
         {
             uint8_t segment = offset >> 2;
+            uintptr_t base = data;
+            uintptr_t normalized;
 
             if (segment < NUM_SEGMENTS) {
-                rsp.segments[segment] = (void *)(uintptr_t)data;
+                if (gfx_normalize_native_addr(base, &normalized)) {
+                    base = normalized;
+                }
+                rsp.segments[segment] = (void*)base;
+                rsp.segment_cmd[segment] = sCurrentCmd;
             }
             break;
         }
@@ -1901,6 +1977,9 @@ static void gfx_dp_set_texture_image(uint32_t format, uint32_t size, uint32_t wi
     rdp.texture_to_load.fmt = format;
     rdp.texture_to_load.siz = size;
     rdp.texture_to_load.width = width;
+#if defined(TARGET_PSP)
+    rdp.texture_to_load.image_cmd = sCurrentCmd;
+#endif
 }
 
 static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t tmem, uint8_t tile, UNUSED uint32_t palette, uint32_t cmt, uint32_t maskt, uint32_t shiftt, uint32_t cms, uint32_t masks, uint32_t shifts) {
@@ -1944,6 +2023,10 @@ static void gfx_dp_load_tlut(UNUSED uint8_t tile, uint32_t high_index) {
     SUPPORT_CHECK(tile == G_TX_LOADTILE);
     SUPPORT_CHECK(rdp.texture_to_load.siz == G_IM_SIZ_16b);
     rdp.palette = rdp.texture_to_load.addr;
+#if defined(TARGET_PSP)
+    rdp.loaded_texture[rdp.texture_to_load.tile_number].image_cmd = rdp.texture_to_load.image_cmd;
+    rdp.loaded_texture[rdp.texture_to_load.tile_number].load_cmd = sCurrentCmd;
+#endif
 }
 
 static void gfx_dp_load_block(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t lrs, uint32_t dxt) {
@@ -1975,6 +2058,10 @@ static void gfx_dp_load_block(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t
     rdp.loaded_texture[rdp.texture_to_load.tile_number].source_size_bytes = size_bytes;
     rdp.loaded_texture[rdp.texture_to_load.tile_number].row_stride_bytes = 0;
     rdp.loaded_texture[rdp.texture_to_load.tile_number].source_nibble_offset = 0;
+#if defined(TARGET_PSP)
+    rdp.loaded_texture[rdp.texture_to_load.tile_number].image_cmd = rdp.texture_to_load.image_cmd;
+    rdp.loaded_texture[rdp.texture_to_load.tile_number].load_cmd = sCurrentCmd;
+#endif
     assert(size_bytes <= 4096 && "bug: too big texture");
     rdp.loaded_texture[rdp.texture_to_load.tile_number].addr = rdp.texture_to_load.addr;
     
@@ -2011,6 +2098,10 @@ static void gfx_dp_load_tile(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t 
     rdp.loaded_texture[rdp.texture_to_load.tile_number].row_stride_bytes = source_stride;
     rdp.loaded_texture[rdp.texture_to_load.tile_number].source_nibble_offset =
         rdp.texture_to_load.siz == G_IM_SIZ_4b ? (source_uls & 1) : 0;
+#if defined(TARGET_PSP)
+    rdp.loaded_texture[rdp.texture_to_load.tile_number].image_cmd = rdp.texture_to_load.image_cmd;
+    rdp.loaded_texture[rdp.texture_to_load.tile_number].load_cmd = sCurrentCmd;
+#endif
 
     assert(size_bytes <= 4096 && "bug: too big texture");
     rdp.loaded_texture[rdp.texture_to_load.tile_number].addr = source_addr;
@@ -2253,10 +2344,6 @@ static void gfx_sp_set_other_mode(uint32_t shift, uint32_t num_bits, uint64_t mo
     gfx_mark_tri_pipeline_dirty();
 }
 
-static inline bool gfx_addr_is_native(uintptr_t addr) {
-    return (addr >= PSP_NATIVE_ADDR_START) && (addr < PSP_NATIVE_ADDR_END);
-}
-
 static inline bool gfx_addr_looks_segmented(uintptr_t addr) {
     uint8_t segment = addr >> 24;
     uintptr_t offset = addr & 0x00FFFFFFU;
@@ -2316,7 +2403,15 @@ static inline void *seg_addr(uintptr_t w1) {
         uintptr_t offset = w1 & 0x00FFFFFFU;
 
         if (rsp.segments[segment] != NULL) {
-            void* translated = (void *)((uintptr_t)rsp.segments[segment] + offset);
+            uintptr_t translatedValue = (uintptr_t)rsp.segments[segment] + offset;
+            uintptr_t normalized;
+            void* translated;
+
+            if (gfx_normalize_native_addr(translatedValue, &normalized)) {
+                translatedValue = normalized;
+            }
+
+            translated = (void*)translatedValue;
 
             gfx_log_segment_translation(w1, rsp.segments[segment], translated);
             return translated;
@@ -2325,7 +2420,15 @@ static inline void *seg_addr(uintptr_t w1) {
         gfx_log_unmapped_segment(w1);
     }
 
-    return (void *) w1;
+    {
+        uintptr_t normalized;
+
+        if (gfx_normalize_native_addr(w1, &normalized)) {
+            return (void*)normalized;
+        }
+    }
+
+    return (void*)w1;
 }
 
 static bool gfx_translate_dl_cursor(Gfx** cmdP) {
@@ -2347,6 +2450,12 @@ static bool gfx_translate_dl_cursor(Gfx** cmdP) {
         }
 
         *cmdP = (Gfx*)translated;
+    } else {
+        uintptr_t normalized;
+
+        if (gfx_normalize_native_addr(raw, &normalized)) {
+            *cmdP = (Gfx*)normalized;
+        }
     }
 
     return true;
@@ -2366,6 +2475,11 @@ static void gfx_run_dl(Gfx* cmd) {
         }
 
         uint32_t opcode = cmd->words.w0 >> 24;
+#if defined(TARGET_PSP)
+        sCurrentCmd.addr = (uintptr_t)cmd;
+        sCurrentCmd.w0 = cmd->words.w0;
+        sCurrentCmd.w1 = cmd->words.w1;
+#endif
         
         switch (opcode) {
             // RSP commands:
@@ -2574,6 +2688,10 @@ static void gfx_sp_reset() {
     rsp.current_num_lights = 2;
     rsp.lights_changed = true;
     memset(rsp.segments, 0, sizeof(rsp.segments));
+#if defined(TARGET_PSP)
+    memset(rsp.segment_cmd, 0, sizeof(rsp.segment_cmd));
+    memset(&sCurrentCmd, 0, sizeof(sCurrentCmd));
+#endif
 }
 
 void gfx_get_dimensions(uint32_t *width, uint32_t *height) {
