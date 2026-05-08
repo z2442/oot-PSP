@@ -17,6 +17,8 @@
 #include "save.h"
 #include "line_numbers.h"
 
+#if !PLATFORM_PSP
+
 #include "assets/scenes/indoors/miharigoya/miharigoya_scene.h"
 #include "assets/scenes/indoors/souko/souko_scene.h"
 
@@ -38,6 +40,8 @@
 #include "assets/scenes/dungeons/jyasinzou/jyasinzou_scene.h"
 #include "assets/scenes/dungeons/men/men_scene.h"
 #include "assets/scenes/dungeons/ydan/ydan_scene.h"
+
+#endif
 
 #include "overlays/actors/ovl_Bg_Dodoago/z_bg_dodoago.h"
 
@@ -137,6 +141,19 @@ SceneTableEntry gSceneTable[] = {
 
 #undef DEFINE_SCENE
 
+#else
+
+#define OOT_PSP_SCENE_ADDR(offset) ((void*)(uintptr_t)(0x02000000U | (offset)))
+#define OOT_PSP_ROOM_ADDR(offset) ((void*)(uintptr_t)(0x03000000U | (offset)))
+
+#endif
+
+#if PLATFORM_PSP
+#define OOT_PSP_SCENE_ASSET(name, offset) OOT_PSP_SCENE_ADDR(offset)
+#define OOT_PSP_ROOM_ASSET(name, offset) ((Gfx*)OOT_PSP_ROOM_ADDR(offset))
+#else
+#define OOT_PSP_SCENE_ASSET(name, offset) (name)
+#define OOT_PSP_ROOM_ASSET(name, offset) (name)
 #endif
 
 Gfx sDefaultDisplayList[] = {
@@ -231,8 +248,8 @@ void Scene_DrawConfigDefault(PlayState* play) {
 }
 
 void* sDekuTreeEntranceTextures[] = {
-    gDekuTreeDayEntranceTex,
-    gDekuTreeNightEntranceTex,
+    OOT_PSP_SCENE_ASSET(gDekuTreeDayEntranceTex, 0x00BA08),
+    OOT_PSP_SCENE_ASSET(gDekuTreeNightEntranceTex, 0x00CA08),
 };
 
 void Scene_DrawConfigDekuTree(PlayState* play) {
@@ -271,12 +288,14 @@ void Scene_DrawConfigDekuTreeBoss(PlayState* play) {
 }
 
 void* gDCEntranceTextures[] = {
-    gDCDayEntranceTex,
-    gDCNightEntranceTex,
+    OOT_PSP_SCENE_ASSET(gDCDayEntranceTex, 0x012378),
+    OOT_PSP_SCENE_ASSET(gDCNightEntranceTex, 0x013378),
 };
 void* sDCLavaFloorTextures[] = {
-    gDCLavaFloor1Tex, gDCLavaFloor2Tex, gDCLavaFloor3Tex, gDCLavaFloor4Tex,
-    gDCLavaFloor5Tex, gDCLavaFloor6Tex, gDCLavaFloor7Tex, gDCLavaFloor8Tex,
+    OOT_PSP_SCENE_ASSET(gDCLavaFloor1Tex, 0x011F78), OOT_PSP_SCENE_ASSET(gDCLavaFloor2Tex, 0x014778),
+    OOT_PSP_SCENE_ASSET(gDCLavaFloor3Tex, 0x014378), OOT_PSP_SCENE_ASSET(gDCLavaFloor4Tex, 0x013F78),
+    OOT_PSP_SCENE_ASSET(gDCLavaFloor5Tex, 0x014B78), OOT_PSP_SCENE_ASSET(gDCLavaFloor6Tex, 0x013B78),
+    OOT_PSP_SCENE_ASSET(gDCLavaFloor7Tex, 0x012F78), OOT_PSP_SCENE_ASSET(gDCLavaFloor8Tex, 0x012B78),
 };
 
 void Scene_DrawConfigDodongosCavern(PlayState* play) {
@@ -525,8 +544,8 @@ void Scene_DrawConfigShadowTempleAndWell(PlayState* play) {
 }
 
 void* sThievesHideoutEntranceTextures[] = {
-    gThievesHideoutDayEntranceTex,
-    gThievesHideoutNightEntranceTex,
+    OOT_PSP_SCENE_ASSET(gThievesHideoutDayEntranceTex, 0x00BD20),
+    OOT_PSP_SCENE_ASSET(gThievesHideoutNightEntranceTex, 0x00B920),
 };
 
 void Scene_DrawConfigThievesHideout(PlayState* play) {
@@ -544,8 +563,8 @@ void Scene_DrawConfigThievesHideout(PlayState* play) {
 }
 
 void* sWaterTempleEntranceTextures[] = {
-    gWaterTempleDayEntranceTex,
-    gWaterTempleNightEntranceTex,
+    OOT_PSP_SCENE_ASSET(gWaterTempleDayEntranceTex, 0x014CF0),
+    OOT_PSP_SCENE_ASSET(gWaterTempleNightEntranceTex, 0x0158F0),
 };
 
 void Scene_DrawConfigWaterTemple(PlayState* play) {
@@ -772,8 +791,8 @@ void Scene_DrawConfigGanonsTowerCollapseExterior(PlayState* play) {
 }
 
 void* sIceCavernEntranceTextures[] = {
-    gIceCavernDayEntranceTex,
-    gIceCavernNightEntranceTex,
+    OOT_PSP_SCENE_ASSET(gIceCavernDayEntranceTex, 0x00FA10),
+    OOT_PSP_SCENE_ASSET(gIceCavernNightEntranceTex, 0x00F810),
 };
 
 void Scene_DrawConfigIceCavern(PlayState* play) {
@@ -873,8 +892,8 @@ void Scene_DrawConfigCalmWater(PlayState* play) {
 }
 
 void* sGTGEntranceTextures[] = {
-    gGTGDayEntranceTex,
-    gGTGNightEntranceTex,
+    OOT_PSP_SCENE_ASSET(gGTGDayEntranceTex, 0x00F930),
+    OOT_PSP_SCENE_ASSET(gGTGNightEntranceTex, 0x010130),
 };
 
 void Scene_DrawConfigGerudoTrainingGround(PlayState* play) {
@@ -965,8 +984,8 @@ void Scene_DrawConfigBombchuBowlingAlley(PlayState* play) {
 }
 
 void* sLonLonHouseEntranceTextures[] = {
-    gLonLonHouseDayEntranceTex,
-    gLonLonHouseNightEntranceTex,
+    OOT_PSP_SCENE_ASSET(gLonLonHouseDayEntranceTex, 0x005210),
+    OOT_PSP_SCENE_ASSET(gLonLonHouseNightEntranceTex, 0x005010),
 };
 
 void Scene_DrawConfigLonLonBuildings(PlayState* play) {
@@ -985,12 +1004,12 @@ void Scene_DrawConfigLonLonBuildings(PlayState* play) {
 }
 
 void* sGuardHouseView1Textures[] = {
-    gGuardHouseOutSideView1DayTex,
-    gGuardHouseOutSideView1NightTex,
+    OOT_PSP_SCENE_ASSET(gGuardHouseOutSideView1DayTex, 0x006550),
+    OOT_PSP_SCENE_ASSET(gGuardHouseOutSideView1NightTex, 0x003550),
 };
 void* sGuardHouseView2Textures[] = {
-    gGuardHouseOutSideView2DayTex,
-    gGuardHouseOutSideView2NightTex,
+    OOT_PSP_SCENE_ASSET(gGuardHouseOutSideView2DayTex, 0x002350),
+    OOT_PSP_SCENE_ASSET(gGuardHouseOutSideView2NightTex, 0x001350),
 };
 
 void Scene_DrawConfigMarketGuardHouse(PlayState* play) {
@@ -1037,8 +1056,8 @@ void Scene_DrawConfigPotionShopGranny(PlayState* play) {
 }
 
 void* sForestTempleEntranceTextures[] = {
-    gForestTempleDayEntranceTex,
-    gForestTempleNightEntranceTex,
+    OOT_PSP_SCENE_ASSET(gForestTempleDayEntranceTex, 0x014D90),
+    OOT_PSP_SCENE_ASSET(gForestTempleNightEntranceTex, 0x014590),
 };
 
 void Scene_DrawConfigForestTemple(PlayState* play) {
@@ -1068,8 +1087,8 @@ void Scene_DrawConfigForestTemple(PlayState* play) {
 }
 
 void* sSpiritTempleEntranceTextures[] = {
-    gSpiritTempleDayEntranceTex,
-    gSpiritTempleNightEntranceTex,
+    OOT_PSP_SCENE_ASSET(gSpiritTempleDayEntranceTex, 0x018940),
+    OOT_PSP_SCENE_ASSET(gSpiritTempleNightEntranceTex, 0x018040),
 };
 
 void Scene_DrawConfigSpiritTemple(PlayState* play) {
@@ -1121,7 +1140,7 @@ void Scene_DrawConfigHyruleField(PlayState* play) {
         }
 
         gDPSetPrimColor(displayListHead++, 0, 0, 255, 255, 255, play->roomCtx.drawParams[0]);
-        gSPDisplayList(displayListHead++, spot00_room_0DL_012B20);
+        gSPDisplayList(displayListHead++, OOT_PSP_ROOM_ASSET(spot00_room_0DL_012B20, 0x012B20));
         gSPEndDisplayList(displayListHead++);
     }
 
@@ -1129,8 +1148,8 @@ void Scene_DrawConfigHyruleField(PlayState* play) {
 }
 
 void* sKakarikoWindowTextures[] = {
-    gKakarikoVillageDayWindowTex,
-    gKakarikoVillageNightWindowTex,
+    OOT_PSP_SCENE_ASSET(gKakarikoVillageDayWindowTex, 0x015B50),
+    OOT_PSP_SCENE_ASSET(gKakarikoVillageNightWindowTex, 0x016B50),
 };
 
 void Scene_DrawConfigKakarikoVillage(PlayState* play) {
@@ -1260,8 +1279,8 @@ void Scene_DrawConfigLakeHylia(PlayState* play) {
 }
 
 void* sZorasDomainEntranceTextures[] = {
-    gZorasDomainDayEntranceTex,
-    gZorasDomainNightEntranceTex,
+    OOT_PSP_SCENE_ASSET(gZorasDomainDayEntranceTex, 0x008F98),
+    OOT_PSP_SCENE_ASSET(gZorasDomainNightEntranceTex, 0x008FD8),
 };
 
 void Scene_DrawConfigZorasDomain(PlayState* play) {
@@ -1396,8 +1415,8 @@ void Scene_DrawConfigDesertColossus(PlayState* play) {
 }
 
 void* sGerudoFortressWallTextures[] = {
-    gGerudoFortressNightWallTex,
-    gGerudoFortressDayWallTex,
+    OOT_PSP_SCENE_ASSET(gGerudoFortressNightWallTex, 0x009678),
+    OOT_PSP_SCENE_ASSET(gGerudoFortressDayWallTex, 0x00DE78),
 };
 
 void Scene_DrawConfigGerudosFortress(PlayState* play) {
@@ -1476,7 +1495,7 @@ void Scene_DrawConfigDeathMountainTrail(PlayState* play) {
         }
 
         gDPSetPrimColor(displayListHead++, 0, 0, 255, 255, 255, play->roomCtx.drawParams[0]);
-        gSPDisplayList(displayListHead++, spot16_room_0DL_00AA48);
+        gSPDisplayList(displayListHead++, OOT_PSP_ROOM_ASSET(spot16_room_0DL_00AA48, 0x00AA48));
         gSPEndDisplayList(displayListHead++);
     }
 
@@ -1514,8 +1533,8 @@ void Scene_DrawConfigDeathMountainCrater(PlayState* play) {
 }
 
 void* sGoronCityEntranceTextures[] = {
-    gGoronCityDayEntranceTex,
-    gGoronCityNightEntranceTex,
+    OOT_PSP_SCENE_ASSET(gGoronCityDayEntranceTex, 0x009808),
+    OOT_PSP_SCENE_ASSET(gGoronCityNightEntranceTex, 0x008FC8),
 };
 
 void Scene_DrawConfigGoronCity(PlayState* play) {
@@ -1541,8 +1560,8 @@ void Scene_DrawConfigGoronCity(PlayState* play) {
 }
 
 void* sLonLonRanchWindowTextures[] = {
-    gLonLonRanchDayWindowTex,
-    gLonLonRangeNightWindowsTex,
+    OOT_PSP_SCENE_ASSET(gLonLonRanchDayWindowTex, 0x008180),
+    OOT_PSP_SCENE_ASSET(gLonLonRangeNightWindowsTex, 0x00FB80),
 };
 
 void Scene_DrawConfigLonLonRanch(PlayState* play) {

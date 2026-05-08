@@ -1,6 +1,7 @@
 #ifndef OOT_PSP_ASSET_LOADER_H
 #define OOT_PSP_ASSET_LOADER_H
 
+#include "romfile.h"
 #include "ultra64.h"
 
 #include <stddef.h>
@@ -13,6 +14,8 @@
 typedef struct OotPspExternalAsset {
     uintptr_t vromStart;
     uintptr_t vromEnd;
+    uintptr_t originalVromStart;
+    uintptr_t originalVromEnd;
     const char* path;
 } OotPspExternalAsset;
 
@@ -38,7 +41,12 @@ extern const OotPspMessageEntry gOotPspStaffMessageEntries[];
 extern const size_t gOotPspStaffMessageEntriesCount;
 
 void OotPsp_AssetInit(const char* executablePath);
+uintptr_t OotPsp_GetPrxRelocationBias(void);
+s32 OotPsp_TryNormalizePrxRelocatedAddress(uintptr_t addr, uintptr_t* normalized);
 uintptr_t OotPsp_NormalizeVrom(uintptr_t vrom);
+s32 OotPsp_NormalizeVromRange(uintptr_t vromStart, uintptr_t vromEnd, uintptr_t* normalizedStart,
+                              uintptr_t* normalizedEnd);
+void OotPsp_NormalizeRomFile(RomFile* file);
 s32 OotPsp_AssetRead(void* ram, uintptr_t vrom, size_t size);
 const OotPspMessageEntry* OotPsp_FindMessageEntry(const OotPspMessageEntry* entries, size_t count, u16 textId);
 

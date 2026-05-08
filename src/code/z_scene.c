@@ -45,13 +45,15 @@ s32 Object_SpawnPersistent(ObjectContext* objectCtx, s16 objectId) {
     size = gObjectTable[objectId].vromEnd - gObjectTable[objectId].vromStart;
 
 #if PLATFORM_PSP
-    objectCtx->slots[objectCtx->numEntries].segment = (void*)gObjectTable[objectId].vromStart;
-    if (objectCtx->numEntries < (ARRAY_COUNT(objectCtx->slots) - 1)) {
-        objectCtx->slots[objectCtx->numEntries + 1].segment = NULL;
+    if ((gObjectTable[objectId].vromStart != 0) && (gObjectTable[objectId].vromEnd == 0)) {
+        objectCtx->slots[objectCtx->numEntries].segment = (void*)gObjectTable[objectId].vromStart;
+        if (objectCtx->numEntries < (ARRAY_COUNT(objectCtx->slots) - 1)) {
+            objectCtx->slots[objectCtx->numEntries + 1].segment = NULL;
+        }
+        objectCtx->numEntries++;
+        objectCtx->numPersistentEntries = objectCtx->numEntries;
+        return objectCtx->numEntries - 1;
     }
-    objectCtx->numEntries++;
-    objectCtx->numPersistentEntries = objectCtx->numEntries;
-    return objectCtx->numEntries - 1;
 #endif
 
     PRINTF("OBJECT[%d] SIZE %fK SEG=%x\n", objectId, size / 1024.0f, objectCtx->slots[objectCtx->numEntries].segment);
@@ -197,10 +199,12 @@ void* func_800982FC(ObjectContext* objectCtx, s32 slot, s16 objectId) {
     void* nextPtr;
 
 #if PLATFORM_PSP
-    entry->id = objectId;
-    entry->segment = (void*)objectFile->vromStart;
-    entry->dmaRequest.vromAddr = 0;
-    return NULL;
+    if ((objectFile->vromStart != 0) && (objectFile->vromEnd == 0)) {
+        entry->id = objectId;
+        entry->segment = (void*)objectFile->vromStart;
+        entry->dmaRequest.vromAddr = 0;
+        return NULL;
+    }
 #endif
 
     entry->id = -objectId;

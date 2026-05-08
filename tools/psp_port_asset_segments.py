@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
+import itertools
 import re
 import shutil
 import struct
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from tools import dmadata
 from tools import version_config
 
 EXTERNAL_VROM_BASE = 0x20000000
@@ -21,12 +25,593 @@ RUNTIME_SEGMENT_DIR = Path("data/segments")
 
 DECLARE_RE = re.compile(r"\bDECLARE_(?:ROM_)?SEGMENT\(\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\)")
 DECLARE_OVERLAY_RE = re.compile(r"\bDECLARE_OVERLAY_SEGMENT\(\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\)")
+OFFSET_TOKEN_RE = re.compile(r"(?<![0-9A-Fa-f])([0-9A-Fa-f]{6,8})(?![0-9A-Fa-f])")
+SOURCE_DECL_RE = re.compile(r"^\s*.*\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]]*\])?\s*=\s*\{")
+COLLISION_AUX_SUFFIXES = ("BgCamList", "SurfaceTypes", "PolyList", "VtxList", "WaterBoxes")
 SKIP_NAMES = {
+    "makerom",
     "boot",
     "code",
     "dmadata",
     "n64dd",
 }
+
+ELF_MAGIC = b"\x7fELF"
+ELFCLASS32 = 1
+ELFDATA2LSB = 1
+SHT_PROGBITS = 1
+SHT_SYMTAB = 2
+SHT_NOBITS = 8
+SHT_REL = 9
+SHF_ALLOC = 0x2
+SHN_UNDEF = 0
+STB_LOCAL = 0
+R_MIPS_32 = 2
+RUNTIME_SYMBOL_SENTINELS = {
+    "gIdentityMtx": 0x0E000001,
+}
+
+
+@dataclass
+class ElfSection:
+    name: str
+    type: int
+    flags: int
+    offset: int
+    size: int
+    link: int
+    info: int
+    addralign: int
+    entsize: int
+
+
+@dataclass
+class ElfSymbol:
+    name: str
+    value: int
+    size: int
+    info: int
+    shndx: int
+
+
+@dataclass
+class ElfReloc:
+    offset: int
+    sym_index: int
+    type: int
+    symtab_index: int
+
+
+def read_c_string(data: bytes, offset: int) -> str:
+    end = data.find(b"\0", offset)
+    if end < 0:
+        end = len(data)
+    return data[offset:end].decode("utf-8", errors="replace")
+
+
+def elf_symbol_bind(info: int) -> int:
+    return info >> 4
+
+
+class ElfObject:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.data = path.read_bytes()
+        self.sections: list[ElfSection] = []
+        self.symtabs: dict[int, list[ElfSymbol]] = {}
+        self.relocs_by_section: dict[int, list[ElfReloc]] = {}
+        self.section_data: dict[int, bytes] = {}
+        self._parse()
+
+    def _parse(self) -> None:
+        ident = self.data[:16]
+
+        if (ident[:4] != ELF_MAGIC) or (ident[4] != ELFCLASS32) or (ident[5] != ELFDATA2LSB):
+            raise ValueError(f"{self.path} is not a 32-bit little-endian ELF object")
+
+        header = struct.unpack_from("<16sHHIIIIIHHHHHH", self.data, 0)
+        e_shoff = header[6]
+        e_shentsize = header[11]
+        e_shnum = header[12]
+        e_shstrndx = header[13]
+        raw_sections: list[tuple[int, int, int, int, int, int, int, int, int, int]] = []
+
+        for index in range(e_shnum):
+            offset = e_shoff + (index * e_shentsize)
+            raw_sections.append(struct.unpack_from("<IIIIIIIIII", self.data, offset))
+
+        shstr = raw_sections[e_shstrndx]
+        shstr_data = self.data[shstr[4] : shstr[4] + shstr[5]]
+
+        for raw in raw_sections:
+            name = read_c_string(shstr_data, raw[0])
+            self.sections.append(
+                ElfSection(
+                    name=name,
+                    type=raw[1],
+                    flags=raw[2],
+                    offset=raw[4],
+                    size=raw[5],
+                    link=raw[6],
+                    info=raw[7],
+                    addralign=raw[8],
+                    entsize=raw[9],
+                )
+            )
+
+        for index, section in enumerate(self.sections):
+            if section.type == SHT_PROGBITS:
+                self.section_data[index] = self.data[section.offset : section.offset + section.size]
+            elif section.type == SHT_NOBITS:
+                self.section_data[index] = bytes(section.size)
+
+            if section.type == SHT_SYMTAB:
+                strtab = self.sections[section.link]
+                strtab_data = self.data[strtab.offset : strtab.offset + strtab.size]
+                symbols: list[ElfSymbol] = []
+                entsize = section.entsize or 16
+
+                for offset in range(section.offset, section.offset + section.size, entsize):
+                    st_name, st_value, st_size, st_info, _st_other, st_shndx = struct.unpack_from(
+                        "<IIIBBH", self.data, offset
+                    )
+                    symbols.append(
+                        ElfSymbol(
+                            name=read_c_string(strtab_data, st_name) if st_name != 0 else "",
+                            value=st_value,
+                            size=st_size,
+                            info=st_info,
+                            shndx=st_shndx,
+                        )
+                    )
+
+                self.symtabs[index] = symbols
+
+        for index, section in enumerate(self.sections):
+            if section.type != SHT_REL:
+                continue
+
+            relocs: list[ElfReloc] = []
+            entsize = section.entsize or 8
+
+            for offset in range(section.offset, section.offset + section.size, entsize):
+                r_offset, r_info = struct.unpack_from("<II", self.data, offset)
+                relocs.append(
+                    ElfReloc(
+                        offset=r_offset,
+                        sym_index=r_info >> 8,
+                        type=r_info & 0xFF,
+                        symtab_index=section.link,
+                    )
+                )
+
+            self.relocs_by_section.setdefault(section.info, []).extend(relocs)
+
+    def iter_symbols(self) -> itertools.chain[ElfSymbol]:
+        return itertools.chain.from_iterable(self.symtabs.values())
+
+
+class NativeAssetContext:
+    def __init__(self, version: str, entries: list[dict[str, object]]) -> None:
+        self.version = version
+        self.build_root = ROOT / "build" / "psp-port" / version
+        self.entries_by_name = {str(entry["name"]): entry for entry in entries}
+        self.segment_ids: dict[str, int] = {}
+        self.xml_symbol_offsets: dict[str, dict[str, int]] = {}
+        self.inferred_symbol_offsets: dict[str, dict[str, int]] = {}
+        self.segment_object_paths: dict[str, list[Path]] = {}
+        self.elf_cache: dict[Path, ElfObject] = {}
+        self.global_symbol_values: dict[str, int] = {}
+        self._load_xml_offsets()
+        self._discover_native_objects()
+        self.global_symbol_values.update(RUNTIME_SYMBOL_SENTINELS)
+        self._infer_source_order_offsets()
+        self._index_segment_symbols()
+
+    def _should_use_xml(self, path: Path) -> bool:
+        stem = path.stem
+
+        if self.version.startswith("pal"):
+            return True
+
+        variant_suffixes = ("_pal", "_pal_n64", "_v2", "_v2_mq", "_v3", "_v3_mq", "_ique", "_mq")
+        return not stem.endswith(variant_suffixes)
+
+    def _load_xml_offsets(self) -> None:
+        xml_roots = [
+            ROOT / "assets" / "xml" / "objects",
+            ROOT / "assets" / "xml" / "scenes",
+            ROOT / "assets" / "xml" / "textures",
+            ROOT / "assets" / "xml" / "misc",
+        ]
+
+        for xml_path in itertools.chain.from_iterable(root.glob("**/*.xml") for root in xml_roots if root.exists()):
+            if not self._should_use_xml(xml_path):
+                continue
+
+            try:
+                root = ET.parse(xml_path).getroot()
+            except ET.ParseError as exc:
+                raise ValueError(f"failed to parse {xml_path}: {exc}") from exc
+
+            for file_elem in root.iter("File"):
+                segment_name = file_elem.attrib.get("Name")
+                segment_text = file_elem.attrib.get("Segment")
+
+                if not segment_name:
+                    continue
+
+                if segment_text is not None:
+                    self.segment_ids[segment_name] = int(segment_text, 0)
+
+                offsets = self.xml_symbol_offsets.setdefault(segment_name, {})
+                offsets.setdefault(segment_name, 0)
+
+                for elem in file_elem.iter():
+                    symbol_name = elem.attrib.get("Name")
+                    offset_text = elem.attrib.get("Offset")
+
+                    if (symbol_name is None) or (offset_text is None):
+                        continue
+
+                    offsets[symbol_name] = int(offset_text, 0)
+
+    def _add_object_paths(self, segment_name: str, *patterns: str) -> None:
+        paths: list[Path] = []
+
+        for pattern in patterns:
+            paths.extend(path for path in sorted(self.build_root.glob(pattern)) if path.is_file())
+
+        if paths:
+            self.segment_object_paths[segment_name] = paths
+
+    def _discover_native_objects(self) -> None:
+        for segment_name in self.entries_by_name:
+            self._add_object_paths(
+                segment_name,
+                f"assets/objects/{segment_name}/*.o",
+                f"extracted/{self.version}/assets/objects/{segment_name}/*.o",
+                f"assets/scenes/*/*/{segment_name}.o",
+                f"extracted/{self.version}/assets/scenes/*/*/{segment_name}.o",
+                f"assets/textures/{segment_name}/*.o",
+                f"extracted/{self.version}/assets/textures/{segment_name}/*.o",
+                f"assets/misc/{segment_name}/*.o",
+                f"extracted/{self.version}/assets/misc/{segment_name}/*.o",
+            )
+
+    def _load_object(self, path: Path) -> ElfObject:
+        obj = self.elf_cache.get(path)
+
+        if obj is None:
+            obj = ElfObject(path)
+            self.elf_cache[path] = obj
+
+        return obj
+
+    def _asset_kind_for_object_path(self, path: Path) -> str | None:
+        try:
+            parts = path.relative_to(self.build_root).parts
+        except ValueError:
+            return None
+
+        for index in range(len(parts) - 1):
+            if parts[index] == "assets":
+                kind = parts[index + 1]
+                if kind in {"objects", "scenes", "textures", "misc"}:
+                    return kind
+
+        return None
+
+    def _symbol_offset_from_name(self, segment_id: int, segment_size: int, symbol_name: str) -> int | None:
+        candidates: list[int] = []
+
+        if symbol_name.endswith(COLLISION_AUX_SUFFIXES):
+            return None
+
+        for match in OFFSET_TOKEN_RE.finditer(symbol_name):
+            token = match.group(1)
+            value = int(token, 16)
+
+            if len(token) == 8:
+                if (value >> 24) == segment_id:
+                    candidates.append(value & 0x00FFFFFF)
+                elif value < segment_size:
+                    candidates.append(value)
+            elif value < segment_size:
+                candidates.append(value)
+
+        if not candidates:
+            return None
+
+        return candidates[-1]
+
+    def _symbol_offset(self, segment_name: str, symbol_name: str) -> int | None:
+        entry = self.entries_by_name[segment_name]
+        segment_size = int(entry["size"])
+        segment_id = self.segment_ids.get(segment_name)
+        offsets = self.xml_symbol_offsets.get(segment_name, {})
+        inferred_offsets = self.inferred_symbol_offsets.get(segment_name, {})
+
+        if symbol_name in offsets:
+            return offsets[symbol_name]
+
+        if symbol_name in inferred_offsets:
+            return inferred_offsets[symbol_name]
+
+        if segment_id is None:
+            return None
+
+        return self._symbol_offset_from_name(segment_id, segment_size, symbol_name)
+
+    def _symbol_offset_without_inferred(self, segment_name: str, symbol_name: str) -> int | None:
+        entry = self.entries_by_name[segment_name]
+        segment_size = int(entry["size"])
+        segment_id = self.segment_ids.get(segment_name)
+        offsets = self.xml_symbol_offsets.get(segment_name, {})
+
+        if symbol_name in offsets:
+            return offsets[symbol_name]
+
+        if segment_id is None:
+            return None
+
+        return self._symbol_offset_from_name(segment_id, segment_size, symbol_name)
+
+    def _segment_symbol_value(self, segment_name: str, offset: int) -> int | None:
+        segment_id = self.segment_ids.get(segment_name)
+
+        if segment_id is None:
+            return None
+
+        return (segment_id << 24) | offset
+
+    def _source_path_for_object(self, path: Path) -> Path | None:
+        try:
+            relative = path.relative_to(self.build_root)
+        except ValueError:
+            return None
+
+        source = ROOT / relative.with_suffix(".c")
+        return source if source.is_file() else None
+
+    def _source_symbol_order(self, path: Path) -> list[str]:
+        source = self._source_path_for_object(path)
+
+        if source is None:
+            return []
+
+        symbols: list[str] = []
+
+        for line in source.read_text().splitlines():
+            if line.lstrip().startswith(("#", "//", "/*", "*")):
+                continue
+
+            match = SOURCE_DECL_RE.match(line)
+            if match is not None:
+                symbols.append(match.group("name"))
+
+        return symbols
+
+    def _object_symbol_layout(self, obj: ElfObject) -> dict[str, tuple[int, int]]:
+        layout: dict[str, tuple[int, int]] = {}
+
+        for symbol in obj.iter_symbols():
+            if (not symbol.name) or (symbol.size == 0) or (symbol.shndx == SHN_UNDEF):
+                continue
+
+            if symbol.shndx >= len(obj.sections):
+                continue
+
+            section = obj.sections[symbol.shndx]
+            if (section.flags & SHF_ALLOC) == 0:
+                continue
+
+            layout[symbol.name] = (symbol.size, max(section.addralign, 1))
+
+        return layout
+
+    def _infer_source_order_offsets(self) -> None:
+        for segment_name, paths in self.segment_object_paths.items():
+            inferred = self.inferred_symbol_offsets.setdefault(segment_name, {})
+            segment_size = int(self.entries_by_name[segment_name]["size"])
+
+            for path in paths:
+                obj = self._load_object(path)
+                layout = self._object_symbol_layout(obj)
+                ordered_symbols = [
+                    symbol_name for symbol_name in self._source_symbol_order(path) if symbol_name in layout
+                ]
+                cursor: int | None = None
+
+                for symbol_name in ordered_symbols:
+                    symbol_size, symbol_align = layout[symbol_name]
+                    known_offset = self._symbol_offset_without_inferred(segment_name, symbol_name)
+
+                    if known_offset is not None:
+                        cursor = known_offset + symbol_size
+                        continue
+
+                    if cursor is None:
+                        continue
+
+                    offset = align(cursor, symbol_align)
+                    if offset + symbol_size > segment_size:
+                        continue
+
+                    inferred.setdefault(symbol_name, offset)
+                    cursor = offset + symbol_size
+
+                cursor = None
+
+                for symbol_name in reversed(ordered_symbols):
+                    symbol_size, symbol_align = layout[symbol_name]
+                    known_offset = self._symbol_offset_without_inferred(segment_name, symbol_name)
+
+                    if known_offset is None:
+                        known_offset = inferred.get(symbol_name)
+
+                    if known_offset is not None:
+                        cursor = known_offset
+                        continue
+
+                    if cursor is None:
+                        continue
+
+                    offset = (cursor - symbol_size) & -symbol_align
+                    if offset < 0:
+                        continue
+
+                    inferred[symbol_name] = offset
+                    cursor = offset
+
+    def _index_segment_symbols(self) -> None:
+        for segment_name, entry in self.entries_by_name.items():
+            self.global_symbol_values[f"_{segment_name}SegmentRomStart"] = int(entry["vrom_start"])
+            self.global_symbol_values[f"_{segment_name}SegmentRomEnd"] = int(entry["vrom_end"])
+
+            segment_id = self.segment_ids.get(segment_name)
+            if segment_id is not None:
+                self.global_symbol_values[f"_{segment_name}SegmentStart"] = segment_id << 24
+                self.global_symbol_values[f"_{segment_name}SegmentEnd"] = (segment_id << 24) | int(entry["size"])
+
+        for segment_name, paths in self.segment_object_paths.items():
+            for path in paths:
+                obj = self._load_object(path)
+
+                for symbol in obj.iter_symbols():
+                    if (not symbol.name) or (symbol.size == 0) or (symbol.shndx == SHN_UNDEF):
+                        continue
+
+                    if symbol.shndx >= len(obj.sections):
+                        continue
+
+                    section = obj.sections[symbol.shndx]
+                    if (section.flags & SHF_ALLOC) == 0:
+                        continue
+
+                    offset = self._symbol_offset(segment_name, symbol.name)
+                    if offset is None:
+                        continue
+
+                    value = self._segment_symbol_value(segment_name, offset)
+                    if value is not None:
+                        self.global_symbol_values.setdefault(symbol.name, value)
+
+    def linker_symbol_values(self, asset_kinds: set[str]) -> dict[str, int]:
+        values: dict[str, int] = {}
+
+        for segment_name, paths in self.segment_object_paths.items():
+            for path in paths:
+                if self._asset_kind_for_object_path(path) not in asset_kinds:
+                    continue
+
+                obj = self._load_object(path)
+
+                for symbol in obj.iter_symbols():
+                    if (not symbol.name) or (symbol.size == 0) or (symbol.shndx == SHN_UNDEF):
+                        continue
+
+                    if symbol.name.startswith("_") or (symbol.name in RUNTIME_SYMBOL_SENTINELS):
+                        continue
+
+                    if elf_symbol_bind(symbol.info) == STB_LOCAL:
+                        continue
+
+                    if symbol.shndx >= len(obj.sections):
+                        continue
+
+                    section = obj.sections[symbol.shndx]
+                    if (section.flags & SHF_ALLOC) == 0:
+                        continue
+
+                    value = self.global_symbol_values.get(symbol.name)
+                    if value is not None:
+                        values.setdefault(symbol.name, value)
+
+        return values
+
+    def _resolve_relocation_symbol(self, current_segment: str, symbol: ElfSymbol, addend: int) -> int:
+        if symbol.name in self.global_symbol_values:
+            return (self.global_symbol_values[symbol.name] + addend) & 0xFFFFFFFF
+
+        if (symbol.name != "") and (symbol.shndx != SHN_UNDEF):
+            offset = self._symbol_offset(current_segment, symbol.name)
+            value = self._segment_symbol_value(current_segment, offset) if offset is not None else None
+
+            if value is not None:
+                return (value + addend) & 0xFFFFFFFF
+
+        raise ValueError(f"unresolved asset relocation symbol {symbol.name!r} in segment {current_segment}")
+
+    def _patched_sections(self, segment_name: str, obj: ElfObject) -> dict[int, bytearray]:
+        patched = {index: bytearray(data) for index, data in obj.section_data.items()}
+
+        for section_index, relocs in obj.relocs_by_section.items():
+            if section_index not in patched:
+                continue
+
+            section_data = patched[section_index]
+
+            for reloc in relocs:
+                if reloc.type != R_MIPS_32:
+                    raise ValueError(f"unsupported relocation type {reloc.type} in {obj.path}")
+
+                if reloc.offset + 4 > len(section_data):
+                    raise ValueError(f"relocation out of range in {obj.path}")
+
+                symbols = obj.symtabs[reloc.symtab_index]
+                symbol = symbols[reloc.sym_index]
+                addend = struct.unpack_from("<I", section_data, reloc.offset)[0]
+                value = self._resolve_relocation_symbol(segment_name, symbol, addend)
+                struct.pack_into("<I", section_data, reloc.offset, value)
+
+        return patched
+
+    def build_native_segment(self, entry: dict[str, object]) -> bytes | None:
+        segment_name = str(entry["name"])
+        paths = self.segment_object_paths.get(segment_name)
+
+        if not paths:
+            return None
+
+        output = bytearray(int(entry["size"]))
+        copied = 0
+
+        for path in paths:
+            obj = self._load_object(path)
+            patched_sections = self._patched_sections(segment_name, obj)
+
+            for symbol in obj.iter_symbols():
+                if (not symbol.name) or (symbol.size == 0) or (symbol.shndx == SHN_UNDEF):
+                    continue
+
+                if symbol.shndx not in patched_sections:
+                    continue
+
+                section = obj.sections[symbol.shndx]
+                if (section.flags & SHF_ALLOC) == 0:
+                    continue
+
+                offset = self._symbol_offset(segment_name, symbol.name)
+                if offset is None:
+                    continue
+
+                section_data = patched_sections[symbol.shndx]
+                data = section_data[symbol.value : symbol.value + symbol.size]
+                end = offset + len(data)
+
+                if end > len(output):
+                    raise ValueError(
+                        f"{symbol.name} at 0x{offset:X}..0x{end:X} exceeds {segment_name} size 0x{len(output):X}"
+                    )
+
+                output[offset:end] = data
+                copied += 1
+
+        if copied == 0:
+            return None
+
+        return bytes(output)
 MESSAGE_TABLE_LAYOUTS = {
     "NTSC": {
         "jpn": ("sJpnMessageEntryTable", "jpn_message_data_static", None),
@@ -73,6 +658,19 @@ def should_emit_raw_segment(name: str, baserom_dir: Path) -> bool:
     return (baserom_dir / name).is_file()
 
 
+def read_original_vrom_ranges(version: str) -> dict[str, tuple[int, int]]:
+    config = version_config.load_version_config(version)
+    rom_path = ROOT / "baseroms" / version / "baserom-decompressed.z64"
+    rom_data = memoryview(rom_path.read_bytes())
+    entries = dmadata.read_dmadata(rom_data, config.dmadata_start)
+    ranges: dict[str, tuple[int, int]] = {}
+
+    for name, entry in zip(config.dmadata_segments.keys(), entries):
+        ranges[name] = (entry.vrom_start, entry.vrom_end)
+
+    return ranges
+
+
 def c_string(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
@@ -91,11 +689,13 @@ def segment_offset(addr: int) -> int:
 
 
 def build_entries(version: str) -> list[dict[str, object]]:
+    config = version_config.load_version_config(version)
     baserom_dir = ROOT / "extracted" / version / "baserom"
+    original_ranges = read_original_vrom_ranges(version)
     cursor = EXTERNAL_VROM_BASE
     entries: list[dict[str, object]] = []
 
-    for name in declared_segment_names():
+    for name in config.dmadata_segments.keys():
         if not should_emit_raw_segment(name, baserom_dir):
             continue
 
@@ -103,6 +703,7 @@ def build_entries(version: str) -> list[dict[str, object]]:
         size = source.stat().st_size
         start = align(cursor, EXTERNAL_VROM_ALIGN)
         end = start + size
+        original_start, original_end = original_ranges[name]
         cursor = align(end, EXTERNAL_VROM_ALIGN)
         entries.append(
             {
@@ -111,6 +712,8 @@ def build_entries(version: str) -> list[dict[str, object]]:
                 "size": size,
                 "vrom_start": start,
                 "vrom_end": end,
+                "original_vrom_start": original_start,
+                "original_vrom_end": original_end,
                 "runtime_path": RUNTIME_SEGMENT_DIR / f"{name}.bin",
             }
         )
@@ -237,7 +840,7 @@ def build_message_entries(version: str, entries: list[dict[str, object]]) -> dic
     return message_entries
 
 
-def copy_data_files(entries: list[dict[str, object]], data_dir: Path) -> None:
+def copy_data_files(entries: list[dict[str, object]], data_dir: Path, native_assets: NativeAssetContext) -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
     expected: set[str] = set()
 
@@ -246,15 +849,20 @@ def copy_data_files(entries: list[dict[str, object]], data_dir: Path) -> None:
         assert isinstance(source, Path)
         filename = f"{entry['name']}.bin"
         target = data_dir / filename
+        native_data = native_assets.build_native_segment(entry)
+
         expected.add(filename)
-        shutil.copy2(source, target)
+        if native_data is not None:
+            target.write_bytes(native_data)
+        else:
+            shutil.copy2(source, target)
 
     for stale in data_dir.glob("*.bin"):
         if stale.name not in expected:
             stale.unlink()
 
 
-def emit_asm(output: Path, entries: list[dict[str, object]]) -> None:
+def emit_asm(output: Path, entries: list[dict[str, object]], native_assets: NativeAssetContext) -> None:
     lines: list[str] = [
         "/* Generated by tools/psp_port_asset_segments.py. */",
         "/* Raw bytes live in data/segments next to EBOOT.PBP; these are PSP-side ROM handles. */",
@@ -278,6 +886,24 @@ def emit_asm(output: Path, entries: list[dict[str, object]]) -> None:
                 "",
             ]
         )
+
+    linker_symbols = native_assets.linker_symbol_values({"objects", "scenes"})
+    if linker_symbols:
+        lines.extend(
+            [
+                "/* Object and scene asset data is loaded at runtime; expose symbols as segmented addresses. */",
+                "",
+            ]
+        )
+
+        for name, value in sorted(linker_symbols.items()):
+            lines.extend(
+                [
+                    f".global {name}",
+                    f".equ {name}, 0x{value:08X}",
+                    "",
+                ]
+            )
 
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("\n".join(lines))
@@ -313,6 +939,7 @@ def emit_table(output: Path, entries: list[dict[str, object]], message_entries: 
         assert isinstance(path, Path)
         lines.append(
             f"    {{ 0x{entry['vrom_start']:08X}, 0x{entry['vrom_end']:08X}, "
+            f"0x{entry['original_vrom_start']:08X}, 0x{entry['original_vrom_end']:08X}, "
             f'"{c_string(path.as_posix())}" }},'
         )
 
@@ -338,10 +965,11 @@ def emit_table(output: Path, entries: list[dict[str, object]], message_entries: 
 
 def emit(version: str, asm_output: Path, table_output: Path, data_dir: Path) -> None:
     entries = build_entries(version)
+    native_assets = NativeAssetContext(version, entries)
     message_entries = build_message_entries(version, entries)
-    emit_asm(asm_output, entries)
+    emit_asm(asm_output, entries, native_assets)
     emit_table(table_output, entries, message_entries)
-    copy_data_files(entries, data_dir)
+    copy_data_files(entries, data_dir, native_assets)
 
 
 def main() -> None:

@@ -24,8 +24,13 @@
 #include "gfx_window_manager_api.h"
 #include "gfx_rendering_api.h"
 #include "gfx_screen_config.h"
+#if defined(TARGET_PSP)
+#include "buffers.h"
+#endif
 #include "oot_port_macros.h"
+#include "oot_psp_asset_loader.h"
 #include "oot_psp_compat.h"
+#include "sys_matrix.h"
 
 #define STRINGIFY(x) #x
 #define TOSTRING(x) STRINGIFY(x)
@@ -62,6 +67,7 @@
 #define PSP_NATIVE_ADDR_START 0x08800000U
 #define PSP_NATIVE_ADDR_END 0x0C000000U
 #define PSP_SEGMENTED_COLLISION_OFFSET_MAX 0x00010000U
+#define PSP_ASSET_SYMBOL_GIDENTITYMTX 0x0E000001U
 
 /* Pixel Formats */
 #define GU_PSM_5650		(0) /* Display, Texture, Palette */
@@ -242,6 +248,7 @@ static const struct RGBA white_color = {0xff, 0xff, 0xff, 0xff};
 static uint8_t sInvalidTextureBuf[256] __attribute__((aligned(16))) = { 0xff, 0xff, 0xff, 0xff };
 static uint8_t sInvalidPaletteBuf[512] __attribute__((aligned(16))) = { 0xff, 0xff };
 static struct GfxCmdSnapshot sCurrentCmd;
+extern u8 __bss_start[];
 
 static inline bool gfx_addr_is_native(uintptr_t addr) {
     return (addr >= PSP_NATIVE_ADDR_START) && (addr < PSP_NATIVE_ADDR_END);
@@ -292,6 +299,104 @@ static bool gfx_normalize_native_addr(uintptr_t value, uintptr_t* normalized) {
     return gfx_normalize_native_range(value, 1, normalized);
 }
 
+static bool gfx_range_contains(uintptr_t value, size_t size, uintptr_t rangeStart, uintptr_t rangeEnd) {
+    uintptr_t end;
+
+    if (size == 0) {
+        return true;
+    }
+
+    end = value + size;
+    if (end < value) {
+        return false;
+    }
+
+    return (value >= rangeStart) && (end <= rangeEnd);
+}
+
+static bool gfx_is_graph_pool_range(uintptr_t value, size_t size) {
+    for (size_t i = 0; i < ARRAY_COUNT(gGfxPools); i++) {
+        uintptr_t poolStart = (uintptr_t)&gGfxPools[i];
+        uintptr_t poolEnd = poolStart + sizeof(gGfxPools[i]);
+
+        if (gfx_range_contains(value, size, poolStart, poolEnd)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool gfx_is_static_prx_range(uintptr_t value, size_t size) {
+    return gfx_range_contains(value, size, PSP_NATIVE_ADDR_START, (uintptr_t)__bss_start);
+}
+
+static bool gfx_is_valid_native_dl_range(uintptr_t value, size_t size) {
+    if (!gfx_native_range_contains(value, size)) {
+        return false;
+    }
+
+    if (gfx_is_static_prx_range(value, size)) {
+        return true;
+    }
+
+    if (gfx_is_graph_pool_range(value, size)) {
+        return true;
+    }
+
+    if (OotPsp_IsSystemHeapRange((const void*)value, size)) {
+        return true;
+    }
+
+    return false;
+}
+
+static void gfx_log_bad_data_source(const char* context, const void* addr, size_t sizeBytes) {
+    static s32 sBadDataSourceLogCount = 0;
+    uintptr_t value = (uintptr_t)addr;
+    uint8_t segment = value >> 24;
+    const struct GfxCmdSnapshot emptyCmd = { 0 };
+    const struct GfxCmdSnapshot* segmentCmd = &emptyCmd;
+
+    if (segment < NUM_SEGMENTS) {
+        segmentCmd = &rsp.segment_cmd[segment];
+    }
+
+    if (sBadDataSourceLogCount < 32) {
+        printf("oot-psp gfx bad data source context=%s addr=%08lx size=%lu cur=%08lx/%08lx/%08lx "
+               "seg=%u segbase=%08lx segcmd=%08lx/%08lx/%08lx "
+               "seg1=%08lx seg2=%08lx seg3=%08lx seg4=%08lx seg6=%08lx seg8=%08lx seg9=%08lx sega=%08lx "
+               "segc=%08lx segd=%08lx segacmd=%08lx/%08lx/%08lx\n",
+               context, (unsigned long)value, (unsigned long)sizeBytes, (unsigned long)sCurrentCmd.addr,
+               (unsigned long)sCurrentCmd.w0, (unsigned long)sCurrentCmd.w1, segment,
+               (segment < NUM_SEGMENTS) ? (unsigned long)(uintptr_t)rsp.segments[segment] : 0,
+               (unsigned long)segmentCmd->addr, (unsigned long)segmentCmd->w0, (unsigned long)segmentCmd->w1,
+               (unsigned long)(uintptr_t)rsp.segments[1], (unsigned long)(uintptr_t)rsp.segments[2],
+               (unsigned long)(uintptr_t)rsp.segments[3], (unsigned long)(uintptr_t)rsp.segments[4],
+               (unsigned long)(uintptr_t)rsp.segments[6], (unsigned long)(uintptr_t)rsp.segments[8],
+               (unsigned long)(uintptr_t)rsp.segments[9], (unsigned long)(uintptr_t)rsp.segments[10],
+               (unsigned long)(uintptr_t)rsp.segments[12], (unsigned long)(uintptr_t)rsp.segments[13],
+               (unsigned long)rsp.segment_cmd[10].addr, (unsigned long)rsp.segment_cmd[10].w0,
+               (unsigned long)rsp.segment_cmd[10].w1);
+    } else if (sBadDataSourceLogCount == 32) {
+        printf("oot-psp gfx bad data source logs suppressed\n");
+    }
+
+    sBadDataSourceLogCount++;
+}
+
+static bool gfx_normalize_read_source(const void* addr, size_t sizeBytes, const char* context, const void** normalized) {
+    uintptr_t normalizedValue;
+
+    if (gfx_normalize_native_range((uintptr_t)addr, sizeBytes, &normalizedValue)) {
+        *normalized = (const void*)normalizedValue;
+        return true;
+    }
+
+    gfx_log_bad_data_source(context, addr, sizeBytes);
+    return false;
+}
+
 static void gfx_log_bad_texture_source(int tile, const char* context, const uint8_t* addr, uint32_t sizeBytes) {
     static s32 sBadTextureSourceLogCount = 0;
 
@@ -306,17 +411,23 @@ static void gfx_log_bad_texture_source(int tile, const char* context, const uint
         }
 
         printf("oot-psp gfx bad texture source context=%s tile=%d addr=%08lx size=%lu cur=%08lx/%08lx/%08lx "
-               "setimg=%08lx/%08lx/%08lx load=%08lx/%08lx/%08lx seg8=%08lx seg9=%08lx segd=%08lx "
-               "seg8cmd=%08lx/%08lx/%08lx seg9cmd=%08lx/%08lx/%08lx\n",
+               "setimg=%08lx/%08lx/%08lx load=%08lx/%08lx/%08lx tex=%08lx fmt=%u siz=%u width=%lu "
+               "loadslot=%u seg1=%08lx seg4=%08lx seg8=%08lx seg9=%08lx sega=%08lx segd=%08lx "
+               "seg8cmd=%08lx/%08lx/%08lx seg9cmd=%08lx/%08lx/%08lx segacmd=%08lx/%08lx/%08lx\n",
                context, tile, (unsigned long)(uintptr_t)addr, (unsigned long)sizeBytes,
                (unsigned long)sCurrentCmd.addr, (unsigned long)sCurrentCmd.w0, (unsigned long)sCurrentCmd.w1,
                (unsigned long)imageCmd->addr, (unsigned long)imageCmd->w0, (unsigned long)imageCmd->w1,
                (unsigned long)loadCmd->addr, (unsigned long)loadCmd->w0, (unsigned long)loadCmd->w1,
+               (unsigned long)(uintptr_t)rdp.texture_to_load.addr, rdp.texture_to_load.fmt, rdp.texture_to_load.siz,
+               (unsigned long)rdp.texture_to_load.width, rdp.texture_to_load.tile_number,
+               (unsigned long)(uintptr_t)rsp.segments[1], (unsigned long)(uintptr_t)rsp.segments[4],
                (unsigned long)(uintptr_t)rsp.segments[8], (unsigned long)(uintptr_t)rsp.segments[9],
-               (unsigned long)(uintptr_t)rsp.segments[13],
+               (unsigned long)(uintptr_t)rsp.segments[10], (unsigned long)(uintptr_t)rsp.segments[13],
                (unsigned long)rsp.segment_cmd[8].addr, (unsigned long)rsp.segment_cmd[8].w0,
                (unsigned long)rsp.segment_cmd[8].w1, (unsigned long)rsp.segment_cmd[9].addr,
-               (unsigned long)rsp.segment_cmd[9].w0, (unsigned long)rsp.segment_cmd[9].w1);
+               (unsigned long)rsp.segment_cmd[9].w0, (unsigned long)rsp.segment_cmd[9].w1,
+               (unsigned long)rsp.segment_cmd[10].addr, (unsigned long)rsp.segment_cmd[10].w0,
+               (unsigned long)rsp.segment_cmd[10].w1);
     } else if (sBadTextureSourceLogCount == 16) {
         printf("oot-psp gfx bad texture source logs suppressed\n");
     }
@@ -333,6 +444,32 @@ static bool gfx_normalize_texture_source(const uint8_t** addr, uint32_t sizeByte
     }
 
     return false;
+}
+
+static bool gfx_texture_load_slot(const char* context, int* slot) {
+    if (rdp.texture_to_load.tile_number < 2) {
+        *slot = rdp.texture_to_load.tile_number;
+        return true;
+    }
+
+    gfx_log_bad_texture_source(rdp.texture_to_load.tile_number, context, rdp.texture_to_load.addr, 1);
+    return false;
+}
+
+static void gfx_set_invalid_loaded_texture(int tile) {
+    rdp.loaded_texture[tile].addr = sInvalidTextureBuf;
+    rdp.loaded_texture[tile].size_bytes = 8;
+    rdp.loaded_texture[tile].source_size_bytes = 8;
+    rdp.loaded_texture[tile].row_stride_bytes = 2;
+    rdp.loaded_texture[tile].source_nibble_offset = 0;
+}
+
+static void gfx_set_invalid_texture_tile(void) {
+    rdp.texture_tile.uls = 0;
+    rdp.texture_tile.ult = 0;
+    rdp.texture_tile.lrs = 0;
+    rdp.texture_tile.lrt = 0;
+    rdp.texture_tile.line_size_bytes = 2;
 }
 
 static void gfx_validate_palette_source(const char* context) {
@@ -359,12 +496,8 @@ static bool gfx_validate_texture_source(int tile, const char* context) {
     }
 
     gfx_log_bad_texture_source(tile, context, addr, sizeBytes);
-    rdp.loaded_texture[tile].addr = sInvalidTextureBuf;
-    rdp.loaded_texture[tile].size_bytes = 8;
-    rdp.loaded_texture[tile].source_size_bytes = 8;
-    rdp.loaded_texture[tile].row_stride_bytes = 2;
-    rdp.loaded_texture[tile].source_nibble_offset = 0;
-    rdp.texture_tile.line_size_bytes = 2;
+    gfx_set_invalid_loaded_texture(tile);
+    gfx_set_invalid_texture_tile();
     return false;
 }
 #endif
@@ -399,14 +532,23 @@ static bool gfx_source_needs_n64_wordswap(const uint8_t* addr, uint32_t sizeByte
 
 static uint8_t gfx_read_texture_source_u8(const uint8_t* addr, uint32_t offset, bool wordswap) {
 #if defined(TARGET_PSP)
+    uintptr_t source = (uintptr_t)addr + offset;
+    uintptr_t normalized;
+
     if (wordswap) {
-        return *(const uint8_t*)(((uintptr_t)addr + offset) ^ 7U);
+        source ^= 7U;
     }
+
+    if (!gfx_normalize_native_addr(source, &normalized)) {
+        return 0xff;
+    }
+
+    return *(const uint8_t*)normalized;
 #else
     _UNUSED(wordswap);
-#endif
 
     return addr[offset];
+#endif
 }
 
 static uint16_t gfx_read_texture_source_be16(const uint8_t* addr, uint32_t offset, bool wordswap) {
@@ -936,6 +1078,23 @@ static uint32_t gfx_texture_row_bytes(uint32_t width, uint32_t siz) {
     }
 }
 
+#if defined(TARGET_PSP)
+static void gfx_validate_texture_tile_dimensions(int tile, const char* context) {
+    uint32_t width = gfx_texture_width_from_tile();
+    uint32_t height = gfx_texture_height_from_tile();
+    uint32_t textureWidth = width + rdp.loaded_texture[tile].source_nibble_offset;
+    bool widthOverflow = textureWidth < width;
+    uint32_t rowBytes = widthOverflow ? UINT32_MAX : gfx_texture_row_bytes(textureWidth, rdp.texture_tile.siz);
+    uint32_t spanBytes = (height > 0 && rowBytes <= (UINT32_MAX / height)) ? rowBytes * height : UINT32_MAX;
+
+    if ((width == 0) || (height == 0) || widthOverflow || (spanBytes > 4096U)) {
+        gfx_log_bad_texture_source(tile, context, rdp.loaded_texture[tile].addr, spanBytes);
+        gfx_set_invalid_loaded_texture(tile);
+        gfx_set_invalid_texture_tile();
+    }
+}
+#endif
+
 static uint32_t gfx_texture_byte_offset(uint32_t texel, uint32_t siz) {
     if (siz == G_IM_SIZ_4b) {
         return texel >> 1;
@@ -1216,6 +1375,7 @@ static void import_texture(int tile) {
 
 #if defined(TARGET_PSP)
     gfx_validate_texture_source(tile, "import_texture");
+    gfx_validate_texture_tile_dimensions(tile, "import_texture-dimensions");
 #endif
     
     if (gfx_texture_cache_lookup(tile, &rendering_state.textures[tile], rdp.loaded_texture[tile].addr, fmt, siz)) {
@@ -1482,6 +1642,14 @@ static void gfx_apply_modelview_matrix(void) {
 
 static void gfx_sp_matrix(uint8_t parameters, const int32_t *addr) {
     float matrix[4][4] __attribute__((aligned(16)));
+#if defined(TARGET_PSP)
+    const void* normalizedSource;
+
+    if (!gfx_normalize_read_source(addr, sizeof(Mtx), "matrix", &normalizedSource)) {
+        return;
+    }
+    addr = (const int32_t*)normalizedSource;
+#endif
 #ifndef GBI_FLOATS
     // Original GBI where fixed point matrices are used
     for (int i = 0; i < 4; i++) {
@@ -1547,9 +1715,26 @@ struct ShaderProgram {
     int num_inputs;
 };
 
-static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *vertices) {
+static bool gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *vertices) {
     float temp_vec[4] __attribute__((aligned(16)));
     float proj_vec[4] __attribute__((aligned(16)));
+#if defined(TARGET_PSP)
+    const void* normalizedSource;
+
+    if (n_vertices == 0) {
+        return true;
+    }
+
+    if ((dest_index >= MAX_VERTICES) || (n_vertices > (MAX_VERTICES - dest_index))) {
+        gfx_log_bad_data_source("vertex-count", vertices, n_vertices * sizeof(Vtx));
+        return false;
+    }
+
+    if (!gfx_normalize_read_source(vertices, n_vertices * sizeof(Vtx), "vertex", &normalizedSource)) {
+        return false;
+    }
+    vertices = (const Vtx*)normalizedSource;
+#endif
     for (size_t i = 0; i < n_vertices; i++, dest_index++) {
         const Vtx_t *v = &vertices[i].v;
         const Vtx_tn *vn = &vertices[i].n;
@@ -1676,6 +1861,8 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
         }*/
         d->color.a = v->cn[3];
     }
+
+    return true;
 }
 
 static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
@@ -1860,6 +2047,21 @@ static void gfx_sp_geometry_mode(uint32_t clear, uint32_t set) {
 }
 
 static void gfx_calc_and_set_viewport(const Vp_t *viewport) {
+#if defined(TARGET_PSP)
+    const void* normalizedSource;
+
+    if (!gfx_normalize_read_source(viewport, sizeof(Vp_t), "viewport", &normalizedSource)) {
+        rdp.viewport.x = 0;
+        rdp.viewport.y = 0;
+        rdp.viewport.width = gfx_current_dimensions.width;
+        rdp.viewport.height = gfx_current_dimensions.height;
+        rdp.viewport_or_scissor_changed = true;
+        gfx_mark_tri_pipeline_dirty();
+        return;
+    }
+    viewport = (const Vp_t*)normalizedSource;
+#endif
+
     // 2 bits fraction
     float width = 2.0f * viewport->vscale[0] / 4.0f;
     float height = 2.0f * viewport->vscale[1] / 4.0f;
@@ -1896,6 +2098,14 @@ static void gfx_sp_movemem(uint8_t index, uint8_t offset, const void* data) {
         case G_MV_LIGHT: {
             int lightidx = offset / 24 - 2;
             if (lightidx >= 0 && lightidx <= MAX_LIGHTS) { // skip lookat
+#if defined(TARGET_PSP)
+                const void* normalizedSource;
+
+                if (!gfx_normalize_read_source(data, sizeof(Light_t), "light", &normalizedSource)) {
+                    break;
+                }
+                data = normalizedSource;
+#endif
                 // NOTE: reads out of bounds if it is an ambient light
                 memcpy(rsp.current_lights + lightidx, data, sizeof(Light_t));
             }
@@ -1905,6 +2115,16 @@ static void gfx_sp_movemem(uint8_t index, uint8_t offset, const void* data) {
         case G_MV_L0:
         case G_MV_L1:
         case G_MV_L2:
+#if defined(TARGET_PSP)
+        {
+            const void* normalizedSource;
+
+            if (!gfx_normalize_read_source(data, sizeof(Light_t), "light", &normalizedSource)) {
+                break;
+            }
+            data = normalizedSource;
+        }
+#endif
             // NOTE: reads out of bounds if it is an ambient light
             memcpy(rsp.current_lights + (index - G_MV_L0) / 2, data, sizeof(Light_t));
             break;
@@ -2020,12 +2240,22 @@ static void gfx_dp_set_tile_size(uint8_t tile, uint16_t uls, uint16_t ult, uint1
 static void gfx_dp_load_tlut(UNUSED uint8_t tile, uint32_t high_index) {
     _UNUSED(high_index);
 
+#if defined(TARGET_PSP)
+    int loadSlot;
+
+    if (tile != G_TX_LOADTILE || rdp.texture_to_load.siz != G_IM_SIZ_16b ||
+        !gfx_texture_load_slot("load-tlut-slot", &loadSlot)) {
+        gfx_log_bad_texture_source(-1, "load-tlut-command", rdp.texture_to_load.addr, GFX_TLUT_SIZE_BYTES);
+        return;
+    }
+#else
     SUPPORT_CHECK(tile == G_TX_LOADTILE);
     SUPPORT_CHECK(rdp.texture_to_load.siz == G_IM_SIZ_16b);
+#endif
     rdp.palette = rdp.texture_to_load.addr;
 #if defined(TARGET_PSP)
-    rdp.loaded_texture[rdp.texture_to_load.tile_number].image_cmd = rdp.texture_to_load.image_cmd;
-    rdp.loaded_texture[rdp.texture_to_load.tile_number].load_cmd = sCurrentCmd;
+    rdp.loaded_texture[loadSlot].image_cmd = rdp.texture_to_load.image_cmd;
+    rdp.loaded_texture[loadSlot].load_cmd = sCurrentCmd;
 #endif
 }
 
@@ -2033,9 +2263,21 @@ static void gfx_dp_load_block(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t
     _UNUSED(dxt);
 
     if (tile == 1) return;
+#if defined(TARGET_PSP)
+    int loadSlot;
+
+    if (tile != G_TX_LOADTILE || uls != 0 || ult != 0 ||
+        !gfx_texture_load_slot("load-block-slot", &loadSlot)) {
+        gfx_log_bad_texture_source(-1, "load-block-command", rdp.texture_to_load.addr, 1);
+        return;
+    }
+#else
+    int loadSlot = rdp.texture_to_load.tile_number;
+
     SUPPORT_CHECK(tile == G_TX_LOADTILE);
     SUPPORT_CHECK(uls == 0);
     SUPPORT_CHECK(ult == 0);
+#endif
     
     // The lrs field rather seems to be number of pixels to load
     uint32_t word_size_shift = 0;
@@ -2054,29 +2296,58 @@ static void gfx_dp_load_block(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t
             break;
     }
     uint32_t size_bytes = (lrs + 1) << word_size_shift;
-    rdp.loaded_texture[rdp.texture_to_load.tile_number].size_bytes = size_bytes;
-    rdp.loaded_texture[rdp.texture_to_load.tile_number].source_size_bytes = size_bytes;
-    rdp.loaded_texture[rdp.texture_to_load.tile_number].row_stride_bytes = 0;
-    rdp.loaded_texture[rdp.texture_to_load.tile_number].source_nibble_offset = 0;
+    rdp.loaded_texture[loadSlot].size_bytes = size_bytes;
+    rdp.loaded_texture[loadSlot].source_size_bytes = size_bytes;
+    rdp.loaded_texture[loadSlot].row_stride_bytes = 0;
+    rdp.loaded_texture[loadSlot].source_nibble_offset = 0;
 #if defined(TARGET_PSP)
-    rdp.loaded_texture[rdp.texture_to_load.tile_number].image_cmd = rdp.texture_to_load.image_cmd;
-    rdp.loaded_texture[rdp.texture_to_load.tile_number].load_cmd = sCurrentCmd;
-#endif
+    rdp.loaded_texture[loadSlot].image_cmd = rdp.texture_to_load.image_cmd;
+    rdp.loaded_texture[loadSlot].load_cmd = sCurrentCmd;
+    if (size_bytes > 4096U) {
+        gfx_log_bad_texture_source(loadSlot, "load-block-size", rdp.texture_to_load.addr, size_bytes);
+        gfx_set_invalid_loaded_texture(loadSlot);
+        gfx_set_invalid_texture_tile();
+    } else {
+        rdp.loaded_texture[loadSlot].addr = rdp.texture_to_load.addr;
+    }
+#else
     assert(size_bytes <= 4096 && "bug: too big texture");
-    rdp.loaded_texture[rdp.texture_to_load.tile_number].addr = rdp.texture_to_load.addr;
+    rdp.loaded_texture[loadSlot].addr = rdp.texture_to_load.addr;
+#endif
     
-    rdp.textures_changed[rdp.texture_to_load.tile_number] = true;
+    rdp.textures_changed[loadSlot] = true;
     gfx_mark_tri_pipeline_dirty();
 }
 
 static void gfx_dp_load_tile(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t lrs, uint32_t lrt) {
     if (tile == 1) return;
+#if defined(TARGET_PSP)
+    int loadSlot;
+
+    if (tile != G_TX_LOADTILE || !gfx_texture_load_slot("load-tile-slot", &loadSlot)) {
+        gfx_log_bad_texture_source(-1, "load-tile-command", rdp.texture_to_load.addr, 1);
+        return;
+    }
+#else
+    int loadSlot = rdp.texture_to_load.tile_number;
+
     SUPPORT_CHECK(tile == G_TX_LOADTILE);
+#endif
 
     uint32_t source_uls = uls >> G_TEXTURE_IMAGE_FRAC;
     uint32_t source_ult = ult >> G_TEXTURE_IMAGE_FRAC;
     uint32_t source_lrs = lrs >> G_TEXTURE_IMAGE_FRAC;
     uint32_t source_lrt = lrt >> G_TEXTURE_IMAGE_FRAC;
+#if defined(TARGET_PSP)
+    if (source_lrs < source_uls || source_lrt < source_ult) {
+        gfx_log_bad_texture_source(loadSlot, "load-tile-bounds", rdp.texture_to_load.addr, 1);
+        gfx_set_invalid_loaded_texture(loadSlot);
+        gfx_set_invalid_texture_tile();
+        rdp.textures_changed[loadSlot] = true;
+        gfx_mark_tri_pipeline_dirty();
+        return;
+    }
+#endif
     uint32_t width = source_lrs - source_uls + 1;
     uint32_t height = source_lrt - source_ult + 1;
     uint32_t source_width = rdp.texture_to_load.width;
@@ -2093,24 +2364,38 @@ static void gfx_dp_load_tile(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t 
     uint32_t source_size_bytes = height > 0 ? ((height - 1) * source_stride) + row_bytes : 0;
     const uint8_t* source_addr = rdp.texture_to_load.addr + (size_t)source_ult * source_stride + source_x_offset;
 
-    rdp.loaded_texture[rdp.texture_to_load.tile_number].size_bytes = size_bytes;
-    rdp.loaded_texture[rdp.texture_to_load.tile_number].source_size_bytes = source_size_bytes;
-    rdp.loaded_texture[rdp.texture_to_load.tile_number].row_stride_bytes = source_stride;
-    rdp.loaded_texture[rdp.texture_to_load.tile_number].source_nibble_offset =
+    rdp.loaded_texture[loadSlot].size_bytes = size_bytes;
+    rdp.loaded_texture[loadSlot].source_size_bytes = source_size_bytes;
+    rdp.loaded_texture[loadSlot].row_stride_bytes = source_stride;
+    rdp.loaded_texture[loadSlot].source_nibble_offset =
         rdp.texture_to_load.siz == G_IM_SIZ_4b ? (source_uls & 1) : 0;
 #if defined(TARGET_PSP)
-    rdp.loaded_texture[rdp.texture_to_load.tile_number].image_cmd = rdp.texture_to_load.image_cmd;
-    rdp.loaded_texture[rdp.texture_to_load.tile_number].load_cmd = sCurrentCmd;
+    rdp.loaded_texture[loadSlot].image_cmd = rdp.texture_to_load.image_cmd;
+    rdp.loaded_texture[loadSlot].load_cmd = sCurrentCmd;
 #endif
 
+#if defined(TARGET_PSP)
+    if (size_bytes > 4096U) {
+        gfx_log_bad_texture_source(loadSlot, "load-tile-size", source_addr, size_bytes);
+        gfx_set_invalid_loaded_texture(loadSlot);
+        gfx_set_invalid_texture_tile();
+    } else {
+        rdp.loaded_texture[loadSlot].addr = source_addr;
+        rdp.texture_tile.uls = uls;
+        rdp.texture_tile.ult = ult;
+        rdp.texture_tile.lrs = lrs;
+        rdp.texture_tile.lrt = lrt;
+    }
+#else
     assert(size_bytes <= 4096 && "bug: too big texture");
-    rdp.loaded_texture[rdp.texture_to_load.tile_number].addr = source_addr;
+    rdp.loaded_texture[loadSlot].addr = source_addr;
     rdp.texture_tile.uls = uls;
     rdp.texture_tile.ult = ult;
     rdp.texture_tile.lrs = lrs;
     rdp.texture_tile.lrt = lrt;
+#endif
 
-    rdp.textures_changed[rdp.texture_to_load.tile_number] = true;
+    rdp.textures_changed[loadSlot] = true;
     gfx_mark_tri_pipeline_dirty();
 }
 
@@ -2365,6 +2650,31 @@ static inline bool gfx_addr_looks_segmented(uintptr_t addr) {
     return offset < PSP_SEGMENTED_COLLISION_OFFSET_MAX;
 }
 
+static inline bool gfx_try_normalize_prx_relocated_segmented_addr(uintptr_t addr, uintptr_t* normalizedAddr) {
+    uintptr_t candidate;
+    uint8_t segment;
+
+    if (OotPsp_IsRuntimeByteRange((void*)addr, 1)) {
+        return false;
+    }
+
+    if (!OotPsp_TryNormalizePrxRelocatedAddress(addr, &candidate)) {
+        return false;
+    }
+
+    if (!gfx_addr_looks_segmented(candidate)) {
+        return false;
+    }
+
+    segment = candidate >> 24;
+    if ((segment < 2) || (rsp.segments[segment] == NULL)) {
+        return false;
+    }
+
+    *normalizedAddr = candidate;
+    return true;
+}
+
 static void gfx_log_unmapped_segment(uintptr_t addr) {
     static s32 sUnmappedSegmentLogCount = 0;
 
@@ -2397,7 +2707,73 @@ static void gfx_log_segment_translation(uintptr_t addr, void* base, void* transl
     sSegmentTranslateLogCount++;
 }
 
+static void gfx_log_bad_dl_cursor(const char* reason, uintptr_t raw, uintptr_t translated) {
+    static s32 sBadDlCursorLogCount = 0;
+
+    if (sBadDlCursorLogCount < 32) {
+        printf("oot-psp gfx bad dl cursor reason=%s raw=%08lx translated=%08lx cur=%08lx/%08lx/%08lx "
+               "seg1=%08lx seg2=%08lx seg3=%08lx seg4=%08lx seg6=%08lx seg8=%08lx seg9=%08lx sega=%08lx "
+               "segc=%08lx segd=%08lx segacmd=%08lx/%08lx/%08lx\n",
+               reason, (unsigned long)raw, (unsigned long)translated, (unsigned long)sCurrentCmd.addr,
+               (unsigned long)sCurrentCmd.w0, (unsigned long)sCurrentCmd.w1,
+               (unsigned long)(uintptr_t)rsp.segments[1], (unsigned long)(uintptr_t)rsp.segments[2],
+               (unsigned long)(uintptr_t)rsp.segments[3], (unsigned long)(uintptr_t)rsp.segments[4],
+               (unsigned long)(uintptr_t)rsp.segments[6], (unsigned long)(uintptr_t)rsp.segments[8],
+               (unsigned long)(uintptr_t)rsp.segments[9], (unsigned long)(uintptr_t)rsp.segments[10],
+               (unsigned long)(uintptr_t)rsp.segments[12], (unsigned long)(uintptr_t)rsp.segments[13],
+               (unsigned long)rsp.segment_cmd[10].addr, (unsigned long)rsp.segment_cmd[10].w0,
+               (unsigned long)rsp.segment_cmd[10].w1);
+    } else if (sBadDlCursorLogCount == 32) {
+        printf("oot-psp gfx bad dl cursor logs suppressed\n");
+    }
+
+    sBadDlCursorLogCount++;
+}
+
+static bool gfx_validate_dl_cursor(uintptr_t raw, Gfx** cmdP) {
+    uintptr_t translated = (uintptr_t)*cmdP;
+    uintptr_t normalized;
+
+    if (!gfx_normalize_native_range(translated, sizeof(Gfx), &normalized)) {
+        gfx_log_bad_dl_cursor("unmapped", raw, translated);
+        return false;
+    }
+
+    if ((normalized & (sizeof(Gfx) - 1)) != 0) {
+        gfx_log_bad_dl_cursor("unaligned", raw, normalized);
+        return false;
+    }
+
+    if (!gfx_is_valid_native_dl_range(normalized, sizeof(Gfx))) {
+        gfx_log_bad_dl_cursor("non-dl-native-range", raw, normalized);
+        return false;
+    }
+
+    *cmdP = (Gfx*)normalized;
+    return true;
+}
+
+static inline void* gfx_runtime_symbol_addr(uintptr_t addr) {
+    switch (addr) {
+        case PSP_ASSET_SYMBOL_GIDENTITYMTX:
+            return &gIdentityMtx;
+        default:
+            return NULL;
+    }
+}
+
 static inline void *seg_addr(uintptr_t w1) {
+    void* runtimeSymbol = gfx_runtime_symbol_addr(w1);
+    uintptr_t normalizedSegmented;
+
+    if (runtimeSymbol != NULL) {
+        return runtimeSymbol;
+    }
+
+    if (gfx_try_normalize_prx_relocated_segmented_addr(w1, &normalizedSegmented)) {
+        w1 = normalizedSegmented;
+    }
+
     if (gfx_addr_looks_segmented(w1)) {
         uint8_t segment = w1 >> 24;
         uintptr_t offset = w1 & 0x00FFFFFFU;
@@ -2433,19 +2809,17 @@ static inline void *seg_addr(uintptr_t w1) {
 
 static bool gfx_translate_dl_cursor(Gfx** cmdP) {
     uintptr_t raw = (uintptr_t)*cmdP;
+    uintptr_t normalizedSegmented;
+
+    if (gfx_try_normalize_prx_relocated_segmented_addr(raw, &normalizedSegmented)) {
+        raw = normalizedSegmented;
+    }
 
     if (gfx_addr_looks_segmented(raw)) {
         void* translated = seg_addr(raw);
 
         if (translated == (void*)raw) {
-            static s32 sBadDlCursorLogCount = 0;
-
-            if (sBadDlCursorLogCount < 16) {
-                printf("oot-psp gfx bad dl cursor addr=%08lx\n", (unsigned long)raw);
-            } else if (sBadDlCursorLogCount == 16) {
-                printf("oot-psp gfx bad dl cursor logs suppressed\n");
-            }
-            sBadDlCursorLogCount++;
+            gfx_log_bad_dl_cursor("untranslated-segment", raw, (uintptr_t)translated);
             return false;
         }
 
@@ -2453,12 +2827,12 @@ static bool gfx_translate_dl_cursor(Gfx** cmdP) {
     } else {
         uintptr_t normalized;
 
-        if (gfx_normalize_native_addr(raw, &normalized)) {
+        if (gfx_normalize_native_range(raw, sizeof(Gfx), &normalized)) {
             *cmdP = (Gfx*)normalized;
         }
     }
 
-    return true;
+    return gfx_validate_dl_cursor(raw, cmdP);
 }
 
 #define C0(pos, width) ((cmd->words.w0 >> (pos)) & ((1U << width) - 1))
@@ -2521,11 +2895,17 @@ static void gfx_run_dl(Gfx* cmd) {
                 break;
             case G_VTX:
 #ifdef F3DEX_GBI_2
-                gfx_sp_vertex(C0(12, 8), C0(1, 7) - C0(12, 8), seg_addr(cmd->words.w1));
+                if (!gfx_sp_vertex(C0(12, 8), C0(1, 7) - C0(12, 8), seg_addr(cmd->words.w1))) {
+                    return;
+                }
 #elif defined(F3DEX_GBI) || defined(F3DLP_GBI)
-                gfx_sp_vertex(C0(10, 6), C0(16, 8) / 2, seg_addr(cmd->words.w1));
+                if (!gfx_sp_vertex(C0(10, 6), C0(16, 8) / 2, seg_addr(cmd->words.w1))) {
+                    return;
+                }
 #else
-                gfx_sp_vertex((C0(0, 16)) / sizeof(Vtx), C0(16, 4), seg_addr(cmd->words.w1));
+                if (!gfx_sp_vertex((C0(0, 16)) / sizeof(Vtx), C0(16, 4), seg_addr(cmd->words.w1))) {
+                    return;
+                }
 #endif
                 break;
             case G_DL:

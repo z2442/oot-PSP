@@ -79,30 +79,6 @@ static const char* OotPsp_ResolveAssetPath(const char* path, char* buffer, size_
     return buffer;
 }
 
-static const OotPspExternalAsset* OotPsp_FindExternalAsset(uintptr_t vrom, size_t size) {
-    uintptr_t end;
-    size_t i;
-
-    if (vrom > (UINTPTR_MAX - size)) {
-        return NULL;
-    }
-    end = vrom + size;
-
-    for (i = 0; i < gOotPspExternalAssetCount; i++) {
-        const OotPspExternalAsset* asset = &gOotPspExternalAssets[i];
-
-        if (size == 0) {
-            if ((vrom >= asset->vromStart) && (vrom < asset->vromEnd)) {
-                return asset;
-            }
-        } else if ((vrom >= asset->vromStart) && (end <= asset->vromEnd)) {
-            return asset;
-        }
-    }
-
-    return NULL;
-}
-
 static const OotPspExternalAsset* OotPsp_FindContainingExternalAsset(uintptr_t vrom, size_t* index) {
     size_t i;
 
@@ -120,7 +96,53 @@ static const OotPspExternalAsset* OotPsp_FindContainingExternalAsset(uintptr_t v
     return NULL;
 }
 
-static uintptr_t OotPsp_GetPrxRelocationBias(void) {
+static s32 OotPsp_RangeContains(uintptr_t rangeStart, uintptr_t rangeEnd, uintptr_t vromStart, uintptr_t vromEnd) {
+    if ((rangeEnd < rangeStart) || (vromEnd < vromStart)) {
+        return false;
+    }
+
+    if (vromStart == vromEnd) {
+        return (vromStart >= rangeStart) && (vromStart <= rangeEnd);
+    }
+
+    return (vromStart >= rangeStart) && (vromStart < rangeEnd) && (vromEnd <= rangeEnd);
+}
+
+static s32 OotPsp_TryTranslateAssetRange(const OotPspExternalAsset* asset, uintptr_t rangeStart, uintptr_t rangeEnd,
+                                         uintptr_t vromStart, uintptr_t vromEnd, uintptr_t* normalizedStart,
+                                         uintptr_t* normalizedEnd) {
+    if (!OotPsp_RangeContains(rangeStart, rangeEnd, vromStart, vromEnd)) {
+        return false;
+    }
+
+    *normalizedStart = asset->vromStart + (vromStart - rangeStart);
+    *normalizedEnd = asset->vromStart + (vromEnd - rangeStart);
+    return true;
+}
+
+static s32 OotPsp_TryNormalizeExternalRange(uintptr_t vromStart, uintptr_t vromEnd, uintptr_t* normalizedStart,
+                                            uintptr_t* normalizedEnd) {
+    size_t i;
+
+    for (i = 0; i < gOotPspExternalAssetCount; i++) {
+        const OotPspExternalAsset* asset = &gOotPspExternalAssets[i];
+
+        if (OotPsp_RangeContains(asset->vromStart, asset->vromEnd, vromStart, vromEnd)) {
+            *normalizedStart = vromStart;
+            *normalizedEnd = vromEnd;
+            return true;
+        }
+
+        if (OotPsp_TryTranslateAssetRange(asset, asset->originalVromStart, asset->originalVromEnd, vromStart, vromEnd,
+                                          normalizedStart, normalizedEnd)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+uintptr_t OotPsp_GetPrxRelocationBias(void) {
     if (!sOotPspPrxRelocationBiasInitialized) {
         sOotPspPrxRelocationBiasInitialized = true;
 
@@ -145,16 +167,63 @@ static uintptr_t OotPsp_GetPrxRelocationBias(void) {
     return sOotPspPrxRelocationBias;
 }
 
-static s32 OotPsp_TryNormalizeVrom(uintptr_t vrom, uintptr_t bias, uintptr_t* normalized) {
-    uintptr_t candidate;
-
-    if ((bias == 0) || (vrom < bias)) {
+static s32 OotPsp_TryNormalizePrxRelocatedAddressWithBias(uintptr_t addr, uintptr_t bias, uintptr_t* normalized) {
+    if ((bias == 0) || (addr < bias)) {
         return false;
     }
 
-    candidate = vrom - bias;
-    if (OotPsp_FindExternalAsset(candidate, 0) != NULL) {
-        *normalized = candidate;
+    *normalized = addr - bias;
+    return true;
+}
+
+s32 OotPsp_TryNormalizePrxRelocatedAddress(uintptr_t addr, uintptr_t* normalized) {
+    uintptr_t detectedBias;
+
+    if (normalized == NULL) {
+        return false;
+    }
+
+    detectedBias = OotPsp_GetPrxRelocationBias();
+    if (OotPsp_TryNormalizePrxRelocatedAddressWithBias(addr, detectedBias, normalized)) {
+        return true;
+    }
+
+    if ((detectedBias != OOT_PSP_DEFAULT_PRX_RELOCATION_BIAS) &&
+        OotPsp_TryNormalizePrxRelocatedAddressWithBias(addr, OOT_PSP_DEFAULT_PRX_RELOCATION_BIAS, normalized)) {
+        return true;
+    }
+
+    return false;
+}
+
+static s32 OotPsp_TryNormalizeBiasedRange(uintptr_t vromStart, uintptr_t vromEnd, uintptr_t bias,
+                                          uintptr_t* normalizedStart, uintptr_t* normalizedEnd) {
+    if ((bias == 0) || (vromStart < bias) || (vromEnd < bias)) {
+        return false;
+    }
+
+    return OotPsp_TryNormalizeExternalRange(vromStart - bias, vromEnd - bias, normalizedStart, normalizedEnd);
+}
+
+s32 OotPsp_NormalizeVromRange(uintptr_t vromStart, uintptr_t vromEnd, uintptr_t* normalizedStart,
+                              uintptr_t* normalizedEnd) {
+    uintptr_t detectedBias;
+
+    if ((normalizedStart == NULL) || (normalizedEnd == NULL) || (vromEnd < vromStart)) {
+        return false;
+    }
+
+    if (OotPsp_TryNormalizeExternalRange(vromStart, vromEnd, normalizedStart, normalizedEnd)) {
+        return true;
+    }
+
+    detectedBias = OotPsp_GetPrxRelocationBias();
+    if (OotPsp_TryNormalizeBiasedRange(vromStart, vromEnd, detectedBias, normalizedStart, normalizedEnd)) {
+        return true;
+    }
+    if ((detectedBias != OOT_PSP_DEFAULT_PRX_RELOCATION_BIAS) &&
+        OotPsp_TryNormalizeBiasedRange(vromStart, vromEnd, OOT_PSP_DEFAULT_PRX_RELOCATION_BIAS, normalizedStart,
+                                       normalizedEnd)) {
         return true;
     }
 
@@ -162,24 +231,28 @@ static s32 OotPsp_TryNormalizeVrom(uintptr_t vrom, uintptr_t bias, uintptr_t* no
 }
 
 uintptr_t OotPsp_NormalizeVrom(uintptr_t vrom) {
-    uintptr_t normalized;
-    uintptr_t detectedBias;
+    uintptr_t normalizedStart;
+    uintptr_t normalizedEnd;
 
-    if (OotPsp_FindExternalAsset(vrom, 0) != NULL) {
-        return vrom;
-    }
-
-    detectedBias = OotPsp_GetPrxRelocationBias();
-    if (OotPsp_TryNormalizeVrom(vrom, detectedBias, &normalized)) {
-        return normalized;
-    }
-
-    if ((detectedBias != OOT_PSP_DEFAULT_PRX_RELOCATION_BIAS) &&
-        OotPsp_TryNormalizeVrom(vrom, OOT_PSP_DEFAULT_PRX_RELOCATION_BIAS, &normalized)) {
-        return normalized;
+    if (OotPsp_NormalizeVromRange(vrom, vrom, &normalizedStart, &normalizedEnd)) {
+        return normalizedStart;
     }
 
     return vrom;
+}
+
+void OotPsp_NormalizeRomFile(RomFile* file) {
+    uintptr_t normalizedStart;
+    uintptr_t normalizedEnd;
+
+    if ((file == NULL) || (file->vromStart == 0)) {
+        return;
+    }
+
+    if (OotPsp_NormalizeVromRange(file->vromStart, file->vromEnd, &normalizedStart, &normalizedEnd)) {
+        file->vromStart = normalizedStart;
+        file->vromEnd = normalizedEnd;
+    }
 }
 
 const OotPspMessageEntry* OotPsp_FindMessageEntry(const OotPspMessageEntry* entries, size_t count, u16 textId) {
@@ -195,8 +268,9 @@ const OotPspMessageEntry* OotPsp_FindMessageEntry(const OotPspMessageEntry* entr
 }
 
 s32 OotPsp_AssetRead(void* ram, uintptr_t vrom, size_t size) {
-    uintptr_t normalizedVrom = OotPsp_NormalizeVrom(vrom);
-    uintptr_t cursor = normalizedVrom;
+    uintptr_t normalizedVrom;
+    uintptr_t normalizedEnd;
+    uintptr_t cursor;
     size_t assetIndex;
     char pathBuffer[384];
     const char* path;
@@ -207,6 +281,14 @@ s32 OotPsp_AssetRead(void* ram, uintptr_t vrom, size_t size) {
     if (size == 0) {
         return OOT_PSP_ASSET_READ_OK;
     }
+
+    if ((vrom > (UINTPTR_MAX - size)) ||
+        !OotPsp_NormalizeVromRange(vrom, vrom + size, &normalizedVrom, &normalizedEnd)) {
+        return OOT_PSP_ASSET_READ_NOT_EXTERNAL;
+    }
+
+    cursor = normalizedVrom;
+    (void)normalizedEnd;
 
     if (OotPsp_FindContainingExternalAsset(normalizedVrom, &assetIndex) == NULL) {
         return OOT_PSP_ASSET_READ_NOT_EXTERNAL;

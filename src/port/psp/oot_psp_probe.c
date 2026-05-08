@@ -1,3 +1,4 @@
+#include <pspfpu.h>
 #include <pspkernel.h>
 #include <string.h>
 
@@ -13,8 +14,32 @@
 #include "setup_state.h"
 #include "title_setup_state.h"
 
-PSP_MODULE_INFO("oot_psp_boot", PSP_MODULE_USER, 1, 0);
-PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
+
+void pspFpuSetEnable(uint32_t enable)
+{
+    uint32_t fcr;
+
+    enable &= 0x1F;
+
+    asm volatile (
+        "cfc1 %0, $31\n"
+        : "=r"(fcr)
+    );
+
+    fcr &= ~PSP_FPU_ENABLE_MASK;
+    fcr |= enable << PSP_FPU_ENABLE_POS;
+
+    asm volatile (
+        "ctc1 %0, $31\n"
+        :
+        : "r"(fcr)
+    );
+}
+
+PSP_MODULE_INFO("OOT PSP Port", 0, 1, 0);
+PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER | PSP_THREAD_ATTR_VFPU);
+PSP_MAIN_THREAD_STACK_SIZE_KB(1024);
+PSP_HEAP_SIZE_KB(-1024);
 
 extern const char gOotPspRomMd5[];
 extern const u32 gOotPspRomSize;
@@ -41,6 +66,9 @@ static size_t OotPspStateSize(GameStateFunc init) {
 }
 
 int main(int argc, char** argv) {
+
+    pspFpuSetEnable(0);
+
     GraphicsContext gfxCtx;
     GameState* gameState;
     GameStateFunc nextInit = Setup_Init;

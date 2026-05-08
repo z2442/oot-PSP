@@ -1356,6 +1356,12 @@ PSP_PORT_ASSET_SOURCES := \
 	$(PSP_PORT_EXTRACTED_TEXTURE_SOURCES) \
 	$(PSP_PORT_EXTRACTED_MISC_SOURCES)
 
+PSP_PORT_LINKED_ASSET_SOURCES := \
+	$(PSP_PORT_ROOT_TEXTURE_SOURCES) \
+	$(PSP_PORT_TEXT_ASSET_SOURCES) \
+	$(PSP_PORT_EXTRACTED_TEXTURE_SOURCES) \
+	$(PSP_PORT_EXTRACTED_MISC_SOURCES)
+
 PSP_PORT_PROBE_SOURCE := src/port/psp/oot_psp_probe.c
 
 PSP_PORT_SETUP_STAMP := $(PSP_PORT_BUILD_DIR)/setup.stamp
@@ -1373,7 +1379,8 @@ PSP_PORT_ASSET_SEGMENT_OBJECT := $(PSP_PORT_BUILD_DIR)/oot_psp_asset_segments.o
 PSP_PORT_ASSET_SEGMENT_TABLE_OBJECT := $(PSP_PORT_BUILD_DIR)/oot_psp_asset_segments_table.o
 PSP_PORT_RUNTIME_OBJECTS := $(patsubst %.c,$(PSP_PORT_BUILD_DIR)/%.o,$(PSP_PORT_RUNTIME_SOURCES))
 PSP_PORT_RUNTIME_ASM_OBJECTS := $(patsubst %.s,$(PSP_PORT_BUILD_DIR)/%.o,$(PSP_PORT_RUNTIME_ASM_SOURCES))
-PSP_PORT_ASSET_OBJECTS := $(patsubst %.c,$(PSP_PORT_BUILD_DIR)/%.o,$(PSP_PORT_ASSET_SOURCES))
+PSP_PORT_ASSET_OBJECTS := $(patsubst %.c,$(PSP_PORT_BUILD_DIR)/%.o,$(PSP_PORT_LINKED_ASSET_SOURCES))
+PSP_PORT_NATIVE_SEGMENT_OBJECTS := $(patsubst %.c,$(PSP_PORT_BUILD_DIR)/%.o,$(PSP_PORT_ASSET_SOURCES))
 PSP_PORT_PROBE_OBJECT := $(PSP_PORT_BUILD_DIR)/$(PSP_PORT_PROBE_SOURCE:.c=.o)
 PSP_PORT_LIBRARY := $(PSP_PORT_BUILD_DIR)/liboot_psp_platform.a
 PSP_PORT_ELF := $(PSP_PORT_BUILD_DIR)/oot-psp-port.elf
@@ -1455,11 +1462,13 @@ PSP_PORT_INCLUDES := \
 PSP_PORT_CFLAGS := -G0 -O2 -g3 -Wall -Wextra -Wno-format-security -Wno-unused-parameter -Wno-unused-variable \
 	-Wno-missing-braces \
 	-Wno-int-to-pointer-cast -Wno-pointer-to-int-cast -fno-strict-aliasing -fwrapv -fno-common -fsigned-char \
-	-ffunction-sections -fdata-sections -include src/port/psp/oot_psp_compat.h \
+	-ffunction-sections -fdata-sections \
+	-fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-ident \
+	-include src/port/psp/oot_psp_compat.h \
 	$(PSP_PORT_DEFINES) $(PSP_PORT_INCLUDES)
 
 PSP_PORT_LDFLAGS := -specs=$(PSP_PORT_PSPSDK)/lib/prxspecs -Wl,-q,-T$(PSP_PORT_PSPSDK)/lib/linkfile.prx \
-	-Wl,-zmax-page-size=128 -Wl,-u,module_info $(PSP_PORT_PSPSDK)/lib/prxexports.o -L$(PSP_PORT_PSPSDK)/lib -L$(PSP_PORT_PREFIX)/lib -lpspgu -lpspgum \
+	-Wl,-zmax-page-size=128 -Wl,--gc-sections -Wl,-u,module_info -Wl,-u,sceKernelChangeThreadPriority $(PSP_PORT_PSPSDK)/lib/prxexports.o -L$(PSP_PORT_PSPSDK)/lib -L$(PSP_PORT_PREFIX)/lib -lpspgu -lpspgum \
 	-lpspdisplay -lpspge -lpspctrl -lpsprtc -lpsppower -lpspdebug -lpspsdk -lpspuser -lm -lc
 
 psp-port: $(PSP_PORT_PBP) $(PSP_PORT_ASSET_SEGMENT_DATA_STAMP)
@@ -1473,7 +1482,7 @@ $(PSP_PORT_BUILD_DIR)/%.o: %.s
 	@mkdir -p $(dir $@)
 	$(PSP_PORT_CC) -c -x assembler-with-cpp $(PSP_PORT_ASM_DEFINES) $(PSP_PORT_INCLUDES) -Wa,-I$(EXTRACTED_DIR) -o $@ $<
 
-$(PSP_PORT_RUNTIME_OBJECTS) $(PSP_PORT_ASSET_OBJECTS): include/command_macros_base.h include/cutscene_commands.h include/scene.h
+$(PSP_PORT_RUNTIME_OBJECTS) $(PSP_PORT_NATIVE_SEGMENT_OBJECTS): include/command_macros_base.h include/cutscene_commands.h include/scene.h
 
 $(PSP_PORT_SETUP_STAMP): $(BASEROM_DIR)/baserom.z64
 	@mkdir -p $(dir $@)
@@ -1503,7 +1512,7 @@ $(PSP_PORT_ASSET_TABLE_OBJECT): $(PSP_PORT_ASSET_TABLE_SOURCE)
 	@mkdir -p $(dir $@)
 	$(PSP_PORT_CC) -c $(PSP_PORT_CFLAGS) -o $@ $<
 
-$(PSP_PORT_ASSET_SEGMENT_STAMP): $(PSP_PORT_SETUP_STAMP) tools/psp_port_asset_segments.py include/segment_symbols.h
+$(PSP_PORT_ASSET_SEGMENT_STAMP): $(PSP_PORT_SETUP_STAMP) tools/psp_port_asset_segments.py include/segment_symbols.h $(PSP_PORT_NATIVE_SEGMENT_OBJECTS)
 	$(PYTHON) tools/psp_port_asset_segments.py $(VERSION) $(PSP_PORT_ASSET_SEGMENT_SOURCE) $(PSP_PORT_ASSET_SEGMENT_TABLE_SOURCE) $(PSP_PORT_ASSET_SEGMENT_DATA_DIR)
 	@touch $@
 
@@ -1524,7 +1533,7 @@ $(PSP_PORT_ASSET_SEGMENT_TABLE_OBJECT): $(PSP_PORT_ASSET_SEGMENT_TABLE_SOURCE)
 $(PSP_PORT_EXTRACTED_ASSET_FILES): $(PSP_PORT_SETUP_STAMP)
 	@test -f $@
 
-$(PSP_PORT_ASSET_OBJECTS): $(PSP_PORT_SETUP_STAMP) $(PSP_PORT_EXTRACTED_ASSET_FILES) $(PSP_PORT_GENERATED_ASSET_FILES)
+$(PSP_PORT_NATIVE_SEGMENT_OBJECTS): $(PSP_PORT_SETUP_STAMP) $(PSP_PORT_EXTRACTED_ASSET_FILES) $(PSP_PORT_GENERATED_ASSET_FILES)
 
 $(PSP_PORT_LIBRARY): $(PSP_PORT_RUNTIME_OBJECTS) $(PSP_PORT_RUNTIME_ASM_OBJECTS) $(PSP_PORT_ASSET_OBJECTS) $(PSP_PORT_ROMINFO_OBJECT) $(PSP_PORT_ASSET_TABLE_OBJECT) $(PSP_PORT_ASSET_SEGMENT_OBJECT) $(PSP_PORT_ASSET_SEGMENT_TABLE_OBJECT)
 	@mkdir -p $(dir $@)
@@ -1535,7 +1544,7 @@ $(PSP_PORT_LIBRARY): $(PSP_PORT_RUNTIME_OBJECTS) $(PSP_PORT_RUNTIME_ASM_OBJECTS)
 $(PSP_PORT_ELF): $(PSP_PORT_LIBRARY) $(PSP_PORT_PROBE_OBJECT)
 	@mkdir -p $(dir $@)
 	$(PSP_PORT_CC) -o $@ $(PSP_PORT_PROBE_OBJECT) $(PSP_PORT_LIBRARY) $(PSP_PORT_LDFLAGS)
-	-psp-fixup-imports $@
+	psp-fixup-imports $@
 
 $(PSP_PORT_PRX): $(PSP_PORT_ELF)
 	psp-prxgen $< $@

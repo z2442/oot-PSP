@@ -64,6 +64,7 @@
 #include "oot_psp_asset_loader.h"
 
 #include <pspkernel.h>
+#include <pspthreadman.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -148,6 +149,11 @@ u16 D_0E000000[SCREEN_HEIGHT * SCREEN_WIDTH] __attribute__((aligned(64)));
 u16 D_0F000000[SCREEN_HEIGHT * SCREEN_WIDTH] __attribute__((aligned(64)));
 static uintptr_t sSysCfbFbPtr[2];
 static uintptr_t sSysCfbEnd;
+static SceUID sPspStackThreadId = -1;
+static uintptr_t sPspStackStart;
+static uintptr_t sPspStackEnd;
+static uintptr_t sPspStackAltStart;
+static uintptr_t sPspStackAltEnd;
 
 extern u8 __bss_start[];
 extern u8 _end[];
@@ -171,8 +177,57 @@ int OotPsp_IsSystemHeapRange(const void* ptr, size_t size) {
     return OotPsp_IsContainedRange(ptr, size, heapStart, heapEnd);
 }
 
+static void OotPsp_UpdateCurrentThreadStackRange(void) {
+    SceUID threadId = sceKernelGetThreadId();
+    SceKernelThreadInfo threadInfo;
+    uintptr_t stack;
+    uintptr_t stackSize;
+
+    if (threadId == sPspStackThreadId) {
+        return;
+    }
+
+    sPspStackThreadId = threadId;
+    sPspStackStart = 0;
+    sPspStackEnd = 0;
+    sPspStackAltStart = 0;
+    sPspStackAltEnd = 0;
+
+    memset(&threadInfo, 0, sizeof(threadInfo));
+    threadInfo.size = sizeof(threadInfo);
+    if (sceKernelReferThreadStatus(threadId, &threadInfo) < 0) {
+        return;
+    }
+
+    stack = (uintptr_t)threadInfo.stack;
+    stackSize = (uintptr_t)threadInfo.stackSize;
+    if ((stack == 0) || (stackSize == 0)) {
+        return;
+    }
+
+    if (stack <= (UINTPTR_MAX - stackSize)) {
+        sPspStackStart = stack;
+        sPspStackEnd = stack + stackSize;
+    }
+    if (stack >= stackSize) {
+        sPspStackAltStart = stack - stackSize;
+        sPspStackAltEnd = stack;
+    }
+}
+
+static int OotPsp_IsCurrentThreadStackRange(const void* ptr, size_t size) {
+    OotPsp_UpdateCurrentThreadStackRange();
+
+    return OotPsp_IsContainedRange(ptr, size, sPspStackStart, sPspStackEnd) ||
+           OotPsp_IsContainedRange(ptr, size, sPspStackAltStart, sPspStackAltEnd);
+}
+
 int OotPsp_IsRuntimeByteRange(const void* ptr, size_t size) {
     if (OotPsp_IsSystemHeapRange(ptr, size)) {
+        return true;
+    }
+
+    if (OotPsp_IsCurrentThreadStackRange(ptr, size)) {
         return true;
     }
 
@@ -201,6 +256,25 @@ static s32 OotPsp_IsSegmentedAddress(uintptr_t addr, u32 segment) {
     return OotPsp_AddressLooksSegmented(addr, segment) && (gSegments[segment] != 0);
 }
 
+static s32 OotPsp_TryNormalizePrxRelocatedSegmentedAddress(uintptr_t addr, uintptr_t* normalizedAddr,
+                                                           u32* normalizedSegment) {
+    uintptr_t candidate;
+    u32 segment;
+
+    if (!OotPsp_TryNormalizePrxRelocatedAddress(addr, &candidate)) {
+        return false;
+    }
+
+    segment = SEGMENT_NUMBER(candidate);
+    if (!OotPsp_IsSegmentedAddress(candidate, segment)) {
+        return false;
+    }
+
+    *normalizedAddr = candidate;
+    *normalizedSegment = segment;
+    return true;
+}
+
 static void OotPsp_LogUnmappedSegment(uintptr_t addr, u32 segment) {
     static s32 sUnmappedSegmentLogCount = 0;
 
@@ -216,6 +290,8 @@ static void OotPsp_LogUnmappedSegment(uintptr_t addr, u32 segment) {
 
 void* SegmentedToVirtualCompat(uintptr_t addr) {
     u32 segment;
+    uintptr_t normalizedAddr;
+    u32 normalizedSegment;
 
     if (addr == 0) {
         return NULL;
@@ -224,6 +300,14 @@ void* SegmentedToVirtualCompat(uintptr_t addr) {
     segment = SEGMENT_NUMBER(addr);
     if (OotPsp_IsSegmentedAddress(addr, segment)) {
         return (void*)(gSegments[segment] + SEGMENT_OFFSET(addr) + K0BASE);
+    }
+
+    if (OotPsp_IsRuntimeByteRange((void*)addr, 1)) {
+        return (void*)addr;
+    }
+
+    if (OotPsp_TryNormalizePrxRelocatedSegmentedAddress(addr, &normalizedAddr, &normalizedSegment)) {
+        return (void*)(gSegments[normalizedSegment] + SEGMENT_OFFSET(normalizedAddr) + K0BASE);
     }
 
     /*

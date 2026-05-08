@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from tools import version_config
 
 
 DEFINE_SCENE_RE = re.compile(
@@ -16,9 +20,12 @@ DEFINE_SCENE_RE = re.compile(
 DEFINE_OBJECT_RE = re.compile(r"DEFINE_OBJECT\(\s*(?P<name>\w+)\s*,\s*(?P<enum>\w+)\s*\)")
 DEFINE_OBJECT_EMPTY_RE = re.compile(r"DEFINE_OBJECT_EMPTY\(\s*(?P<name>\w+)\s*,\s*(?P<enum>\w+)\s*\)")
 DEFINE_OBJECT_UNSET_RE = re.compile(r"DEFINE_OBJECT_UNSET\(\s*(?P<enum>\w+)\s*\)")
-EXTERN_SYMBOL_RE = re.compile(r"^\s*extern\b[^;()]*?\b(?P<name>[A-Za-z_]\w*)\s*(?:\[|;)", re.MULTILINE)
-SPECIAL_OBJECT_SYMBOLS = {
-    "gameplay_keep": "gArrow1_Anim",
+SKIP_SEGMENTS = {
+    "makerom",
+    "boot",
+    "code",
+    "dmadata",
+    "n64dd",
 }
 
 
@@ -57,88 +64,48 @@ def parse_objects() -> list[dict[str, str]]:
     return entries
 
 
-def include_path(path: Path, version: str) -> str:
-    extracted_root = ROOT / "extracted" / version
-    try:
-        return path.relative_to(extracted_root).as_posix()
-    except ValueError:
-        return path.relative_to(ROOT).as_posix()
+def external_segment_names(version: str) -> set[str]:
+    config = version_config.load_version_config(version)
+    baserom_dir = ROOT / "extracted" / version / "baserom"
+    names: set[str] = set()
+
+    for name in config.dmadata_segments.keys():
+        if name in SKIP_SEGMENTS:
+            continue
+        if (baserom_dir / name).is_file():
+            names.add(name)
+
+    return names
 
 
-def find_unique(root: Path, pattern: str) -> Path | None:
-    matches = sorted(root.glob(pattern))
-    return matches[0] if matches else None
-
-
-def find_scene_headers(version: str) -> dict[str, Path]:
-    root = ROOT / "extracted" / version / "assets/scenes"
-    return {path.stem: path for path in sorted(root.glob("*/*/*.h"))}
-
-
-def find_room_headers(version: str) -> dict[str, Path]:
-    return {
-        name: path
-        for name, path in find_scene_headers(version).items()
-        if re.search(r"_room_\d+$", name)
-    }
-
-
-def find_object_header(name: str, version: str) -> Path | None:
-    candidates = [
-        ROOT / "assets/objects" / name / f"{name}.h",
-        ROOT / "extracted" / version / "assets/objects" / name / f"{name}.h",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return None
-
-
-def first_extern_symbol(header: Path | None) -> str | None:
-    if header is None:
-        return None
-
-    text = header.read_text(errors="ignore")
-    for match in EXTERN_SYMBOL_RE.finditer(text):
-        name = match.group("name")
-        if name not in {"NULL", "true", "false"}:
-            return name
-    return None
+def emit_rom_segment_externs(lines: list[str], names: set[str]) -> None:
+    for name in sorted(names):
+        lines.append(f"extern u8 _{name}SegmentRomStart[];")
+        lines.append(f"extern u8 _{name}SegmentRomEnd[];")
 
 
 def emit(output: Path, version: str) -> None:
     scenes = parse_scenes()
     objects = parse_objects()
-    scene_headers = find_scene_headers(version)
-    room_headers = find_room_headers(version)
-
-    object_headers: dict[str, Path] = {}
-    object_symbols: dict[str, str] = {}
-    for entry in objects:
-        if entry["kind"] != "object":
-            continue
-        header = find_object_header(entry["name"], version)
-        symbol = first_extern_symbol(header) or SPECIAL_OBJECT_SYMBOLS.get(entry["name"])
-        if header is not None and symbol is not None:
-            object_headers[entry["name"]] = header
-            object_symbols[entry["name"]] = symbol
+    external_segments = external_segment_names(version)
 
     includes: list[str] = [
-        '#include "array_count.h"',
-        '#include "gfx.h"',
         '#include "object.h"',
+        '#include "oot_psp_asset_loader.h"',
         '#include "romfile.h"',
         '#include "scene.h"',
-        '#include "segment_symbols.h"',
         '#include "ultra64.h"',
         "",
     ]
 
-    for path in sorted(set(scene_headers.values()) | set(object_headers.values()), key=lambda p: include_path(p, version)):
-        includes.append(f'#include "{include_path(path, version)}"')
-
     lines: list[str] = []
     lines.extend(includes)
+    lines.append("")
+    table_segments = {entry["name"] for entry in scenes if entry["name"] in external_segments}
+    table_segments.update(
+        entry["name"] for entry in objects if entry["kind"] in {"object", "empty"} and entry["name"] in external_segments
+    )
+    emit_rom_segment_externs(lines, table_segments)
     lines.append("")
     lines.append("u8 gOotPspAssetFallback;")
     lines.append("s16 gLinkObjectIds[] = { OBJECT_LINK_BOY, OBJECT_LINK_CHILD };")
@@ -147,9 +114,11 @@ def emit(output: Path, version: str) -> None:
     lines.append("RomFile gObjectTable[OBJECT_ID_MAX] = {")
     for entry in objects:
         enum = entry["enum"]
-        if entry["kind"] == "object" and entry["name"] in object_symbols:
-            symbol = object_symbols[entry["name"]]
-            lines.append(f"    [{enum}] = {{ (uintptr_t)&{symbol}, (uintptr_t)&{symbol} }},")
+        name = entry["name"]
+        if entry["kind"] == "object" and name in external_segments:
+            lines.append(f"    [{enum}] = ROM_FILE({name}),")
+        elif entry["kind"] == "empty" and name in external_segments:
+            lines.append(f"    [{enum}] = ROM_FILE_EMPTY({name}),")
         else:
             lines.append(f"    [{enum}] = ROM_FILE_UNSET,")
     lines.append("};")
@@ -161,41 +130,21 @@ def emit(output: Path, version: str) -> None:
         draw = entry["draw"]
         unk10 = entry["unk10"].strip()
         unk12 = entry["unk12"].strip()
-        if scene_name in scene_headers:
-            lines.append(
-                f"    [{scene_enum}] = {{ {{ (uintptr_t){scene_name}, 0 }}, ROM_FILE_UNSET, {unk10}, {draw}, {unk12}, 0 }},"
-            )
+        if scene_name in external_segments:
+            lines.append(f"    [{scene_enum}] = {{ ROM_FILE({scene_name}), ROM_FILE_UNSET, {unk10}, {draw}, {unk12}, 0 }},")
         else:
             lines.append(f"    [{scene_enum}] = {{ ROM_FILE_UNSET, ROM_FILE_UNSET, {unk10}, {draw}, {unk12}, 0 }},")
     lines.append("};")
     lines.append("")
-    lines.append("typedef struct {")
-    lines.append("    uintptr_t romStart;")
-    lines.append("    RomFile directFile;")
-    lines.append("} OotPspRoomFileMap;")
-    lines.append("")
-    lines.append("static OotPspRoomFileMap sRoomFileMap[] = {")
-    for room_name in sorted(room_headers):
-        lines.append(
-            f"    {{ (uintptr_t)_{room_name}SegmentRomStart, {{ (uintptr_t){room_name}, 0 }} }},"
-        )
-    lines.append("};")
-    lines.append("")
     lines.append("void OotPsp_ResolveRoomList(RomFile* roomFiles, s32 count) {")
     lines.append("    s32 i;")
-    lines.append("    size_t j;")
     lines.append("")
     lines.append("    if (roomFiles == NULL) {")
     lines.append("        return;")
     lines.append("    }")
     lines.append("")
     lines.append("    for (i = 0; i < count; i++) {")
-    lines.append("        for (j = 0; j < ARRAY_COUNT(sRoomFileMap); j++) {")
-    lines.append("            if (roomFiles[i].vromStart == sRoomFileMap[j].romStart) {")
-    lines.append("                roomFiles[i] = sRoomFileMap[j].directFile;")
-    lines.append("                break;")
-    lines.append("            }")
-    lines.append("        }")
+    lines.append("        OotPsp_NormalizeRomFile(&roomFiles[i]);")
     lines.append("    }")
     lines.append("}")
     lines.append("")

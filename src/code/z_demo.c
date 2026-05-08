@@ -2269,10 +2269,10 @@ void CutsceneHandler_RunScript(PlayState* play, CutsceneContext* csCtx) {
         if (R_USE_DEBUG_CUTSCENE) {
             Cutscene_ProcessScript(play, csCtx, gDebugCutsceneScript);
         } else {
-            Cutscene_ProcessScript(play, csCtx, play->csCtx.script);
+            Cutscene_ProcessScript(play, csCtx, SEGMENTED_TO_VIRTUAL(play->csCtx.script));
         }
 #else
-        Cutscene_ProcessScript(play, csCtx, play->csCtx.script);
+        Cutscene_ProcessScript(play, csCtx, SEGMENTED_TO_VIRTUAL(play->csCtx.script));
 #endif
     }
 }

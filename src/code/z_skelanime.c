@@ -888,22 +888,9 @@ void AnimTaskQueue_AddLoadPlayerFrame(PlayState* play, LinkAnimationHeader* anim
         uintptr_t frameOffset = frameSize * frame;
 
         osCreateMesgQueue(&task->data.loadPlayerFrame.msgQueue, &task->data.loadPlayerFrame.msg, 1);
-#if PLATFORM_PSP
-        memcpy(frameTable, (u8*)linkAnimHeader->segment + frameOffset, frameSize);
-        task->data.loadPlayerFrame.req.vromAddr = (uintptr_t)linkAnimHeader->segment + frameOffset;
-        task->data.loadPlayerFrame.req.dramAddr = frameTable;
-        task->data.loadPlayerFrame.req.size = frameSize;
-        task->data.loadPlayerFrame.req.filename = "../z_skelanime.c";
-        task->data.loadPlayerFrame.req.line = 2004;
-        task->data.loadPlayerFrame.req.unk_14 = 0;
-        task->data.loadPlayerFrame.req.notifyQueue = &task->data.loadPlayerFrame.msgQueue;
-        task->data.loadPlayerFrame.req.notifyMsg = NULL;
-        osSendMesg(&task->data.loadPlayerFrame.msgQueue, NULL, OS_MESG_NOBLOCK);
-#else
         DMA_REQUEST_ASYNC(&task->data.loadPlayerFrame.req, frameTable,
                           LINK_ANIMATION_OFFSET(linkAnimHeader->segment, frameOffset), frameSize, 0,
                           &task->data.loadPlayerFrame.msgQueue, NULL, "../z_skelanime.c", 2004);
-#endif
     }
 }
 
