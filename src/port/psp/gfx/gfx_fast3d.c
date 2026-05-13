@@ -30,6 +30,7 @@
 #include "oot_port_macros.h"
 #include "oot_psp_asset_loader.h"
 #include "oot_psp_compat.h"
+#include "segmented_address.h"
 #include "sys_matrix.h"
 
 #define STRINGIFY(x) #x
@@ -62,6 +63,7 @@
 #define MAX_LIGHTS 2
 #define MAX_VERTICES 64
 #define GFX_TLUT_SIZE_BYTES 512
+#define GFX_CI4_TLUT_SIZE_BYTES 32
 #define MODELVIEW_STACK_SIZE 11
 
 #define PSP_NATIVE_ADDR_START 0x08800000U
@@ -119,6 +121,11 @@ struct TextureHashmapNode {
     uint16_t width, height;
     uint32_t row_stride_bytes;
     uint8_t source_nibble_offset;
+#if defined(TARGET_PSP)
+    uint32_t source_key;
+    const uint8_t* palette_addr;
+    uint32_t palette_key;
+#endif
     
     uint32_t texture_id;
     uint8_t cms, cmt;
@@ -348,6 +355,10 @@ static bool gfx_is_valid_native_dl_range(uintptr_t value, size_t size) {
         return true;
     }
 
+    if (OotPsp_IsLoadedNativeExternalAssetRange((const void*)value, size)) {
+        return true;
+    }
+
     return false;
 }
 
@@ -522,6 +533,14 @@ static bool gfx_source_needs_n64_wordswap(const uint8_t* addr, uint32_t sizeByte
         return false;
     }
 
+    if (OotPsp_IsNativeExternalTextureRange(addr, sizeBytes) || OotPsp_IsNativeExternalTextureByte(addr)) {
+        return true;
+    }
+
+    if (OotPsp_IsLoadedExternalAssetRange(addr, sizeBytes) || OotPsp_IsLoadedExternalAssetRange(addr, 1)) {
+        return false;
+    }
+
     return !OotPsp_IsRuntimeByteRange(addr, sizeBytes);
 #else
     _UNUSED(addr);
@@ -536,7 +555,13 @@ static uint8_t gfx_read_texture_source_u8(const uint8_t* addr, uint32_t offset, 
     uintptr_t normalized;
 
     if (wordswap) {
-        source ^= 7U;
+        const void* mapped;
+
+        if (OotPsp_MapNativeExternalTextureByte((const void*)source, &mapped)) {
+            source = (uintptr_t)mapped;
+        } else {
+            source ^= 7U;
+        }
     }
 
     if (!gfx_normalize_native_addr(source, &normalized)) {
@@ -988,12 +1013,23 @@ extern void texman_clear(void);
 
 static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, const uint8_t *orig_addr, uint32_t fmt, uint32_t siz) {
     size_t hash = (uintptr_t)orig_addr;
-    hash = (hash >> 5) & 0x3ff;
-    struct TextureHashmapNode **node = &gfx_texture_cache.hashmap[hash];
+    struct TextureHashmapNode **node;
 #if defined(TARGET_PSP)
+    const uint32_t source_key = OotPsp_GetExternalAssetRangeSerial(orig_addr, gfx_texture_source_span_size(tile));
+    const bool uses_palette = fmt == G_IM_FMT_CI;
+    const uint32_t palette_size = siz == G_IM_SIZ_4b ? GFX_CI4_TLUT_SIZE_BYTES : GFX_TLUT_SIZE_BYTES;
+    const uint8_t* palette_addr = uses_palette ? rdp.palette : NULL;
+    const uint32_t palette_key =
+        uses_palette ? OotPsp_GetExternalAssetRangeSerial(palette_addr, palette_size) : 0;
     const uint8_t mirror_s = (rdp.texture_tile.cms & G_TX_MIRROR) != 0;
     const uint8_t mirror_t = (rdp.texture_tile.cmt & G_TX_MIRROR) != 0;
+
+    hash ^= (size_t)source_key * 2654435761U;
+    hash ^= (size_t)palette_addr >> 4;
+    hash ^= (size_t)palette_key * 2246822519U;
 #endif
+    hash = (hash >> 5) & 0x3ff;
+    node = &gfx_texture_cache.hashmap[hash];
     const uint16_t width = (rdp.texture_tile.lrs - rdp.texture_tile.uls + 4) >> G_TEXTURE_IMAGE_FRAC;
     const uint16_t height = (rdp.texture_tile.lrt - rdp.texture_tile.ult + 4) >> G_TEXTURE_IMAGE_FRAC;
 
@@ -1003,7 +1039,8 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
             && (*node)->row_stride_bytes == rdp.loaded_texture[tile].row_stride_bytes
             && (*node)->source_nibble_offset == rdp.loaded_texture[tile].source_nibble_offset
 #if defined(TARGET_PSP)
-            && (*node)->mirror_s == mirror_s && (*node)->mirror_t == mirror_t
+            && (*node)->source_key == source_key && (*node)->palette_addr == palette_addr
+            && (*node)->palette_key == palette_key && (*node)->mirror_s == mirror_s && (*node)->mirror_t == mirror_t
 #endif
         ) {
             gfx_rapi->select_texture(tile, (*node)->texture_id);
@@ -1040,6 +1077,9 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
     (*node)->cmt = 0;
     (*node)->linear_filter = false;
 #if defined(TARGET_PSP)
+    (*node)->source_key = source_key;
+    (*node)->palette_addr = palette_addr;
+    (*node)->palette_key = palette_key;
     (*node)->mirror_s = mirror_s;
     (*node)->mirror_t = mirror_t;
 #endif
@@ -1079,6 +1119,48 @@ static uint32_t gfx_texture_row_bytes(uint32_t width, uint32_t siz) {
 }
 
 #if defined(TARGET_PSP)
+static uint32_t gfx_texture_import_max_texels(uint8_t fmt, uint8_t siz) {
+    switch (fmt) {
+        case G_IM_FMT_RGBA:
+            if (siz == G_IM_SIZ_16b) {
+                return 4096;
+            }
+            if (siz == G_IM_SIZ_32b) {
+                return 4096 / 4;
+            }
+            break;
+        case G_IM_FMT_IA:
+            if (siz == G_IM_SIZ_4b) {
+                return 32768 / 4;
+            }
+            if (siz == G_IM_SIZ_8b) {
+                return 16384 / 4;
+            }
+            if (siz == G_IM_SIZ_16b) {
+                return 8192 / 4;
+            }
+            break;
+        case G_IM_FMT_CI:
+            if (siz == G_IM_SIZ_4b) {
+                return 32768 / 4;
+            }
+            if (siz == G_IM_SIZ_8b) {
+                return 16384 / 4;
+            }
+            break;
+        case G_IM_FMT_I:
+            if (siz == G_IM_SIZ_4b) {
+                return 32768 / 4;
+            }
+            if (siz == G_IM_SIZ_8b) {
+                return 16384 / 4;
+            }
+            break;
+    }
+
+    return 0;
+}
+
 static void gfx_validate_texture_tile_dimensions(int tile, const char* context) {
     uint32_t width = gfx_texture_width_from_tile();
     uint32_t height = gfx_texture_height_from_tile();
@@ -1086,8 +1168,12 @@ static void gfx_validate_texture_tile_dimensions(int tile, const char* context) 
     bool widthOverflow = textureWidth < width;
     uint32_t rowBytes = widthOverflow ? UINT32_MAX : gfx_texture_row_bytes(textureWidth, rdp.texture_tile.siz);
     uint32_t spanBytes = (height > 0 && rowBytes <= (UINT32_MAX / height)) ? rowBytes * height : UINT32_MAX;
+    bool texelOverflow = height != 0 && width > (UINT32_MAX / height);
+    uint32_t texels = texelOverflow ? UINT32_MAX : width * height;
+    uint32_t maxTexels = gfx_texture_import_max_texels(rdp.texture_tile.fmt, rdp.texture_tile.siz);
 
-    if ((width == 0) || (height == 0) || widthOverflow || (spanBytes > 4096U)) {
+    if ((width == 0) || (height == 0) || widthOverflow || texelOverflow || (maxTexels == 0) ||
+        (texels > maxTexels)) {
         gfx_log_bad_texture_source(tile, context, rdp.loaded_texture[tile].addr, spanBytes);
         gfx_set_invalid_loaded_texture(tile);
         gfx_set_invalid_texture_tile();
@@ -1313,7 +1399,7 @@ static void import_texture_ci4(int tile) {
 #if defined(TARGET_PSP)
     gfx_validate_palette_source("import_texture_ci4");
 #endif
-    bool paletteWordswap = gfx_source_needs_n64_wordswap(rdp.palette, GFX_TLUT_SIZE_BYTES);
+    bool paletteWordswap = gfx_source_needs_n64_wordswap(rdp.palette, GFX_CI4_TLUT_SIZE_BYTES);
 
     for (uint32_t y = 0; y < height; y++) {
         const uint8_t* row = gfx_texture_row(tile, y, rowBytes);
@@ -2779,9 +2865,21 @@ static inline void *seg_addr(uintptr_t w1) {
         uintptr_t offset = w1 & 0x00FFFFFFU;
 
         if (rsp.segments[segment] != NULL) {
-            uintptr_t translatedValue = (uintptr_t)rsp.segments[segment] + offset;
+            uintptr_t baseValue = (uintptr_t)rsp.segments[segment];
+            uintptr_t translatedValue = baseValue + offset;
             uintptr_t normalized;
             void* translated;
+
+#if defined(TARGET_PSP)
+            if (gfx_addr_looks_segmented(baseValue) && gfx_addr_looks_segmented(translatedValue) &&
+                (translatedValue != w1)) {
+                translated = seg_addr(translatedValue);
+                if (translated != (void*)translatedValue) {
+                    gfx_log_segment_translation(w1, rsp.segments[segment], translated);
+                    return translated;
+                }
+            }
+#endif
 
             if (gfx_normalize_native_addr(translatedValue, &normalized)) {
                 translatedValue = normalized;
@@ -2792,6 +2890,22 @@ static inline void *seg_addr(uintptr_t w1) {
             gfx_log_segment_translation(w1, rsp.segments[segment], translated);
             return translated;
         }
+
+#if defined(TARGET_PSP)
+        if (gSegments[segment] != 0) {
+            uintptr_t translatedValue = gSegments[segment] + offset + K0BASE;
+            uintptr_t normalized;
+            void* translated;
+
+            if (gfx_normalize_native_addr(translatedValue, &normalized)) {
+                translatedValue = normalized;
+            }
+
+            translated = (void*)translatedValue;
+            gfx_log_segment_translation(w1, (void*)(gSegments[segment] + K0BASE), translated);
+            return translated;
+        }
+#endif
 
         gfx_log_unmapped_segment(w1);
     }
@@ -2940,8 +3054,14 @@ static void gfx_run_dl(Gfx* cmd) {
                 gfx_sp_tri1(C1(16, 8) / 10, C1(8, 8) / 10, C1(0, 8) / 10);
 #endif
                 break;
-#if defined(F3DEX_GBI) || defined(F3DLP_GBI)
+#if defined(F3DEX_GBI_2) || defined(F3DEX_GBI) || defined(F3DLP_GBI)
             case (uint8_t)G_TRI2:
+                gfx_sp_tri1(C0(16, 8) / 2, C0(8, 8) / 2, C0(0, 8) / 2);
+                gfx_sp_tri1(C1(16, 8) / 2, C1(8, 8) / 2, C1(0, 8) / 2);
+                break;
+#endif
+#ifdef F3DEX_GBI_2
+            case (uint8_t)G_QUAD:
                 gfx_sp_tri1(C0(16, 8) / 2, C0(8, 8) / 2, C0(0, 8) / 2);
                 gfx_sp_tri1(C1(16, 8) / 2, C1(8, 8) / 2, C1(0, 8) / 2);
                 break;

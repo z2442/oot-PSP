@@ -142,7 +142,7 @@ static RegEditor sRegEditor;
 RegEditor* gRegEditor = &sRegEditor;
 
 static PreNmiBuff sPspPreNmiBuffer;
-static u8 sPspSystemHeap[8 * 1024 * 1024] __attribute__((aligned(64)));
+static u8 sPspSystemHeap[4 * 1024 * 1024] __attribute__((aligned(64)));
 static u8 sPspSram[SRAM_SIZE] __attribute__((aligned(64)));
 static u16 sPspFramebuffers[2][SCREEN_HEIGHT][SCREEN_WIDTH] __attribute__((aligned(64)));
 u16 D_0E000000[SCREEN_HEIGHT * SCREEN_WIDTH] __attribute__((aligned(64)));

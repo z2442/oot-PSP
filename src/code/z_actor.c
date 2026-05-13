@@ -3353,6 +3353,12 @@ Actor* Actor_Spawn(ActorContext* actorCtx, PlayState* play, s16 actorId, f32 pos
     Actor_AddToCategory(actorCtx, actor, profile->category);
 
     temp = gSegments[6];
+#if PLATFORM_PSP
+    if ((actor->objectSlot >= 0) && (actor->objectSlot < play->objectCtx.numEntries) &&
+        (play->objectCtx.slots[actor->objectSlot].segment != NULL)) {
+        Actor_SetObjectDependency(play, actor);
+    }
+#endif
     OotPsp_ActorSpawnLog("before_init", actorId, params, objectSlot, actor, profile);
     Actor_Init(actor, play);
     OotPsp_ActorSpawnLog("done", actorId, params, objectSlot, actor, profile);

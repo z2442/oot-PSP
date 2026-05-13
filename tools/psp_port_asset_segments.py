@@ -22,11 +22,36 @@ from tools import version_config
 EXTERNAL_VROM_BASE = 0x20000000
 EXTERNAL_VROM_ALIGN = 16
 RUNTIME_SEGMENT_DIR = Path("data/segments")
+NATIVE_ASSET_FLAG = 1
+TEXTURE_WORDS_FLAG = 2
+TEXTURE_WORD_ALIGN = 8
+TEXTURE_FORMAT_BITS = {
+    "rgba16": 16,
+    "rgba32": 32,
+    "ia4": 4,
+    "ia8": 8,
+    "ia16": 16,
+    "i4": 4,
+    "i8": 8,
+    "ci4": 4,
+    "ci8": 8,
+}
+TEXTURE_TLUT_BYTES = {
+    "ci4": 32,
+    "ci8": 512,
+}
 
 DECLARE_RE = re.compile(r"\bDECLARE_(?:ROM_)?SEGMENT\(\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\)")
 DECLARE_OVERLAY_RE = re.compile(r"\bDECLARE_OVERLAY_SEGMENT\(\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\)")
 OFFSET_TOKEN_RE = re.compile(r"(?<![0-9A-Fa-f])([0-9A-Fa-f]{6,8})(?![0-9A-Fa-f])")
-SOURCE_DECL_RE = re.compile(r"^\s*.*\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]]*\])?\s*=\s*\{")
+SOURCE_DECL_RE = re.compile(
+    r"^\s*(?:static\s+)?(?:const\s+)?[A-Za-z_][A-Za-z0-9_]*(?:\s+|\s*\*\s*)+"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]]*\]\s*)*=",
+    re.MULTILINE,
+)
+U64_SOURCE_DECL_RE = re.compile(
+    r"^\s*(?:static\s+)?(?:const\s+)?u64\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b[^;=]*=", re.MULTILINE
+)
 COLLISION_AUX_SUFFIXES = ("BgCamList", "SurfaceTypes", "PolyList", "VtxList", "WaterBoxes")
 SKIP_NAMES = {
     "makerom",
@@ -87,6 +112,28 @@ def read_c_string(data: bytes, offset: int) -> str:
     if end < 0:
         end = len(data)
     return data[offset:end].decode("utf-8", errors="replace")
+
+
+def texture_size_bytes(format_name: str, width: int, height: int) -> int | None:
+    bits = TEXTURE_FORMAT_BITS.get(format_name.lower())
+
+    if bits is None:
+        return None
+
+    return (width * height * bits + 7) // 8
+
+
+def texture_storage_range(offset: int, size: int) -> tuple[int, int]:
+    start = offset & ~(TEXTURE_WORD_ALIGN - 1)
+    end = (offset + size + TEXTURE_WORD_ALIGN - 1) & ~(TEXTURE_WORD_ALIGN - 1)
+    return start, end
+
+
+def parse_xml_int(text: str) -> int:
+    try:
+        return int(text, 0)
+    except ValueError:
+        return int(text, 16)
 
 
 def elf_symbol_bind(info: int) -> int:
@@ -201,11 +248,15 @@ class NativeAssetContext:
         self.inferred_symbol_offsets: dict[str, dict[str, int]] = {}
         self.segment_object_paths: dict[str, list[Path]] = {}
         self.elf_cache: dict[Path, ElfObject] = {}
+        self.native_segment_cache: dict[str, bytes | None] = {}
+        self.texture_ranges_by_segment: dict[str, list[tuple[int, int]]] = {}
         self.global_symbol_values: dict[str, int] = {}
         self._load_xml_offsets()
         self._discover_native_objects()
         self.global_symbol_values.update(RUNTIME_SYMBOL_SENTINELS)
+        self._infer_section_relative_offsets()
         self._infer_source_order_offsets()
+        self._index_native_u64_symbol_ranges()
         self._index_segment_symbols()
 
     def _should_use_xml(self, path: Path) -> bool:
@@ -216,6 +267,12 @@ class NativeAssetContext:
 
         variant_suffixes = ("_pal", "_pal_n64", "_v2", "_v2_mq", "_v3", "_v3_mq", "_ique", "_mq")
         return not stem.endswith(variant_suffixes)
+
+    def _add_texture_range(self, segment_name: str, offset: int, size: int) -> None:
+        if size <= 0:
+            return
+
+        self.texture_ranges_by_segment.setdefault(segment_name, []).append(texture_storage_range(offset, size))
 
     def _load_xml_offsets(self) -> None:
         xml_roots = [
@@ -248,13 +305,51 @@ class NativeAssetContext:
                 offsets.setdefault(segment_name, 0)
 
                 for elem in file_elem.iter():
+                    if elem.tag == "Texture":
+                        format_text = elem.attrib.get("Format")
+                        width_text = elem.attrib.get("Width")
+                        height_text = elem.attrib.get("Height")
+                        offset_text = elem.attrib.get("Offset")
+
+                        if (
+                            (format_text is not None)
+                            and (width_text is not None)
+                            and (height_text is not None)
+                            and (offset_text is not None)
+                        ):
+                            texture_size = texture_size_bytes(format_text, int(width_text, 0), int(height_text, 0))
+
+                            if texture_size is not None:
+                                self._add_texture_range(segment_name, parse_xml_int(offset_text), texture_size)
+
+                        tlut_offset_text = elem.attrib.get("TlutOffset")
+                        if (format_text is not None) and (tlut_offset_text is not None):
+                            tlut_size = TEXTURE_TLUT_BYTES.get(format_text.lower())
+
+                            if tlut_size is not None:
+                                self._add_texture_range(segment_name, parse_xml_int(tlut_offset_text), tlut_size)
+
+                        external_tlut = elem.attrib.get("ExternalTlut")
+                        external_tlut_offset_text = elem.attrib.get("ExternalTlutOffset")
+                        if (
+                            (format_text is not None)
+                            and (external_tlut is not None)
+                            and (external_tlut_offset_text is not None)
+                        ):
+                            tlut_size = TEXTURE_TLUT_BYTES.get(format_text.lower())
+
+                            if tlut_size is not None:
+                                self._add_texture_range(
+                                    external_tlut, parse_xml_int(external_tlut_offset_text), tlut_size
+                                )
+
                     symbol_name = elem.attrib.get("Name")
                     offset_text = elem.attrib.get("Offset")
 
                     if (symbol_name is None) or (offset_text is None):
                         continue
 
-                    offsets[symbol_name] = int(offset_text, 0)
+                    offsets[symbol_name] = parse_xml_int(offset_text)
 
     def _add_object_paths(self, segment_name: str, *patterns: str) -> None:
         paths: list[Path] = []
@@ -380,17 +475,15 @@ class NativeAssetContext:
         if source is None:
             return []
 
-        symbols: list[str] = []
+        return [match.group("name") for match in SOURCE_DECL_RE.finditer(source.read_text())]
 
-        for line in source.read_text().splitlines():
-            if line.lstrip().startswith(("#", "//", "/*", "*")):
-                continue
+    def _source_u64_symbols(self, path: Path) -> set[str]:
+        source = self._source_path_for_object(path)
 
-            match = SOURCE_DECL_RE.match(line)
-            if match is not None:
-                symbols.append(match.group("name"))
+        if source is None:
+            return set()
 
-        return symbols
+        return {match.group("name") for match in U64_SOURCE_DECL_RE.finditer(source.read_text())}
 
     def _object_symbol_layout(self, obj: ElfObject) -> dict[str, tuple[int, int]]:
         layout: dict[str, tuple[int, int]] = {}
@@ -409,6 +502,65 @@ class NativeAssetContext:
             layout[symbol.name] = (symbol.size, max(section.addralign, 1))
 
         return layout
+
+    def _infer_section_relative_offsets(self) -> None:
+        for segment_name, paths in self.segment_object_paths.items():
+            inferred = self.inferred_symbol_offsets.setdefault(segment_name, {})
+            segment_size = int(self.entries_by_name[segment_name]["size"])
+
+            for path in paths:
+                obj = self._load_object(path)
+                symbols_by_section: dict[int, list[ElfSymbol]] = {}
+                anchors_by_section: dict[int, list[tuple[int, int]]] = {}
+
+                for symbol in obj.iter_symbols():
+                    if (not symbol.name) or (symbol.size == 0) or (symbol.shndx == SHN_UNDEF):
+                        continue
+
+                    if symbol.shndx >= len(obj.sections):
+                        continue
+
+                    section = obj.sections[symbol.shndx]
+                    if (section.flags & SHF_ALLOC) == 0:
+                        continue
+
+                    symbols_by_section.setdefault(symbol.shndx, []).append(symbol)
+
+                    known_offset = self._symbol_offset_without_inferred(segment_name, symbol.name)
+                    if known_offset is None:
+                        known_offset = inferred.get(symbol.name)
+
+                    if known_offset is not None:
+                        anchors_by_section.setdefault(symbol.shndx, []).append((symbol.value, known_offset))
+
+                for section_index, symbols in symbols_by_section.items():
+                    anchors = anchors_by_section.get(section_index)
+
+                    if not anchors:
+                        continue
+
+                    for symbol in symbols:
+                        if (self._symbol_offset_without_inferred(segment_name, symbol.name) is not None) or (
+                            symbol.name in inferred
+                        ):
+                            continue
+
+                        candidates: set[int] = set()
+
+                        for anchor_value, anchor_offset in anchors:
+                            if symbol.value >= anchor_value:
+                                offset = anchor_offset + (symbol.value - anchor_value)
+                            else:
+                                delta = anchor_value - symbol.value
+                                if anchor_offset < delta:
+                                    continue
+                                offset = anchor_offset - delta
+
+                            if offset + symbol.size <= segment_size:
+                                candidates.add(offset)
+
+                        if len(candidates) == 1:
+                            inferred[symbol.name] = candidates.pop()
 
     def _infer_source_order_offsets(self) -> None:
         for segment_name, paths in self.segment_object_paths.items():
@@ -463,6 +615,35 @@ class NativeAssetContext:
 
                     inferred[symbol_name] = offset
                     cursor = offset
+
+    def _index_native_u64_symbol_ranges(self) -> None:
+        for segment_name, paths in self.segment_object_paths.items():
+            segment_size = int(self.entries_by_name[segment_name]["size"])
+
+            for path in paths:
+                texture_symbols = self._source_u64_symbols(path)
+
+                if not texture_symbols:
+                    continue
+
+                obj = self._load_object(path)
+
+                for symbol in obj.iter_symbols():
+                    if (symbol.name not in texture_symbols) or (symbol.size == 0) or (symbol.shndx == SHN_UNDEF):
+                        continue
+
+                    if symbol.shndx >= len(obj.sections):
+                        continue
+
+                    section = obj.sections[symbol.shndx]
+                    if (section.flags & SHF_ALLOC) == 0:
+                        continue
+
+                    offset = self._symbol_offset(segment_name, symbol.name)
+                    if (offset is None) or (offset >= segment_size):
+                        continue
+
+                    self._add_texture_range(segment_name, offset, min(symbol.size, segment_size - offset))
 
     def _index_segment_symbols(self) -> None:
         for segment_name, entry in self.entries_by_name.items():
@@ -569,9 +750,13 @@ class NativeAssetContext:
 
     def build_native_segment(self, entry: dict[str, object]) -> bytes | None:
         segment_name = str(entry["name"])
+        if segment_name in self.native_segment_cache:
+            return self.native_segment_cache[segment_name]
+
         paths = self.segment_object_paths.get(segment_name)
 
         if not paths:
+            self.native_segment_cache[segment_name] = None
             return None
 
         output = bytearray(int(entry["size"]))
@@ -609,9 +794,12 @@ class NativeAssetContext:
                 copied += 1
 
         if copied == 0:
+            self.native_segment_cache[segment_name] = None
             return None
 
-        return bytes(output)
+        data = bytes(output)
+        self.native_segment_cache[segment_name] = data
+        return data
 MESSAGE_TABLE_LAYOUTS = {
     "NTSC": {
         "jpn": ("sJpnMessageEntryTable", "jpn_message_data_static", None),
@@ -862,6 +1050,19 @@ def copy_data_files(entries: list[dict[str, object]], data_dir: Path, native_ass
             stale.unlink()
 
 
+def annotate_asset_flags(entries: list[dict[str, object]], native_assets: NativeAssetContext) -> None:
+    for entry in entries:
+        name = str(entry["name"])
+        flags = 0
+
+        if native_assets.build_native_segment(entry) is not None:
+            flags |= NATIVE_ASSET_FLAG
+            if name in native_assets.texture_ranges_by_segment:
+                flags |= TEXTURE_WORDS_FLAG
+
+        entry["flags"] = flags
+
+
 def emit_asm(output: Path, entries: list[dict[str, object]], native_assets: NativeAssetContext) -> None:
     lines: list[str] = [
         "/* Generated by tools/psp_port_asset_segments.py. */",
@@ -926,7 +1127,66 @@ def emit_message_entries(lines: list[str], symbol: str, entries: list[dict[str, 
     lines.append("")
 
 
-def emit_table(output: Path, entries: list[dict[str, object]], message_entries: dict[str, list[dict[str, int]]]) -> None:
+def merge_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[tuple[int, int]] = []
+
+    for start, end in sorted(ranges):
+        if end <= start:
+            continue
+
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+
+    return merged
+
+
+def build_texture_range_entries(
+    entries: list[dict[str, object]], native_assets: NativeAssetContext
+) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+
+    for entry in entries:
+        flags = int(entry["flags"])
+
+        if (flags & (NATIVE_ASSET_FLAG | TEXTURE_WORDS_FLAG)) != (NATIVE_ASSET_FLAG | TEXTURE_WORDS_FLAG):
+            continue
+
+        segment_name = str(entry["name"])
+        segment_size = int(entry["size"])
+        vrom_start = int(entry["vrom_start"])
+
+        for start, end in native_assets.texture_ranges_by_segment.get(segment_name, []):
+            clipped_start = max(0, min(start, segment_size))
+            clipped_end = max(0, min(end, segment_size))
+
+            if clipped_end > clipped_start:
+                ranges.append((vrom_start + clipped_start, vrom_start + clipped_end))
+
+    return merge_ranges(ranges)
+
+
+def emit_texture_ranges(lines: list[str], ranges: list[tuple[int, int]]) -> None:
+    lines.append("const OotPspExternalAssetTextureRange gOotPspExternalAssetTextureRanges[] = {")
+
+    if ranges:
+        for start, end in ranges:
+            lines.append(f"    {{ 0x{start:08X}, 0x{end:08X} }},")
+    else:
+        lines.append("    { 0, 0 },")
+
+    lines.append("};")
+    lines.append(f"const size_t gOotPspExternalAssetTextureRangeCount = {len(ranges)};")
+    lines.append("")
+
+
+def emit_table(
+    output: Path,
+    entries: list[dict[str, object]],
+    message_entries: dict[str, list[dict[str, int]]],
+    native_assets: NativeAssetContext,
+) -> None:
     lines: list[str] = [
         "/* Generated by tools/psp_port_asset_segments.py. */",
         '#include "oot_psp_asset_loader.h"',
@@ -940,6 +1200,7 @@ def emit_table(output: Path, entries: list[dict[str, object]], message_entries: 
         lines.append(
             f"    {{ 0x{entry['vrom_start']:08X}, 0x{entry['vrom_end']:08X}, "
             f"0x{entry['original_vrom_start']:08X}, 0x{entry['original_vrom_end']:08X}, "
+            f"0x{entry['flags']:08X}, "
             f'"{c_string(path.as_posix())}" }},'
         )
 
@@ -952,6 +1213,8 @@ def emit_table(output: Path, entries: list[dict[str, object]], message_entries: 
             "",
         ]
     )
+
+    emit_texture_ranges(lines, build_texture_range_entries(entries, native_assets))
 
     emit_message_entries(lines, "gOotPspJpnMessageEntries", message_entries["jpn"])
     emit_message_entries(lines, "gOotPspNesMessageEntries", message_entries["nes"])
@@ -966,9 +1229,10 @@ def emit_table(output: Path, entries: list[dict[str, object]], message_entries: 
 def emit(version: str, asm_output: Path, table_output: Path, data_dir: Path) -> None:
     entries = build_entries(version)
     native_assets = NativeAssetContext(version, entries)
+    annotate_asset_flags(entries, native_assets)
     message_entries = build_message_entries(version, entries)
     emit_asm(asm_output, entries, native_assets)
-    emit_table(table_output, entries, message_entries)
+    emit_table(table_output, entries, message_entries, native_assets)
     copy_data_files(entries, data_dir, native_assets)
 
 
