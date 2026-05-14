@@ -2744,6 +2744,20 @@ static inline bool gfx_try_normalize_prx_relocated_segmented_addr(uintptr_t addr
         return false;
     }
 
+    if (gfx_addr_looks_segmented(addr)) {
+        segment = addr >> 24;
+        if ((segment < NUM_SEGMENTS) && ((addr & 0x00FFFFFFU) < PSP_SEGMENTED_COLLISION_OFFSET_MAX)) {
+            bool segmentMapped = rsp.segments[segment] != NULL;
+#if defined(TARGET_PSP)
+            segmentMapped = segmentMapped || (gSegments[segment] != 0);
+#endif
+
+            if (segmentMapped) {
+                return false;
+            }
+        }
+    }
+
     if (!OotPsp_TryNormalizePrxRelocatedAddress(addr, &candidate)) {
         return false;
     }

@@ -129,6 +129,21 @@ def texture_storage_range(offset: int, size: int) -> tuple[int, int]:
     return start, end
 
 
+def copy_native_texture_words(output: bytearray, source: bytes, start: int, end: int) -> None:
+    limit = min(len(output), len(source))
+    start = max(0, min(start, limit))
+    end = max(0, min(end, limit))
+
+    if end <= start:
+        return
+
+    start &= ~(TEXTURE_WORD_ALIGN - 1)
+    end &= ~(TEXTURE_WORD_ALIGN - 1)
+
+    for offset in range(start, end, TEXTURE_WORD_ALIGN):
+        output[offset : offset + TEXTURE_WORD_ALIGN] = source[offset : offset + TEXTURE_WORD_ALIGN][::-1]
+
+
 def parse_xml_int(text: str) -> int:
     try:
         return int(text, 0)
@@ -748,6 +763,20 @@ class NativeAssetContext:
 
         return patched
 
+    def _copy_native_texture_ranges(self, entry: dict[str, object], output: bytearray) -> None:
+        segment_name = str(entry["name"])
+        ranges = self.texture_ranges_by_segment.get(segment_name)
+
+        if not ranges:
+            return
+
+        source = entry["source"]
+        assert isinstance(source, Path)
+        source_data = source.read_bytes()
+
+        for start, end in ranges:
+            copy_native_texture_words(output, source_data, start, end)
+
     def build_native_segment(self, entry: dict[str, object]) -> bytes | None:
         segment_name = str(entry["name"])
         if segment_name in self.native_segment_cache:
@@ -797,6 +826,7 @@ class NativeAssetContext:
             self.native_segment_cache[segment_name] = None
             return None
 
+        self._copy_native_texture_ranges(entry, output)
         data = bytes(output)
         self.native_segment_cache[segment_name] = data
         return data
