@@ -1357,7 +1357,7 @@ static void import_texture_i4(int tile) {
             rgba32_buf[4*i + 0] = SCALE_4_8(r);
             rgba32_buf[4*i + 1] = SCALE_4_8(g);
             rgba32_buf[4*i + 2] = SCALE_4_8(b);
-            rgba32_buf[4*i + 3] = 255;
+            rgba32_buf[4*i + 3] = SCALE_4_8(intensity);
         }
     }
 
@@ -1383,7 +1383,7 @@ static void import_texture_i8(int tile) {
             rgba32_buf[4*i + 0] = r;
             rgba32_buf[4*i + 1] = g;
             rgba32_buf[4*i + 2] = b;
-            rgba32_buf[4*i + 3] = 255;
+            rgba32_buf[4*i + 3] = intensity;
         }
     }
 
