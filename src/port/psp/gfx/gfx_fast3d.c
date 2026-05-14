@@ -1010,6 +1010,14 @@ static struct ColorCombiner *gfx_lookup_or_create_color_combiner(uint32_t cc_id)
 
 extern int gfx_vram_space_available(void);
 extern void texman_clear(void);
+extern int texman_texture_slot_available(void);
+
+static void gfx_texture_cache_clear(void) {
+    texman_clear();
+    gfx_texture_cache.pool_pos = 0;
+    memset(gfx_texture_cache.pool, 0, sizeof(gfx_texture_cache.pool));
+    memset(gfx_texture_cache.hashmap, 0, sizeof(gfx_texture_cache.hashmap));
+}
 
 static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, const uint8_t *orig_addr, uint32_t fmt, uint32_t siz) {
     size_t hash = (uintptr_t)orig_addr;
@@ -1050,19 +1058,13 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
         }
         node = &(*node)->next;
     }
-    if(!gfx_vram_space_available()) {
-        texman_clear();
-
-        // Pool is full. We just invalidate everything and start over.
-        gfx_texture_cache.pool_pos = 0;
-        memset(gfx_texture_cache.pool, 0, sizeof(gfx_texture_cache.pool));
+    if (!gfx_vram_space_available() || !texman_texture_slot_available()) {
+        gfx_texture_cache_clear();
         node = &gfx_texture_cache.hashmap[hash];
         //puts("Clearing texture cache");
     }
     if (gfx_texture_cache.pool_pos == sizeof(gfx_texture_cache.pool) / sizeof(struct TextureHashmapNode)) {
-        // Pool is full. We just invalidate everything and start over.
-        gfx_texture_cache.pool_pos = 0;
-        memset(gfx_texture_cache.pool, 0, sizeof(gfx_texture_cache.pool));
+        gfx_texture_cache_clear();
         node = &gfx_texture_cache.hashmap[hash];
         //puts("Clearing texture cache");
     }

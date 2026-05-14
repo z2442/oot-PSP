@@ -18,7 +18,7 @@
 #include <string.h>
 #include <stdlib.h>
 
-static struct PSP_Texture textures[512];
+static struct PSP_Texture textures[TEXMAN_MAX_TEXTURES];
 static void *psp_tex_buffer = NULL;
 static void *psp_tex_buffer_start = NULL;
 static void *psp_tex_buffer_max = NULL;
@@ -170,11 +170,23 @@ int gfx_vram_space_available(void) {
     return (psp_tex_buffer_max - psp_tex_buffer) > (32 * 1024);
 }
 
+int texman_texture_slot_available(void) {
+    return (psp_tex_number + 1) < TEXMAN_MAX_TEXTURES;
+}
+
 unsigned char *texman_get_tex_data(unsigned int num) {
+    if (num >= TEXMAN_MAX_TEXTURES) {
+        return NULL;
+    }
+
     return textures[num].location;
 }
 
 unsigned char texman_get_tex_type(unsigned int num) {
+    if (num >= TEXMAN_MAX_TEXTURES) {
+        return 0;
+    }
+
     return textures[num].type;
 }
 
@@ -192,6 +204,10 @@ struct PSP_Texture *texman_reserve_memory(int width, int height, unsigned int ty
 }
 
 unsigned int texman_create(void) {
+    if (!texman_texture_slot_available()) {
+        texman_clear();
+    }
+
     psp_tex_number++;
     textures[psp_tex_number] = (struct PSP_Texture){
         location : psp_tex_buffer,
@@ -258,7 +274,13 @@ void texman_upload(int width, int height, unsigned int type, const void *buffer)
 }
 
 void texman_bind_tex(unsigned int num) {
-    const struct PSP_Texture *current = &textures[num];
+    const struct PSP_Texture *current;
+
+    if (num >= TEXMAN_MAX_TEXTURES) {
+        return;
+    }
+
+    current = &textures[num];
 #ifdef DEBUG
     /* Note this will SPAM if you enable */
     // if (psp_tex_bound != num)

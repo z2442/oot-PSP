@@ -10,6 +10,8 @@
 
 #pragma once
 #define TEX_ALIGNMENT (16)
+/* Texture ID 0 is reserved, and the Fast3D cache can hold 512 live texture nodes. */
+#define TEXMAN_MAX_TEXTURES 513
 
 /* 1mb buffer */
 #define TEXMAN_BUFFER_SIZE (1 * 1024 * 1024)
@@ -36,6 +38,7 @@ note: texture will be bound
 unsigned int texman_create(void);
 void texman_clear(void);
 int gfx_vram_space_available(void);
+int texman_texture_slot_available(void);
 unsigned char *texman_get_tex_data(unsigned int num);
 struct PSP_Texture *texman_reserve_memory(int width, int height, unsigned int type);
 void texman_upload_swizzle(int width, int height, unsigned int type, const void *buffer);
