@@ -85,6 +85,8 @@ s32 gCurrentRegion = REGION_US;
 #define OOT_PSP_NATIVE_ADDR_START 0x08800000U
 #define OOT_PSP_NATIVE_ADDR_END 0x0C000000U
 #define OOT_PSP_SEGMENTED_COLLISION_OFFSET_MAX 0x00010000U
+#define OOT_PSP_SAVE_PATH "oot-psp-save.bin"
+#define OOT_PSP_SAVE_IO_CHUNK_SIZE 0x4000
 
 volatile OSTime gAudioThreadUpdateTimeTotalPerGfxTask = 0;
 volatile OSTime gGfxTaskSentToNextReadyMinusAudioThreadUpdateTime = 0;
@@ -155,6 +157,81 @@ static uintptr_t sPspStackStart;
 static uintptr_t sPspStackEnd;
 static uintptr_t sPspStackAltStart;
 static uintptr_t sPspStackAltEnd;
+
+static const char* OotPsp_GetSavePath(char* buffer, size_t bufferSize) {
+    return OotPsp_ResolveRootPath(OOT_PSP_SAVE_PATH, buffer, bufferSize);
+}
+
+static void OotPsp_LoadSram(void) {
+    char pathBuffer[384];
+    const char* path = OotPsp_GetSavePath(pathBuffer, sizeof(pathBuffer));
+    SceUID fd = sceIoOpen(path, PSP_O_RDONLY, 0);
+    u8* out = sPspSram;
+    size_t remaining = sizeof(sPspSram);
+
+    if (fd < 0) {
+        printf("oot-psp save not found path=%s err=%d\n", path, (int)fd);
+        return;
+    }
+
+    while (remaining != 0) {
+        int chunk = remaining > OOT_PSP_SAVE_IO_CHUNK_SIZE ? OOT_PSP_SAVE_IO_CHUNK_SIZE : (int)remaining;
+        int read = sceIoRead(fd, out, chunk);
+
+        if (read < 0) {
+            printf("oot-psp save read failed path=%s err=%d\n", path, read);
+            memset(sPspSram, 0, sizeof(sPspSram));
+            sceIoClose(fd);
+            return;
+        }
+
+        if (read == 0) {
+            break;
+        }
+
+        out += read;
+        remaining -= read;
+    }
+
+    sceIoClose(fd);
+
+    if (remaining != 0) {
+        memset(out, 0, remaining);
+        printf("oot-psp save short read path=%s missing=%lu\n", path, (unsigned long)remaining);
+    } else {
+        printf("oot-psp save loaded path=%s size=%lu\n", path, (unsigned long)sizeof(sPspSram));
+    }
+}
+
+static s32 OotPsp_FlushSram(void) {
+    char pathBuffer[384];
+    const char* path = OotPsp_GetSavePath(pathBuffer, sizeof(pathBuffer));
+    SceUID fd = sceIoOpen(path, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+    const u8* in = sPspSram;
+    size_t remaining = sizeof(sPspSram);
+
+    if (fd < 0) {
+        printf("oot-psp save open failed path=%s err=%d\n", path, (int)fd);
+        return false;
+    }
+
+    while (remaining != 0) {
+        int chunk = remaining > OOT_PSP_SAVE_IO_CHUNK_SIZE ? OOT_PSP_SAVE_IO_CHUNK_SIZE : (int)remaining;
+        int written = sceIoWrite(fd, in, chunk);
+
+        if (written <= 0) {
+            printf("oot-psp save write failed path=%s written=%d\n", path, written);
+            sceIoClose(fd);
+            return false;
+        }
+
+        in += written;
+        remaining -= written;
+    }
+
+    sceIoClose(fd);
+    return true;
+}
 
 extern u8 __bss_start[];
 extern u8 _end[];
@@ -523,6 +600,7 @@ void SsSram_ReadWrite(s32 addr, void* dramAddr, size_t size, s32 direction) {
         memcpy(dramAddr, &sPspSram[offset], size);
     } else {
         memcpy(&sPspSram[offset], dramAddr, size);
+        OotPsp_FlushSram();
     }
 }
 
@@ -623,6 +701,7 @@ void OotPspGame_Init(void) {
 
     gCurrentRegion = REGION_US;
     SaveContext_Init();
+    OotPsp_LoadSram();
     gAppNmiBufferPtr = &sPspPreNmiBuffer;
     PreNmiBuff_Init(gAppNmiBufferPtr);
 

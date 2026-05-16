@@ -51,6 +51,7 @@ extern const OotPspMessageEntry gOotPspStaffMessageEntries[];
 extern const size_t gOotPspStaffMessageEntriesCount;
 
 void OotPsp_AssetInit(const char* executablePath);
+const char* OotPsp_ResolveRootPath(const char* path, char* buffer, size_t bufferSize);
 uintptr_t OotPsp_GetPrxRelocationBias(void);
 s32 OotPsp_TryNormalizePrxRelocatedAddress(uintptr_t addr, uintptr_t* normalized);
 uintptr_t OotPsp_NormalizeVrom(uintptr_t vrom);

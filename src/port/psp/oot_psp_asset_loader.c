@@ -122,7 +122,7 @@ static s32 OotPsp_IsAbsolutePath(const char* path) {
     return (colon != NULL) && ((slash == NULL) || (colon < slash));
 }
 
-static const char* OotPsp_ResolveAssetPath(const char* path, char* buffer, size_t bufferSize) {
+const char* OotPsp_ResolveRootPath(const char* path, char* buffer, size_t bufferSize) {
     int written;
 
     if (OotPsp_IsAbsolutePath(path) || (sOotPspAssetRoot[0] == '\0')) {
@@ -131,11 +131,15 @@ static const char* OotPsp_ResolveAssetPath(const char* path, char* buffer, size_
 
     written = snprintf(buffer, bufferSize, "%s%s", sOotPspAssetRoot, path);
     if ((written < 0) || ((size_t)written >= bufferSize)) {
-        printf("oot-psp asset path too long root=%s path=%s\n", sOotPspAssetRoot, path);
+        printf("oot-psp root path too long root=%s path=%s\n", sOotPspAssetRoot, path);
         return path;
     }
 
     return buffer;
+}
+
+static const char* OotPsp_ResolveAssetPath(const char* path, char* buffer, size_t bufferSize) {
+    return OotPsp_ResolveRootPath(path, buffer, bufferSize);
 }
 
 static int OotPsp_ReadAssetChunk(SceUID fd, u8* out, int chunk, const char* path, size_t readOffset) {
