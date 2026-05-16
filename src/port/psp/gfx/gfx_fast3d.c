@@ -155,6 +155,7 @@ struct TriPipelineState {
     bool use_alpha;
     bool used_textures[2];
     bool use_texture;
+    bool color_mul_env;
     float tex_u_scale, tex_v_scale;
     float tex_u_bias, tex_v_bias;
 } __attribute__((packed, aligned(4)));
@@ -223,6 +224,7 @@ static struct RDP {
     
     uint32_t other_mode_l, other_mode_h;
     uint32_t combine_mode;
+    bool combine_color_mul_env;
     
     struct RGBA env_color, prim_color, fog_color, fill_color;
     struct XYWidthHeight viewport, scissor;
@@ -1000,6 +1002,16 @@ static inline struct RGBA gfx_get_vertex_color(const struct ColorCombiner *comb,
     return white_color;
 }
 
+static inline uint8_t gfx_color_mul_channel(uint8_t lhs, uint8_t rhs) {
+    return ((uint16_t)lhs * (uint16_t)rhs + 127) / 255;
+}
+
+static inline void gfx_color_mul_env(struct RGBA* color) {
+    color->r = gfx_color_mul_channel(color->r, rdp.env_color.r);
+    color->g = gfx_color_mul_channel(color->g, rdp.env_color.g);
+    color->b = gfx_color_mul_channel(color->b, rdp.env_color.b);
+}
+
 static struct ColorCombiner *gfx_lookup_or_create_color_combiner(uint32_t cc_id) {
     static struct ColorCombiner *prev_combiner;
     if (prev_combiner != NULL && prev_combiner->cc_id == cc_id) {
@@ -1643,6 +1655,7 @@ static void gfx_prepare_tri_pipeline_state(void) {
     state->used_textures[0] = used_textures[0];
     state->used_textures[1] = used_textures[1];
     state->use_texture = used_textures[0] || used_textures[1];
+    state->color_mul_env = rdp.combine_color_mul_env;
     state->tex_u_scale = 0.0f;
     state->tex_v_scale = 0.0f;
     state->tex_u_bias = 0.0f;
@@ -2073,6 +2086,9 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
         }
         */
         out->color = gfx_get_vertex_color(comb, use_alpha, &vertex->color, vertex->w, true);
+        if (state->color_mul_env) {
+            gfx_color_mul_env(&out->color);
+        }
 
         /*@Note: Blue Star color */
         if (shader_program_id == 0x01200200) {
@@ -2535,8 +2551,9 @@ static inline uint32_t color_comb(uint32_t a, uint32_t b, uint32_t c, uint32_t d
            (color_comb_component(d) << 9);
 }
 
-static void gfx_dp_set_combine_mode(uint32_t rgb, uint32_t alpha) {
+static void gfx_dp_set_combine_mode(uint32_t rgb, uint32_t alpha, bool color_mul_env) {
     rdp.combine_mode = rgb | (alpha << 12);
+    rdp.combine_color_mul_env = color_mul_env;
     gfx_mark_tri_pipeline_dirty();
 }
 
@@ -2638,13 +2655,15 @@ static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int3
     _UNUSED(tile);
 
     uint32_t saved_combine_mode = rdp.combine_mode;
+    bool saved_combine_color_mul_env = rdp.combine_color_mul_env;
     if ((rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_COPY) {
         // Per RDP Command Summary Set Tile's shift s and this dsdx should be set to 4 texels
         // Divide by 4 to get 1 instead
         dsdx >>= 2;
         
         // Color combiner is turned off in copy mode
-        gfx_dp_set_combine_mode(color_comb(0, 0, 0, G_CCMUX_TEXEL0), color_comb(0, 0, 0, G_ACMUX_TEXEL0));
+        gfx_dp_set_combine_mode(color_comb(0, 0, 0, G_CCMUX_TEXEL0), color_comb(0, 0, 0, G_ACMUX_TEXEL0),
+                                false);
         
         // Per documentation one extra pixel is added in this modes to each edge
         lrx += 1 << 2;
@@ -2687,6 +2706,7 @@ static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int3
     
     gfx_draw_rectangle(ulx, uly, lrx, lry);
     rdp.combine_mode = saved_combine_mode;
+    rdp.combine_color_mul_env = saved_combine_color_mul_env;
     gfx_mark_tri_pipeline_dirty();
 }
 
@@ -2709,9 +2729,11 @@ static void gfx_dp_fill_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t
     }
     
     uint32_t saved_combine_mode = rdp.combine_mode;
-    gfx_dp_set_combine_mode(color_comb(0, 0, 0, G_CCMUX_SHADE), color_comb(0, 0, 0, G_ACMUX_SHADE));
+    bool saved_combine_color_mul_env = rdp.combine_color_mul_env;
+    gfx_dp_set_combine_mode(color_comb(0, 0, 0, G_CCMUX_SHADE), color_comb(0, 0, 0, G_ACMUX_SHADE), false);
     gfx_draw_rectangle(ulx, uly, lrx, lry);
     rdp.combine_mode = saved_combine_mode;
+    rdp.combine_color_mul_env = saved_combine_color_mul_env;
     gfx_mark_tri_pipeline_dirty();
 }
 
@@ -3148,12 +3170,20 @@ static void gfx_run_dl(Gfx* cmd) {
                 gfx_dp_set_fill_color(cmd->words.w1);
                 break;
             case G_SETCOMBINE:
-                gfx_dp_set_combine_mode(
-                    color_comb(C0(20, 4), C1(28, 4), C0(15, 5), C1(15, 3)),
-                    color_comb(C0(12, 3), C1(12, 3), C0(9, 3), C1(9, 3)));
+            {
+                bool colorMulEnv =
+                    (C0(20, 4) == G_CCMUX_TEXEL0) && (C1(28, 4) == (G_CCMUX_0 & 0xF)) &&
+                    (C0(15, 5) == G_CCMUX_SHADE) && (C1(15, 3) == (G_CCMUX_0 & 0x7)) &&
+                    (C0(5, 4) == G_CCMUX_ENVIRONMENT) && (C1(24, 4) == (G_CCMUX_0 & 0xF)) &&
+                    (C0(0, 5) == G_CCMUX_COMBINED) && (C1(6, 3) == (G_CCMUX_0 & 0x7));
+
+                gfx_dp_set_combine_mode(color_comb(C0(20, 4), C1(28, 4), C0(15, 5), C1(15, 3)),
+                                        color_comb(C0(12, 3), C1(12, 3), C0(9, 3), C1(9, 3)),
+                                        colorMulEnv);
                     /*color_comb(C0(5, 4), C1(24, 4), C0(0, 5), C1(6, 3)),
                     color_comb(C1(21, 3), C1(3, 3), C1(18, 3), C1(0, 3)));*/
                 break;
+            }
             // G_SETPRIMCOLOR, G_CCMUX_PRIMITIVE, G_ACMUX_PRIMITIVE, is used by Goddard
             // G_CCMUX_TEXEL1, LOD_FRACTION is used in Bowser room 1
             case G_TEXRECT:
