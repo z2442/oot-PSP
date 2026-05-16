@@ -1431,7 +1431,13 @@ PSP_PORT_GENERATED_ASSET_FILES := \
 	$(BUILD_DIR)/assets/textures/nintendo_rogo_static/nintendo_rogo_static_Tex_000000.i8.inc.c \
 	$(BUILD_DIR)/assets/textures/nintendo_rogo_static/nintendo_rogo_static_Tex_001800.i8.inc.c
 
-PSP_PORT_OVERLAY_GENERATED_ASSET_DIRS := assets/overlays $(EXTRACTED_DIR)/assets/overlays
+PSP_PORT_RUNTIME_GENERATED_ASSET_DIRS := \
+	assets/code \
+	assets/n64dd \
+	assets/overlays \
+	$(EXTRACTED_DIR)/assets/code \
+	$(EXTRACTED_DIR)/assets/n64dd \
+	$(EXTRACTED_DIR)/assets/overlays
 PSP_PORT_NATIVE_GENERATED_ASSET_DIRS := \
 	assets/objects \
 	assets/scenes \
@@ -1442,7 +1448,7 @@ PSP_PORT_NATIVE_GENERATED_ASSET_DIRS := \
 	$(EXTRACTED_DIR)/assets/textures \
 	$(EXTRACTED_DIR)/assets/misc
 
-PSP_PORT_OVERLAY_GENERATED_ASSET_STAMP := $(BUILD_DIR)/assets/psp_generated_overlay_assets.stamp
+PSP_PORT_RUNTIME_GENERATED_ASSET_STAMP := $(BUILD_DIR)/assets/psp_generated_runtime_assets.stamp
 PSP_PORT_NATIVE_GENERATED_ASSET_STAMP := $(BUILD_DIR)/assets/psp_generated_native_assets.stamp
 
 PSP_PORT_DEFINES := \
@@ -1552,9 +1558,9 @@ $(PSP_PORT_ASSET_SEGMENT_TABLE_OBJECT): $(PSP_PORT_ASSET_SEGMENT_TABLE_SOURCE)
 $(PSP_PORT_EXTRACTED_ASSET_FILES): $(PSP_PORT_SETUP_STAMP)
 	@test -f $@
 
-$(PSP_PORT_OVERLAY_GENERATED_ASSET_STAMP): $(PSP_PORT_SETUP_STAMP)
+$(PSP_PORT_RUNTIME_GENERATED_ASSET_STAMP): $(PSP_PORT_SETUP_STAMP)
 	@mkdir -p $(dir $@)
-	@{ for dir in $(PSP_PORT_OVERLAY_GENERATED_ASSET_DIRS); do \
+	@{ for dir in $(PSP_PORT_RUNTIME_GENERATED_ASSET_DIRS); do \
 		if test -d "$$dir"; then \
 			find "$$dir" -type f \( -name '*.png' -o -name '*.bin' -o -name '*.jpg' \); \
 		fi; \
@@ -1580,7 +1586,7 @@ $(PSP_PORT_NATIVE_GENERATED_ASSET_STAMP): $(PSP_PORT_SETUP_STAMP)
 		-e 's#\.jpg$$#.jpg.inc.c#' | xargs -r $(MAKE)
 	@touch $@
 
-$(PSP_PORT_RUNTIME_OBJECTS): $(PSP_PORT_SETUP_STAMP) $(PSP_PORT_OVERLAY_GENERATED_ASSET_STAMP)
+$(PSP_PORT_RUNTIME_OBJECTS): $(PSP_PORT_SETUP_STAMP) $(PSP_PORT_RUNTIME_GENERATED_ASSET_STAMP)
 
 $(PSP_PORT_NATIVE_SEGMENT_OBJECTS): $(PSP_PORT_SETUP_STAMP) $(PSP_PORT_EXTRACTED_ASSET_FILES) $(PSP_PORT_NATIVE_GENERATED_ASSET_STAMP)
 
