@@ -53,6 +53,7 @@ static char sOotPspAssetRoot[256];
 static uintptr_t sOotPspPrxRelocationBias = OOT_PSP_DEFAULT_PRX_RELOCATION_BIAS;
 static s32 sOotPspPrxRelocationBiasInitialized = false;
 static OotPspLoadedAssetRange sOotPspLoadedAssetRanges[OOT_PSP_LOADED_ASSET_RANGE_COUNT];
+static const OotPspLoadedAssetRange* sOotPspLastNativeTextureRange;
 static size_t sOotPspLoadedAssetRangeNext;
 static u32 sOotPspLoadedAssetSerial = 1;
 static u32 sOotPspAssetCacheClock;
@@ -496,6 +497,9 @@ static void OotPsp_ClearLoadedAssetRange(void* ram, size_t size) {
         OotPspLoadedAssetRange* range = &sOotPspLoadedAssetRanges[i];
 
         if (OotPsp_RangesOverlap(range->ramStart, range->ramEnd, ramStart, ramEnd)) {
+            if (range == sOotPspLastNativeTextureRange) {
+                sOotPspLastNativeTextureRange = NULL;
+            }
             range->ramStart = 0;
             range->ramEnd = 0;
             range->assetOffsetStart = 0;
@@ -534,6 +538,37 @@ static void OotPsp_StoreLoadedAssetRange(void* ram, size_t size, uintptr_t asset
     range->assetOffsetStart = assetOffsetStart;
     range->flags = flags;
     range->serial = serial;
+}
+
+static s32 OotPsp_IsNativeLoadedAssetByteRange(const OotPspLoadedAssetRange* range, uintptr_t ram) {
+    return (range != NULL) && (range->serial != 0) && ((range->flags & OOT_PSP_EXTERNAL_ASSET_NATIVE) != 0) &&
+           (ram >= range->ramStart) && (ram < range->ramEnd);
+}
+
+static s32 OotPsp_MapNativeExternalTextureByteInRange(const OotPspLoadedAssetRange* range, uintptr_t ram,
+                                                      const void** mapped) {
+    uintptr_t assetOffset;
+    uintptr_t assetEnd;
+    uintptr_t assetSpan;
+    uintptr_t mappedAssetOffset;
+    uintptr_t mappedRam;
+
+    assetSpan = range->ramEnd - range->ramStart;
+    if (range->assetOffsetStart > (UINTPTR_MAX - assetSpan)) {
+        return false;
+    }
+
+    assetEnd = range->assetOffsetStart + assetSpan;
+    assetOffset = range->assetOffsetStart + (ram - range->ramStart);
+    mappedAssetOffset = assetOffset ^ 7U;
+
+    if ((mappedAssetOffset < range->assetOffsetStart) || (mappedAssetOffset >= assetEnd)) {
+        return false;
+    }
+
+    mappedRam = range->ramStart + (mappedAssetOffset - range->assetOffsetStart);
+    *mapped = (const void*)mappedRam;
+    return true;
 }
 
 static void OotPsp_RegisterLoadedAssetRanges(void* ram, size_t size, uintptr_t vromStart,
@@ -837,6 +872,7 @@ s32 OotPsp_IsNativeExternalTextureRange(const void* ptr, size_t size) {
         if (((range->flags & (OOT_PSP_EXTERNAL_ASSET_NATIVE | OOT_PSP_EXTERNAL_ASSET_TEXTURE_WORDS)) ==
              (OOT_PSP_EXTERNAL_ASSET_NATIVE | OOT_PSP_EXTERNAL_ASSET_TEXTURE_WORDS)) &&
             OotPsp_RangeContains(range->ramStart, range->ramEnd, ramStart, ramEnd)) {
+            sOotPspLastNativeTextureRange = range;
             return true;
         }
     }
@@ -892,41 +928,24 @@ s32 OotPsp_MapNativeExternalTextureByte(const void* ptr, const void** mapped) {
         ram = normalizedRam;
     }
 
+    if (OotPsp_IsNativeLoadedAssetByteRange(sOotPspLastNativeTextureRange, ram)) {
+        return OotPsp_MapNativeExternalTextureByteInRange(sOotPspLastNativeTextureRange, ram, mapped);
+    }
+
     for (i = 0; i < OOT_PSP_LOADED_ASSET_RANGE_COUNT; i++) {
         const OotPspLoadedAssetRange* range = &sOotPspLoadedAssetRanges[i];
-        uintptr_t assetOffset;
-        uintptr_t assetEnd;
-        uintptr_t assetSpan;
-        uintptr_t mappedAssetOffset;
-        uintptr_t mappedRam;
 
         /*
          * Texture subranges are best-effort. Native object bins still store
          * compiled u64 texture words, so fall back to the full native asset
          * range when a specific texture subrange was not generated.
          */
-        if (((range->flags & OOT_PSP_EXTERNAL_ASSET_NATIVE) == 0) || (ram < range->ramStart) ||
-            (ram >= range->ramEnd)) {
+        if (!OotPsp_IsNativeLoadedAssetByteRange(range, ram)) {
             continue;
         }
 
-        assetSpan = range->ramEnd - range->ramStart;
-        if (range->assetOffsetStart > (UINTPTR_MAX - assetSpan)) {
-            return false;
-        }
-
-        assetEnd = range->assetOffsetStart + assetSpan;
-        assetOffset = range->assetOffsetStart + (ram - range->ramStart);
-        mappedAssetOffset = assetOffset ^ 7U;
-
-        if ((mappedAssetOffset < range->assetOffsetStart) ||
-            (mappedAssetOffset >= assetEnd)) {
-            return false;
-        }
-
-        mappedRam = range->ramStart + (mappedAssetOffset - range->assetOffsetStart);
-        *mapped = (const void*)mappedRam;
-        return true;
+        sOotPspLastNativeTextureRange = range;
+        return OotPsp_MapNativeExternalTextureByteInRange(range, ram, mapped);
     }
 
     return false;
