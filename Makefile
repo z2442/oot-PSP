@@ -1431,6 +1431,20 @@ PSP_PORT_GENERATED_ASSET_FILES := \
 	$(BUILD_DIR)/assets/textures/nintendo_rogo_static/nintendo_rogo_static_Tex_000000.i8.inc.c \
 	$(BUILD_DIR)/assets/textures/nintendo_rogo_static/nintendo_rogo_static_Tex_001800.i8.inc.c
 
+PSP_PORT_OVERLAY_GENERATED_ASSET_DIRS := assets/overlays $(EXTRACTED_DIR)/assets/overlays
+PSP_PORT_NATIVE_GENERATED_ASSET_DIRS := \
+	assets/objects \
+	assets/scenes \
+	assets/textures \
+	assets/misc \
+	$(EXTRACTED_DIR)/assets/objects \
+	$(EXTRACTED_DIR)/assets/scenes \
+	$(EXTRACTED_DIR)/assets/textures \
+	$(EXTRACTED_DIR)/assets/misc
+
+PSP_PORT_OVERLAY_GENERATED_ASSET_STAMP := $(BUILD_DIR)/assets/psp_generated_overlay_assets.stamp
+PSP_PORT_NATIVE_GENERATED_ASSET_STAMP := $(BUILD_DIR)/assets/psp_generated_native_assets.stamp
+
 PSP_PORT_DEFINES := \
 	-D_LANGUAGE_C \
 	-DNON_MATCHING \
@@ -1538,7 +1552,37 @@ $(PSP_PORT_ASSET_SEGMENT_TABLE_OBJECT): $(PSP_PORT_ASSET_SEGMENT_TABLE_SOURCE)
 $(PSP_PORT_EXTRACTED_ASSET_FILES): $(PSP_PORT_SETUP_STAMP)
 	@test -f $@
 
-$(PSP_PORT_NATIVE_SEGMENT_OBJECTS): $(PSP_PORT_SETUP_STAMP) $(PSP_PORT_EXTRACTED_ASSET_FILES) $(PSP_PORT_GENERATED_ASSET_FILES)
+$(PSP_PORT_OVERLAY_GENERATED_ASSET_STAMP): $(PSP_PORT_SETUP_STAMP)
+	@mkdir -p $(dir $@)
+	@{ for dir in $(PSP_PORT_OVERLAY_GENERATED_ASSET_DIRS); do \
+		if test -d "$$dir"; then \
+			find "$$dir" -type f \( -name '*.png' -o -name '*.bin' -o -name '*.jpg' \); \
+		fi; \
+	done; } | sed \
+		-e 's#^assets/#$(BUILD_DIR)/assets/#' \
+		-e 's#^$(EXTRACTED_DIR)/assets/#$(BUILD_DIR)/assets/#' \
+		-e 's#\.png$$#.inc.c#' \
+		-e 's#\.bin$$#.bin.inc.c#' \
+		-e 's#\.jpg$$#.jpg.inc.c#' | xargs -r $(MAKE)
+	@touch $@
+
+$(PSP_PORT_NATIVE_GENERATED_ASSET_STAMP): $(PSP_PORT_SETUP_STAMP)
+	@mkdir -p $(dir $@)
+	@{ for dir in $(PSP_PORT_NATIVE_GENERATED_ASSET_DIRS); do \
+		if test -d "$$dir"; then \
+			find "$$dir" -type f \( -name '*.png' -o -name '*.bin' -o -name '*.jpg' \); \
+		fi; \
+	done; } | sed \
+		-e 's#^assets/#$(BUILD_DIR)/assets/#' \
+		-e 's#^$(EXTRACTED_DIR)/assets/#$(BUILD_DIR)/assets/#' \
+		-e 's#\.png$$#.inc.c#' \
+		-e 's#\.bin$$#.bin.inc.c#' \
+		-e 's#\.jpg$$#.jpg.inc.c#' | xargs -r $(MAKE)
+	@touch $@
+
+$(PSP_PORT_RUNTIME_OBJECTS): $(PSP_PORT_SETUP_STAMP) $(PSP_PORT_OVERLAY_GENERATED_ASSET_STAMP)
+
+$(PSP_PORT_NATIVE_SEGMENT_OBJECTS): $(PSP_PORT_SETUP_STAMP) $(PSP_PORT_EXTRACTED_ASSET_FILES) $(PSP_PORT_NATIVE_GENERATED_ASSET_STAMP)
 
 $(PSP_PORT_LIBRARY): $(PSP_PORT_RUNTIME_OBJECTS) $(PSP_PORT_RUNTIME_ASM_OBJECTS) $(PSP_PORT_ASSET_OBJECTS) $(PSP_PORT_ROMINFO_OBJECT) $(PSP_PORT_ASSET_TABLE_OBJECT) $(PSP_PORT_ASSET_SEGMENT_OBJECT) $(PSP_PORT_ASSET_SEGMENT_TABLE_OBJECT)
 	@mkdir -p $(dir $@)
