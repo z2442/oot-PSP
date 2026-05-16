@@ -424,6 +424,12 @@ void Graph_Update(GraphicsContext* gfxCtx, GameState* gameState) {
         GfxPool* pool = &gGfxPools[gfxCtx->gfxPoolIdx & 1];
 
         if (pool->headMagic != GFXPOOL_HEAD_MAGIC) {
+#if PLATFORM_PSP
+            PRINTF("oot-psp gfxpool head corrupt pool=%u magic=%04x start=%08x head=%08x tail=%08x rem=%d\n",
+                   gfxCtx->gfxPoolIdx & 1, pool->headMagic, (u32)(uintptr_t)gfxCtx->polyOpa.start,
+                   (u32)(uintptr_t)gfxCtx->polyOpa.p, (u32)(uintptr_t)gfxCtx->polyOpa.d,
+                   THGA_GetRemaining(&gfxCtx->polyOpa));
+#endif
             //! @bug (?) : "problem = true;" may be missing
             PRINTF("%c", BEL);
             PRINTF(VT_COL(RED, WHITE) T("ダイナミック領域先頭が破壊されています\n", "Dynamic area head is destroyed\n")
@@ -550,22 +556,50 @@ void Graph_ThreadEntry(void* arg0) {
 
 void* Graph_Alloc(GraphicsContext* gfxCtx, size_t size) {
     TwoHeadGfxArena* thga = &gfxCtx->polyOpa;
+    size_t alignedSize = ALIGN16(size);
+    void* ptr;
 
     if (HREG(59) == 1) {
         PRINTF("graph_alloc siz=%d thga size=%08x bufp=%08x head=%08x tail=%08x\n", size, thga->size, thga->start,
                thga->p, thga->d);
     }
-    return THGA_AllocTail(&gfxCtx->polyOpa, ALIGN16(size));
+
+    ptr = THGA_AllocTail(&gfxCtx->polyOpa, alignedSize);
+
+#if PLATFORM_PSP
+    if (THGA_IsCrash(&gfxCtx->polyOpa)) {
+        PRINTF("oot-psp graph alloc overflow size=%u aligned=%u start=%08x head=%08x tail=%08x rem=%d\n", (u32)size,
+               (u32)alignedSize, (u32)(uintptr_t)thga->start, (u32)(uintptr_t)thga->p, (u32)(uintptr_t)thga->d,
+               THGA_GetRemaining(thga));
+        Fault_AddHungupAndCrash("../graph.c", __LINE__);
+    }
+#endif
+
+    return ptr;
 }
 
 void* Graph_Alloc2(GraphicsContext* gfxCtx, size_t size) {
     TwoHeadGfxArena* thga = &gfxCtx->polyOpa;
+    size_t alignedSize = ALIGN16(size);
+    void* ptr;
 
     if (HREG(59) == 1) {
         PRINTF("graph_alloc siz=%d thga size=%08x bufp=%08x head=%08x tail=%08x\n", size, thga->size, thga->start,
                thga->p, thga->d);
     }
-    return THGA_AllocTail(&gfxCtx->polyOpa, ALIGN16(size));
+
+    ptr = THGA_AllocTail(&gfxCtx->polyOpa, alignedSize);
+
+#if PLATFORM_PSP
+    if (THGA_IsCrash(&gfxCtx->polyOpa)) {
+        PRINTF("oot-psp graph alloc2 overflow size=%u aligned=%u start=%08x head=%08x tail=%08x rem=%d\n", (u32)size,
+               (u32)alignedSize, (u32)(uintptr_t)thga->start, (u32)(uintptr_t)thga->p, (u32)(uintptr_t)thga->d,
+               THGA_GetRemaining(thga));
+        Fault_AddHungupAndCrash("../graph.c", __LINE__);
+    }
+#endif
+
+    return ptr;
 }
 
 #if DEBUG_FEATURES

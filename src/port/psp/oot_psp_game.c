@@ -63,6 +63,7 @@
 #include "z_lib.h"
 #include "oot_psp_asset_loader.h"
 
+#include <pspiofilemgr.h>
 #include <pspkernel.h>
 #include <pspthreadman.h>
 #include <math.h>
@@ -551,9 +552,17 @@ void Fault_RemoveClient(FaultClient* client) {
     }
 }
 
+static void OotPsp_FaultWrite(const char* msg) {
+    osSyncPrintf("%s", msg);
+    sceIoWrite(1, msg, strlen(msg));
+}
+
 NORETURN void oot_psp_assert(const char* assertion, const char* file, int line) {
-    osSyncPrintf("oot-psp assert failed: %s (%s:%d)\n", assertion != NULL ? assertion : "(null)",
-                 file != NULL ? file : "(null)", line);
+    char msg[256];
+
+    snprintf(msg, sizeof(msg), "oot-psp assert failed: %s (%s:%d)\n", assertion != NULL ? assertion : "(null)",
+             file != NULL ? file : "(null)", line);
+    OotPsp_FaultWrite(msg);
     Fault_AddHungupAndCrash(file, line);
 }
 
@@ -584,7 +593,11 @@ void Fault_SetCharPad(UNUSED s8 padW, UNUSED s8 padH) {
 }
 
 NORETURN void Fault_AddHungupAndCrashImpl(const char* exp1, const char* exp2) {
-    osSyncPrintf("oot-psp fault: %s %s\n", exp1 != NULL ? exp1 : "(null)", exp2 != NULL ? exp2 : "(null)");
+    char msg[256];
+
+    snprintf(msg, sizeof(msg), "oot-psp fault: %s %s\n", exp1 != NULL ? exp1 : "(null)",
+             exp2 != NULL ? exp2 : "(null)");
+    OotPsp_FaultWrite(msg);
     sceKernelExitGame();
     while (true) {
         sceKernelDelayThread(1000000);
@@ -592,7 +605,10 @@ NORETURN void Fault_AddHungupAndCrashImpl(const char* exp1, const char* exp2) {
 }
 
 NORETURN void Fault_AddHungupAndCrash(const char* file, int line) {
-    osSyncPrintf("oot-psp fault at %s:%d\n", file != NULL ? file : "(null)", line);
+    char msg[256];
+
+    snprintf(msg, sizeof(msg), "oot-psp fault at %s:%d\n", file != NULL ? file : "(null)", line);
+    OotPsp_FaultWrite(msg);
     sceKernelExitGame();
     while (true) {
         sceKernelDelayThread(1000000);

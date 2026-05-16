@@ -1386,6 +1386,11 @@ PSP_PORT_LIBRARY := $(PSP_PORT_BUILD_DIR)/liboot_psp_platform.a
 PSP_PORT_ELF := $(PSP_PORT_BUILD_DIR)/oot-psp-port.elf
 PSP_PORT_PRX := $(PSP_PORT_BUILD_DIR)/oot-psp-port.prx
 PSP_PORT_PBP := $(PSP_PORT_BUILD_DIR)/EBOOT.PBP
+PSP_PORT_DEP_FILES := $(PSP_PORT_RUNTIME_OBJECTS:.o=.d) $(PSP_PORT_RUNTIME_ASM_OBJECTS:.o=.d) \
+	$(PSP_PORT_ASSET_OBJECTS:.o=.d) $(PSP_PORT_NATIVE_SEGMENT_OBJECTS:.o=.d) \
+	$(PSP_PORT_ROMINFO_OBJECT:.o=.d) $(PSP_PORT_ASSET_TABLE_OBJECT:.o=.d) \
+	$(PSP_PORT_ASSET_SEGMENT_OBJECT:.o=.d) $(PSP_PORT_ASSET_SEGMENT_TABLE_OBJECT:.o=.d) \
+	$(PSP_PORT_PROBE_OBJECT:.o=.d)
 
 $(PSP_PORT_BUILD_DIR)/assets/text/jpn_message_data_static.o: $(BUILD_DIR)/assets/text/message_data.enc.jpn.h
 $(PSP_PORT_BUILD_DIR)/assets/text/nes_message_data_static.o: $(BUILD_DIR)/assets/text/message_data.enc.nes.h
@@ -1476,11 +1481,11 @@ psp-port: $(PSP_PORT_PBP) $(PSP_PORT_ASSET_SEGMENT_DATA_STAMP)
 
 $(PSP_PORT_BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(PSP_PORT_CC) -c $(PSP_PORT_CFLAGS) -o $@ $<
+	$(PSP_PORT_CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $(PSP_PORT_CFLAGS) -o $@ $<
 
 $(PSP_PORT_BUILD_DIR)/%.o: %.s
 	@mkdir -p $(dir $@)
-	$(PSP_PORT_CC) -c -x assembler-with-cpp $(PSP_PORT_ASM_DEFINES) $(PSP_PORT_INCLUDES) -Wa,-I$(EXTRACTED_DIR) -o $@ $<
+	$(PSP_PORT_CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -c -x assembler-with-cpp $(PSP_PORT_ASM_DEFINES) $(PSP_PORT_INCLUDES) -Wa,-I$(EXTRACTED_DIR) -o $@ $<
 
 $(PSP_PORT_RUNTIME_OBJECTS) $(PSP_PORT_NATIVE_SEGMENT_OBJECTS): include/command_macros_base.h include/cutscene_commands.h include/scene.h
 
@@ -1503,14 +1508,14 @@ $(PSP_PORT_ROMINFO_SOURCE): $(PSP_PORT_BASEROM) tools/psp_port_rom_info.py
 
 $(PSP_PORT_ROMINFO_OBJECT): $(PSP_PORT_ROMINFO_SOURCE)
 	@mkdir -p $(dir $@)
-	$(PSP_PORT_CC) -c $(PSP_PORT_CFLAGS) -o $@ $<
+	$(PSP_PORT_CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $(PSP_PORT_CFLAGS) -o $@ $<
 
 $(PSP_PORT_ASSET_TABLE_SOURCE): $(PSP_PORT_SETUP_STAMP) tools/psp_port_asset_tables.py include/tables/object_table.h include/tables/scene_table.h include/segment_symbols.h
 	$(PYTHON) tools/psp_port_asset_tables.py $(VERSION) $@
 
 $(PSP_PORT_ASSET_TABLE_OBJECT): $(PSP_PORT_ASSET_TABLE_SOURCE)
 	@mkdir -p $(dir $@)
-	$(PSP_PORT_CC) -c $(PSP_PORT_CFLAGS) -o $@ $<
+	$(PSP_PORT_CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $(PSP_PORT_CFLAGS) -o $@ $<
 
 $(PSP_PORT_ASSET_SEGMENT_STAMP): $(PSP_PORT_SETUP_STAMP) tools/psp_port_asset_segments.py include/segment_symbols.h $(PSP_PORT_NATIVE_SEGMENT_OBJECTS)
 	$(PYTHON) tools/psp_port_asset_segments.py $(VERSION) $(PSP_PORT_ASSET_SEGMENT_SOURCE) $(PSP_PORT_ASSET_SEGMENT_TABLE_SOURCE) $(PSP_PORT_ASSET_SEGMENT_DATA_DIR)
@@ -1524,11 +1529,11 @@ $(PSP_PORT_ASSET_SEGMENT_DATA_STAMP): $(PSP_PORT_ASSET_SEGMENT_STAMP)
 
 $(PSP_PORT_ASSET_SEGMENT_OBJECT): $(PSP_PORT_ASSET_SEGMENT_SOURCE)
 	@mkdir -p $(dir $@)
-	$(PSP_PORT_CC) -c -x assembler-with-cpp $(PSP_PORT_DEFINES) $(PSP_PORT_INCLUDES) -o $@ $<
+	$(PSP_PORT_CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -c -x assembler-with-cpp $(PSP_PORT_DEFINES) $(PSP_PORT_INCLUDES) -o $@ $<
 
 $(PSP_PORT_ASSET_SEGMENT_TABLE_OBJECT): $(PSP_PORT_ASSET_SEGMENT_TABLE_SOURCE)
 	@mkdir -p $(dir $@)
-	$(PSP_PORT_CC) -c $(PSP_PORT_CFLAGS) -o $@ $<
+	$(PSP_PORT_CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $(PSP_PORT_CFLAGS) -o $@ $<
 
 $(PSP_PORT_EXTRACTED_ASSET_FILES): $(PSP_PORT_SETUP_STAMP)
 	@test -f $@
@@ -1558,7 +1563,7 @@ psp-port-clean:
 
 .PHONY: psp-port psp-port-clean
 
--include $(DEP_FILES)
+-include $(DEP_FILES) $(PSP_PORT_DEP_FILES)
 
 # Print target for debugging
 print-% : ; $(info $* is a $(flavor $*) variable set to [$($*)]) @true

@@ -2,7 +2,9 @@
 #include "segment_symbols.h"
 
 #include <pspiofilemgr.h>
+#include <pspthreadman.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define OOT_PSP_DEFAULT_PRX_RELOCATION_BIAS 0x08800000U
@@ -11,6 +13,16 @@
 #define OOT_PSP_NATIVE_ADDR_START           0x08800000U
 #define OOT_PSP_NATIVE_ADDR_END             0x0C000000U
 #define OOT_PSP_LOADED_ASSET_RANGE_COUNT    4096
+#define OOT_PSP_ASSET_READ_CHUNK_SIZE       0x4000
+#define OOT_PSP_ASSET_CACHE_SIZE            (4 * 1024 * 1024)
+#define OOT_PSP_HOT_ASSET_CACHE_COUNT       4
+#define OOT_PSP_HOT_READ_TRACKER_COUNT      16
+#define OOT_PSP_HOT_READ_PROMOTE_COUNT      4
+#define OOT_PSP_HOT_READ_MAX_SIZE           OOT_PSP_ASSET_CACHE_SIZE
+#define OOT_PSP_KANJI_ASSET_PATH            "data/segments/kanji.bin"
+#define OOT_PSP_LINK_ANIMATION_ASSET_PATH   "data/segments/link_animetion.bin"
+#define OOT_PSP_ASSET_READ_ZERO_RETRY_COUNT 16
+#define OOT_PSP_ASSET_READ_ZERO_RETRY_USEC  1000
 
 typedef struct OotPspLoadedAssetRange {
     uintptr_t ramStart;
@@ -20,12 +32,40 @@ typedef struct OotPspLoadedAssetRange {
     u32 serial;
 } OotPspLoadedAssetRange;
 
+typedef struct OotPspAssetCache {
+    const char* path;
+    const OotPspExternalAsset* asset;
+    u8* data;
+    size_t capacity;
+    size_t offset;
+    size_t dataSize;
+    u32 lastUsed;
+    s32 failed;
+} OotPspAssetCache;
+
+typedef struct OotPspHotReadTracker {
+    const OotPspExternalAsset* asset;
+    u32 lastUsed;
+    u8 hits;
+} OotPspHotReadTracker;
+
 static char sOotPspAssetRoot[256];
 static uintptr_t sOotPspPrxRelocationBias = OOT_PSP_DEFAULT_PRX_RELOCATION_BIAS;
 static s32 sOotPspPrxRelocationBiasInitialized = false;
 static OotPspLoadedAssetRange sOotPspLoadedAssetRanges[OOT_PSP_LOADED_ASSET_RANGE_COUNT];
 static size_t sOotPspLoadedAssetRangeNext;
 static u32 sOotPspLoadedAssetSerial = 1;
+static u32 sOotPspAssetCacheClock;
+static OotPspAssetCache sOotPspPinnedAssetCaches[] = {
+    { OOT_PSP_KANJI_ASSET_PATH, NULL, NULL, 0, 0, 0, 0, false },
+    { OOT_PSP_LINK_ANIMATION_ASSET_PATH, NULL, NULL, 0, 0, 0, 0, false },
+};
+static OotPspAssetCache sOotPspHotAssetCaches[OOT_PSP_HOT_ASSET_CACHE_COUNT];
+static OotPspHotReadTracker sOotPspHotReadTrackers[OOT_PSP_HOT_READ_TRACKER_COUNT];
+
+#define OOT_PSP_PINNED_ASSET_CACHE_COUNT (sizeof(sOotPspPinnedAssetCaches) / sizeof(sOotPspPinnedAssetCaches[0]))
+
+static void OotPsp_PreloadPersistentAssets(void);
 
 void OotPsp_AssetInit(const char* executablePath) {
     const char* slash;
@@ -58,6 +98,7 @@ void OotPsp_AssetInit(const char* executablePath) {
     memcpy(sOotPspAssetRoot, executablePath, length);
     sOotPspAssetRoot[length] = '\0';
     printf("oot-psp asset root=%s\n", sOotPspAssetRoot);
+    OotPsp_PreloadPersistentAssets();
 }
 
 static s32 OotPsp_IsAbsolutePath(const char* path) {
@@ -91,6 +132,295 @@ static const char* OotPsp_ResolveAssetPath(const char* path, char* buffer, size_
     }
 
     return buffer;
+}
+
+static int OotPsp_ReadAssetChunk(SceUID fd, u8* out, int chunk, const char* path, size_t readOffset) {
+    int zeroReads = 0;
+
+    while (true) {
+        int read = sceIoRead(fd, out, chunk);
+
+        if (read != 0) {
+            return read;
+        }
+
+        if (zeroReads >= OOT_PSP_ASSET_READ_ZERO_RETRY_COUNT) {
+            printf("oot-psp asset read zero path=%s off=%lu size=%d retries=%d\n", path,
+                   (unsigned long)readOffset, chunk, zeroReads);
+            return read;
+        }
+
+        zeroReads++;
+        sceKernelDelayThread(OOT_PSP_ASSET_READ_ZERO_RETRY_USEC);
+    }
+}
+
+static u32 OotPsp_NextAssetCacheClock(void) {
+    sOotPspAssetCacheClock++;
+    if (sOotPspAssetCacheClock == 0) {
+        sOotPspAssetCacheClock = 1;
+    }
+    return sOotPspAssetCacheClock;
+}
+
+static OotPspAssetCache* OotPsp_FindPinnedAssetCache(const OotPspExternalAsset* asset) {
+    size_t i;
+
+    if (asset == NULL) {
+        return NULL;
+    }
+
+    for (i = 0; i < OOT_PSP_PINNED_ASSET_CACHE_COUNT; i++) {
+        OotPspAssetCache* cache = &sOotPspPinnedAssetCaches[i];
+
+        if (strcmp(asset->path, cache->path) == 0) {
+            cache->asset = asset;
+            return cache;
+        }
+    }
+
+    return NULL;
+}
+
+static OotPspAssetCache* OotPsp_FindLoadedHotAssetCache(const OotPspExternalAsset* asset) {
+    size_t i;
+
+    for (i = 0; i < OOT_PSP_HOT_ASSET_CACHE_COUNT; i++) {
+        OotPspAssetCache* cache = &sOotPspHotAssetCaches[i];
+
+        if ((cache->asset == asset) && (cache->data != NULL)) {
+            return cache;
+        }
+    }
+
+    return NULL;
+}
+
+static OotPspAssetCache* OotPsp_FindAssetCache(const OotPspExternalAsset* asset) {
+    OotPspAssetCache* cache = OotPsp_FindPinnedAssetCache(asset);
+
+    if (cache != NULL) {
+        return cache;
+    }
+
+    return OotPsp_FindLoadedHotAssetCache(asset);
+}
+
+static s32 OotPsp_RecordHotAssetRead(const OotPspExternalAsset* asset) {
+    OotPspHotReadTracker* best = NULL;
+    size_t i;
+
+    if (asset == NULL) {
+        return false;
+    }
+
+    for (i = 0; i < OOT_PSP_HOT_READ_TRACKER_COUNT; i++) {
+        OotPspHotReadTracker* tracker = &sOotPspHotReadTrackers[i];
+
+        if (tracker->asset == asset) {
+            if (tracker->hits < 0xFF) {
+                tracker->hits++;
+            }
+            tracker->lastUsed = OotPsp_NextAssetCacheClock();
+            return tracker->hits >= OOT_PSP_HOT_READ_PROMOTE_COUNT;
+        }
+
+        if (tracker->asset == NULL) {
+            best = tracker;
+        } else if ((best == NULL) || (tracker->lastUsed < best->lastUsed)) {
+            best = tracker;
+        }
+    }
+
+    if (best == NULL) {
+        return false;
+    }
+
+    best->asset = asset;
+    best->hits = 1;
+    best->lastUsed = OotPsp_NextAssetCacheClock();
+    return false;
+}
+
+static OotPspAssetCache* OotPsp_GetHotAssetCacheCandidate(const OotPspExternalAsset* asset) {
+    OotPspAssetCache* best = NULL;
+    size_t i;
+
+    if (asset == NULL) {
+        return NULL;
+    }
+
+    for (i = 0; i < OOT_PSP_HOT_ASSET_CACHE_COUNT; i++) {
+        OotPspAssetCache* cache = &sOotPspHotAssetCaches[i];
+
+        if (cache->asset == asset) {
+            return cache;
+        }
+
+        if (cache->asset == NULL) {
+            best = cache;
+        } else if ((best == NULL) || (cache->lastUsed < best->lastUsed)) {
+            best = cache;
+        }
+    }
+
+    if (best == NULL) {
+        return NULL;
+    }
+
+    if ((best->asset != NULL) && (best->asset != asset)) {
+        free(best->data);
+        best->data = NULL;
+        best->capacity = 0;
+        best->offset = 0;
+        best->dataSize = 0;
+        best->failed = false;
+    }
+
+    best->path = asset->path;
+    best->asset = asset;
+    best->lastUsed = OotPsp_NextAssetCacheClock();
+    return best;
+}
+
+static s32 OotPsp_ReadAssetFileRange(const OotPspExternalAsset* asset, size_t offset, u8* out, size_t size) {
+    char pathBuffer[384];
+    const char* path;
+    SceUID fd;
+    size_t remaining = size;
+    size_t readOffset = offset;
+
+    path = OotPsp_ResolveAssetPath(asset->path, pathBuffer, sizeof(pathBuffer));
+    fd = sceIoOpen(path, PSP_O_RDONLY, 0);
+    if (fd < 0) {
+        printf("oot-psp asset open failed path=%s err=%d\n", path, (int)fd);
+        return false;
+    }
+
+    if ((offset != 0) && (sceIoLseek32(fd, (int)offset, PSP_SEEK_SET) < 0)) {
+        printf("oot-psp asset seek failed path=%s off=%lu\n", path, (unsigned long)offset);
+        sceIoClose(fd);
+        return false;
+    }
+
+    while (remaining != 0) {
+        int chunk = remaining > OOT_PSP_ASSET_READ_CHUNK_SIZE ? OOT_PSP_ASSET_READ_CHUNK_SIZE : (int)remaining;
+        int read = OotPsp_ReadAssetChunk(fd, out, chunk, path, readOffset);
+
+        if (read <= 0) {
+            printf("oot-psp asset read failed path=%s off=%lu size=%lu read=%d\n", path,
+                   (unsigned long)readOffset, (unsigned long)remaining, read);
+            sceIoClose(fd);
+            return false;
+        }
+
+        out += read;
+        readOffset += read;
+        remaining -= read;
+    }
+
+    sceIoClose(fd);
+    return true;
+}
+
+static s32 OotPsp_EnsureAssetCacheRange(OotPspAssetCache* cache, const OotPspExternalAsset* asset, size_t offset,
+                                        size_t size) {
+    u8* data;
+    size_t fileSize;
+    size_t cacheOffset;
+    size_t windowStart;
+    size_t windowSize;
+    size_t capacity;
+
+    if (cache == NULL) {
+        return false;
+    }
+
+    cache->asset = asset;
+    cache->lastUsed = OotPsp_NextAssetCacheClock();
+
+    if (size > OOT_PSP_ASSET_CACHE_SIZE) {
+        return false;
+    }
+
+    if ((cache->data != NULL) && (offset >= cache->offset)) {
+        cacheOffset = offset - cache->offset;
+        if ((cacheOffset <= cache->dataSize) && (size <= (cache->dataSize - cacheOffset))) {
+            return true;
+        }
+    }
+
+    if (cache->failed) {
+        return false;
+    }
+
+    if (asset->vromEnd <= asset->vromStart) {
+        cache->failed = true;
+        return false;
+    }
+
+    fileSize = asset->vromEnd - asset->vromStart;
+    if ((offset > fileSize) || (size > (fileSize - offset))) {
+        return false;
+    }
+
+    if (cache->data == NULL) {
+        capacity = fileSize < OOT_PSP_ASSET_CACHE_SIZE ? fileSize : OOT_PSP_ASSET_CACHE_SIZE;
+        if (size > capacity) {
+            return false;
+        }
+
+        data = malloc(capacity);
+        if (data == NULL) {
+            printf("oot-psp asset cache alloc failed path=%s size=%lu\n", asset->path,
+                   (unsigned long)capacity);
+            cache->failed = true;
+            return false;
+        }
+
+        cache->data = data;
+        cache->capacity = capacity;
+    }
+
+    if (fileSize <= cache->capacity) {
+        windowStart = 0;
+        windowSize = fileSize;
+    } else {
+        windowStart = (offset / cache->capacity) * cache->capacity;
+        if (windowStart > (fileSize - cache->capacity)) {
+            windowStart = fileSize - cache->capacity;
+        }
+        windowSize = cache->capacity;
+    }
+
+    if (!OotPsp_ReadAssetFileRange(asset, windowStart, cache->data, windowSize)) {
+        free(cache->data);
+        cache->data = NULL;
+        cache->capacity = 0;
+        cache->offset = 0;
+        cache->dataSize = 0;
+        cache->failed = true;
+        return false;
+    }
+
+    cache->offset = windowStart;
+    cache->dataSize = windowSize;
+    printf("oot-psp cached %s off=%lu size=%lu cap=%lu\n", asset->path, (unsigned long)windowStart,
+           (unsigned long)windowSize, (unsigned long)cache->capacity);
+    return true;
+}
+
+static void OotPsp_PreloadPersistentAssets(void) {
+    size_t i;
+
+    for (i = 0; i < gOotPspExternalAssetCount; i++) {
+        const OotPspExternalAsset* asset = &gOotPspExternalAssets[i];
+        OotPspAssetCache* cache = OotPsp_FindPinnedAssetCache(asset);
+
+        if (cache != NULL) {
+            OotPsp_EnsureAssetCacheRange(cache, asset, 0, 1);
+        }
+    }
 }
 
 static const OotPspExternalAsset* OotPsp_FindContainingExternalAsset(uintptr_t vrom, size_t* index) {
@@ -265,6 +595,31 @@ static u32 OotPsp_NextLoadedAssetSerial(void) {
     }
 
     return serial;
+}
+
+static s32 OotPsp_TryReadAssetCache(const OotPspExternalAsset* asset, void* ram, uintptr_t vrom, size_t size) {
+    OotPspAssetCache* cache;
+    size_t offset;
+    size_t cacheOffset;
+
+    if ((asset == NULL) || (vrom < asset->vromStart)) {
+        return false;
+    }
+
+    cache = OotPsp_FindAssetCache(asset);
+    offset = vrom - asset->vromStart;
+    if ((cache == NULL) && (size <= OOT_PSP_HOT_READ_MAX_SIZE) && OotPsp_RecordHotAssetRead(asset)) {
+        cache = OotPsp_GetHotAssetCacheCandidate(asset);
+    }
+
+    if (!OotPsp_EnsureAssetCacheRange(cache, asset, offset, size)) {
+        return false;
+    }
+
+    cacheOffset = offset - cache->offset;
+    memcpy(ram, &cache->data[cacheOffset], size);
+    OotPsp_RegisterLoadedAssetRanges(ram, size, vrom, asset, OotPsp_NextLoadedAssetSerial());
+    return true;
 }
 
 static s32 OotPsp_TryTranslateAssetRange(const OotPspExternalAsset* asset, uintptr_t rangeStart, uintptr_t rangeEnd,
@@ -606,6 +961,10 @@ s32 OotPsp_AssetRead(void* ram, uintptr_t vrom, size_t size) {
         return OOT_PSP_ASSET_READ_NOT_EXTERNAL;
     }
 
+    if (OotPsp_TryReadAssetCache(&gOotPspExternalAssets[assetIndex], ram, normalizedVrom, size)) {
+        return OOT_PSP_ASSET_READ_OK;
+    }
+
     while (remaining != 0) {
         const OotPspExternalAsset* asset = &gOotPspExternalAssets[assetIndex];
         uintptr_t offset;
@@ -644,8 +1003,8 @@ s32 OotPsp_AssetRead(void* ram, uintptr_t vrom, size_t size) {
         }
 
         while (chunkSize != 0) {
-            int chunk = chunkSize > 0x4000 ? 0x4000 : (int)chunkSize;
-            int read = sceIoRead(fd, out, chunk);
+            int chunk = chunkSize > OOT_PSP_ASSET_READ_CHUNK_SIZE ? OOT_PSP_ASSET_READ_CHUNK_SIZE : (int)chunkSize;
+            int read = OotPsp_ReadAssetChunk(fd, out, chunk, path, readOffset);
 
             if (read <= 0) {
                 printf("oot-psp asset read failed path=%s off=%lu size=%lu read=%d\n", path,
