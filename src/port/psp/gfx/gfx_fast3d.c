@@ -522,39 +522,46 @@ static uint32_t gfx_texture_source_span_size(int tile) {
 #endif
 }
 
-static bool gfx_source_needs_n64_wordswap(const uint8_t* addr, uint32_t sizeBytes) {
+typedef enum GfxTextureSwapMode {
+    GFX_TEXTURE_SWAP_NONE,
+    GFX_TEXTURE_SWAP_DIRECT,
+    GFX_TEXTURE_SWAP_MAPPED,
+} GfxTextureSwapMode;
+
+static GfxTextureSwapMode gfx_texture_source_swap_mode(const uint8_t* addr, uint32_t sizeBytes) {
 #if defined(TARGET_PSP)
+    u32 loadedFlags;
+
     /*
      * Extracted OoT textures are declared as u64 words. On PSP those words are
      * stored little-endian, so byte-oriented texture import must flip bytes back
-     * within each 64-bit word. Runtime byte buffers are dynamic/raw streams.
+     * within each 64-bit word. Loaded external assets need asset-offset-aware
+     * mapping; static PRX data can use a direct native-address XOR.
      */
     if ((addr == sInvalidTextureBuf) || (addr == sInvalidPaletteBuf)) {
-        return false;
+        return GFX_TEXTURE_SWAP_NONE;
     }
 
-    if (OotPsp_IsNativeExternalTextureRange(addr, sizeBytes) || OotPsp_IsNativeExternalTextureByte(addr)) {
-        return true;
+    if (OotPsp_GetLoadedExternalAssetRangeFlags(addr, sizeBytes, &loadedFlags) ||
+        OotPsp_GetLoadedExternalAssetRangeFlags(addr, 1, &loadedFlags)) {
+        return ((loadedFlags & OOT_PSP_EXTERNAL_ASSET_NATIVE) != 0) ? GFX_TEXTURE_SWAP_MAPPED
+                                                                    : GFX_TEXTURE_SWAP_NONE;
     }
 
-    if (OotPsp_IsLoadedExternalAssetRange(addr, sizeBytes) || OotPsp_IsLoadedExternalAssetRange(addr, 1)) {
-        return false;
-    }
-
-    return !OotPsp_IsRuntimeByteRange(addr, sizeBytes);
+    return OotPsp_IsRuntimeByteRange(addr, sizeBytes) ? GFX_TEXTURE_SWAP_NONE : GFX_TEXTURE_SWAP_DIRECT;
 #else
     _UNUSED(addr);
     _UNUSED(sizeBytes);
-    return false;
+    return GFX_TEXTURE_SWAP_NONE;
 #endif
 }
 
-static uint8_t gfx_read_texture_source_u8(const uint8_t* addr, uint32_t offset, bool wordswap) {
+static uint8_t gfx_read_texture_source_u8(const uint8_t* addr, uint32_t offset, GfxTextureSwapMode swapMode) {
 #if defined(TARGET_PSP)
     uintptr_t source = (uintptr_t)addr + offset;
     uintptr_t normalized;
 
-    if (wordswap) {
+    if (swapMode == GFX_TEXTURE_SWAP_MAPPED) {
         const void* mapped;
 
         if (OotPsp_MapNativeExternalTextureByte((const void*)source, &mapped)) {
@@ -562,6 +569,8 @@ static uint8_t gfx_read_texture_source_u8(const uint8_t* addr, uint32_t offset, 
         } else {
             source ^= 7U;
         }
+    } else if (swapMode == GFX_TEXTURE_SWAP_DIRECT) {
+        source ^= 7U;
     }
 
     if (!gfx_normalize_native_addr(source, &normalized)) {
@@ -570,15 +579,15 @@ static uint8_t gfx_read_texture_source_u8(const uint8_t* addr, uint32_t offset, 
 
     return *(const uint8_t*)normalized;
 #else
-    _UNUSED(wordswap);
+    _UNUSED(swapMode);
 
     return addr[offset];
 #endif
 }
 
-static uint16_t gfx_read_texture_source_be16(const uint8_t* addr, uint32_t offset, bool wordswap) {
-    return (gfx_read_texture_source_u8(addr, offset, wordswap) << 8) |
-           gfx_read_texture_source_u8(addr, offset + 1, wordswap);
+static uint16_t gfx_read_texture_source_be16(const uint8_t* addr, uint32_t offset, GfxTextureSwapMode swapMode) {
+    return (gfx_read_texture_source_u8(addr, offset, swapMode) << 8) |
+           gfx_read_texture_source_u8(addr, offset + 1, swapMode);
 }
 
 #if defined(TARGET_PSP)
@@ -1206,14 +1215,15 @@ static void import_texture_rgba16(int tile) {
     uint32_t width = gfx_texture_width_from_tile();
     uint32_t height = gfx_texture_height_from_tile();
     uint32_t rowBytes = gfx_texture_row_bytes(width, G_IM_SIZ_16b);
-    bool wordswap = gfx_source_needs_n64_wordswap(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
+    GfxTextureSwapMode swapMode =
+        gfx_texture_source_swap_mode(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
 
     for (uint32_t y = 0; y < height; y++) {
         const uint8_t* row = gfx_texture_row(tile, y, rowBytes);
 
         for (uint32_t x = 0; x < width; x++) {
             uint32_t i = y * width + x;
-            uint16_t col16 = gfx_read_texture_source_be16(row, 2 * x, wordswap);
+            uint16_t col16 = gfx_read_texture_source_be16(row, 2 * x, swapMode);
             const uint8_t a = col16 & 1;
             const uint8_t r = (col16 >> 11) & 0x1f;
             const uint8_t g = (col16 >> 6) & 0x1f;
@@ -1230,9 +1240,11 @@ static void import_texture_rgba32(int tile) {
     uint32_t width = gfx_texture_width_from_tile();
     uint32_t height = gfx_texture_height_from_tile();
     uint32_t rowBytes = gfx_texture_row_bytes(width, G_IM_SIZ_32b);
-    bool wordswap = gfx_source_needs_n64_wordswap(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
+    GfxTextureSwapMode swapMode =
+        gfx_texture_source_swap_mode(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
 
-    if (!wordswap && (rdp.loaded_texture[tile].row_stride_bytes == 0 || rdp.loaded_texture[tile].row_stride_bytes == rowBytes)) {
+    if ((swapMode == GFX_TEXTURE_SWAP_NONE) &&
+        (rdp.loaded_texture[tile].row_stride_bytes == 0 || rdp.loaded_texture[tile].row_stride_bytes == rowBytes)) {
         gfx_upload_texture(tile, rdp.loaded_texture[tile].addr, width, height, GU_PSM_8888);
         return;
     }
@@ -1241,16 +1253,16 @@ static void import_texture_rgba32(int tile) {
         const uint8_t* row = gfx_texture_row(tile, y, rowBytes);
 
         for (uint32_t x = 0; x < rowBytes; x++) {
-            rgba32_buf[y * rowBytes + x] = gfx_read_texture_source_u8(row, x, wordswap);
+            rgba32_buf[y * rowBytes + x] = gfx_read_texture_source_u8(row, x, swapMode);
         }
     }
 
     gfx_upload_texture(tile, rgba32_buf, width, height, GU_PSM_8888);
 }
 
-static uint8_t gfx_texture_read_4b(int tile, uint32_t x, const uint8_t* row, bool wordswap) {
+static uint8_t gfx_texture_read_4b(int tile, uint32_t x, const uint8_t* row, GfxTextureSwapMode swapMode) {
     uint32_t texel = rdp.loaded_texture[tile].source_nibble_offset + x;
-    uint8_t byte = gfx_read_texture_source_u8(row, texel >> 1, wordswap);
+    uint8_t byte = gfx_read_texture_source_u8(row, texel >> 1, swapMode);
 
     return (byte >> (4 - (texel & 1) * 4)) & 0xf;
 }
@@ -1260,14 +1272,15 @@ static void import_texture_ia4(int tile) {
     uint32_t width = gfx_texture_width_from_tile();
     uint32_t height = gfx_texture_height_from_tile();
     uint32_t rowBytes = gfx_texture_row_bytes(width + rdp.loaded_texture[tile].source_nibble_offset, G_IM_SIZ_4b);
-    bool wordswap = gfx_source_needs_n64_wordswap(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
+    GfxTextureSwapMode swapMode =
+        gfx_texture_source_swap_mode(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
 
     for (uint32_t y = 0; y < height; y++) {
         const uint8_t* row = gfx_texture_row(tile, y, rowBytes);
 
         for (uint32_t x = 0; x < width; x++) {
             uint32_t i = y * width + x;
-            uint8_t part = gfx_texture_read_4b(tile, x, row, wordswap);
+            uint8_t part = gfx_texture_read_4b(tile, x, row, swapMode);
             uint8_t intensity = part >> 1;
             uint8_t alpha = part & 1;
             uint8_t r = intensity;
@@ -1288,14 +1301,15 @@ static void import_texture_ia8(int tile) {
     uint32_t width = gfx_texture_width_from_tile();
     uint32_t height = gfx_texture_height_from_tile();
     uint32_t rowBytes = gfx_texture_row_bytes(width, G_IM_SIZ_8b);
-    bool wordswap = gfx_source_needs_n64_wordswap(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
+    GfxTextureSwapMode swapMode =
+        gfx_texture_source_swap_mode(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
 
     for (uint32_t y = 0; y < height; y++) {
         const uint8_t* row = gfx_texture_row(tile, y, rowBytes);
 
         for (uint32_t x = 0; x < width; x++) {
             uint32_t i = y * width + x;
-            uint8_t texel = gfx_read_texture_source_u8(row, x, wordswap);
+            uint8_t texel = gfx_read_texture_source_u8(row, x, swapMode);
             uint8_t intensity = texel >> 4;
             uint8_t alpha = texel & 0xf;
             uint8_t r = intensity;
@@ -1316,15 +1330,16 @@ static void import_texture_ia16(int tile) {
     uint32_t width = gfx_texture_width_from_tile();
     uint32_t height = gfx_texture_height_from_tile();
     uint32_t rowBytes = gfx_texture_row_bytes(width, G_IM_SIZ_16b);
-    bool wordswap = gfx_source_needs_n64_wordswap(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
+    GfxTextureSwapMode swapMode =
+        gfx_texture_source_swap_mode(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
 
     for (uint32_t y = 0; y < height; y++) {
         const uint8_t* row = gfx_texture_row(tile, y, rowBytes);
 
         for (uint32_t x = 0; x < width; x++) {
             uint32_t i = y * width + x;
-            uint8_t intensity = gfx_read_texture_source_u8(row, 2 * x, wordswap);
-            uint8_t alpha = gfx_read_texture_source_u8(row, 2 * x + 1, wordswap);
+            uint8_t intensity = gfx_read_texture_source_u8(row, 2 * x, swapMode);
+            uint8_t alpha = gfx_read_texture_source_u8(row, 2 * x + 1, swapMode);
             uint8_t r = intensity;
             uint8_t g = intensity;
             uint8_t b = intensity;
@@ -1343,14 +1358,15 @@ static void import_texture_i4(int tile) {
     uint32_t width = gfx_texture_width_from_tile();
     uint32_t height = gfx_texture_height_from_tile();
     uint32_t rowBytes = gfx_texture_row_bytes(width + rdp.loaded_texture[tile].source_nibble_offset, G_IM_SIZ_4b);
-    bool wordswap = gfx_source_needs_n64_wordswap(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
+    GfxTextureSwapMode swapMode =
+        gfx_texture_source_swap_mode(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
 
     for (uint32_t y = 0; y < height; y++) {
         const uint8_t* row = gfx_texture_row(tile, y, rowBytes);
 
         for (uint32_t x = 0; x < width; x++) {
             uint32_t i = y * width + x;
-            uint8_t intensity = gfx_texture_read_4b(tile, x, row, wordswap);
+            uint8_t intensity = gfx_texture_read_4b(tile, x, row, swapMode);
             uint8_t r = intensity;
             uint8_t g = intensity;
             uint8_t b = intensity;
@@ -1369,14 +1385,15 @@ static void import_texture_i8(int tile) {
     uint32_t width = gfx_texture_width_from_tile();
     uint32_t height = gfx_texture_height_from_tile();
     uint32_t rowBytes = gfx_texture_row_bytes(width, G_IM_SIZ_8b);
-    bool wordswap = gfx_source_needs_n64_wordswap(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
+    GfxTextureSwapMode swapMode =
+        gfx_texture_source_swap_mode(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
 
     for (uint32_t y = 0; y < height; y++) {
         const uint8_t* row = gfx_texture_row(tile, y, rowBytes);
 
         for (uint32_t x = 0; x < width; x++) {
             uint32_t i = y * width + x;
-            uint8_t intensity = gfx_read_texture_source_u8(row, x, wordswap);
+            uint8_t intensity = gfx_read_texture_source_u8(row, x, swapMode);
             uint8_t r = intensity;
             uint8_t g = intensity;
             uint8_t b = intensity;
@@ -1396,20 +1413,21 @@ static void import_texture_ci4(int tile) {
     uint32_t width = gfx_texture_width_from_tile();
     uint32_t height = gfx_texture_height_from_tile();
     uint32_t rowBytes = gfx_texture_row_bytes(width + rdp.loaded_texture[tile].source_nibble_offset, G_IM_SIZ_4b);
-    bool wordswap = gfx_source_needs_n64_wordswap(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
+    GfxTextureSwapMode swapMode =
+        gfx_texture_source_swap_mode(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
 
 #if defined(TARGET_PSP)
     gfx_validate_palette_source("import_texture_ci4");
 #endif
-    bool paletteWordswap = gfx_source_needs_n64_wordswap(rdp.palette, GFX_CI4_TLUT_SIZE_BYTES);
+    GfxTextureSwapMode paletteSwapMode = gfx_texture_source_swap_mode(rdp.palette, GFX_CI4_TLUT_SIZE_BYTES);
 
     for (uint32_t y = 0; y < height; y++) {
         const uint8_t* row = gfx_texture_row(tile, y, rowBytes);
 
         for (uint32_t x = 0; x < width; x++) {
             uint32_t i = y * width + x;
-            uint8_t idx = gfx_texture_read_4b(tile, x, row, wordswap);
-            uint16_t col16 = gfx_read_texture_source_be16(rdp.palette, idx * 2, paletteWordswap);
+            uint8_t idx = gfx_texture_read_4b(tile, x, row, swapMode);
+            uint16_t col16 = gfx_read_texture_source_be16(rdp.palette, idx * 2, paletteSwapMode);
             uint8_t a = col16 & 1;
             uint8_t r = col16 >> 11;
             uint8_t g = (col16 >> 6) & 0x1f;
@@ -1429,20 +1447,21 @@ static void import_texture_ci8(int tile) {
     uint32_t width = gfx_texture_width_from_tile();
     uint32_t height = gfx_texture_height_from_tile();
     uint32_t rowBytes = gfx_texture_row_bytes(width, G_IM_SIZ_8b);
-    bool wordswap = gfx_source_needs_n64_wordswap(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
+    GfxTextureSwapMode swapMode =
+        gfx_texture_source_swap_mode(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
 
 #if defined(TARGET_PSP)
     gfx_validate_palette_source("import_texture_ci8");
 #endif
-    bool paletteWordswap = gfx_source_needs_n64_wordswap(rdp.palette, GFX_TLUT_SIZE_BYTES);
+    GfxTextureSwapMode paletteSwapMode = gfx_texture_source_swap_mode(rdp.palette, GFX_TLUT_SIZE_BYTES);
 
     for (uint32_t y = 0; y < height; y++) {
         const uint8_t* row = gfx_texture_row(tile, y, rowBytes);
 
         for (uint32_t x = 0; x < width; x++) {
             uint32_t i = y * width + x;
-            uint8_t idx = gfx_read_texture_source_u8(row, x, wordswap);
-            uint16_t col16 = gfx_read_texture_source_be16(rdp.palette, idx * 2, paletteWordswap);
+            uint8_t idx = gfx_read_texture_source_u8(row, x, swapMode);
+            uint16_t col16 = gfx_read_texture_source_be16(rdp.palette, idx * 2, paletteSwapMode);
             uint8_t a = col16 & 1;
             uint8_t r = col16 >> 11;
             uint8_t g = (col16 >> 6) & 0x1f;
