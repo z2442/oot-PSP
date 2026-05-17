@@ -173,7 +173,7 @@ static u16 OotPsp_MapButtons(const SceCtrlData* pad) {
         button |= BTN_CLEFT;
     }
     if (pad->Buttons & PSP_CTRL_LTRIGGER) {
-        button |= BTN_L;
+        button |= BTN_Z;
     }
     if (pad->Buttons & PSP_CTRL_RTRIGGER) {
         button |= BTN_R;
@@ -182,19 +182,19 @@ static u16 OotPsp_MapButtons(const SceCtrlData* pad) {
         button |= BTN_START;
     }
     if (pad->Buttons & PSP_CTRL_SELECT) {
-        button |= BTN_Z;
+        button |= BTN_L;
     }
     if (pad->Buttons & PSP_CTRL_UP) {
-        button |= BTN_DUP;
+        button |= BTN_CUP;
     }
     if (pad->Buttons & PSP_CTRL_DOWN) {
-        button |= BTN_DDOWN;
+        button |= BTN_CDOWN;
     }
     if (pad->Buttons & PSP_CTRL_LEFT) {
-        button |= BTN_DLEFT;
+        button |= BTN_CLEFT;
     }
     if (pad->Buttons & PSP_CTRL_RIGHT) {
-        button |= BTN_DRIGHT;
+        button |= BTN_CRIGHT;
     }
 
     return button;
