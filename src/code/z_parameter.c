@@ -32,6 +32,24 @@
 #pragma increment_block_number "gc-jp:128 gc-jp-ce:128 gc-jp-mq:128 gc-us:128 gc-us-mq:128 ntsc-1.0:128 ntsc-1.1:128" \
                                "ntsc-1.2:128"
 
+#if PLATFORM_PSP
+static void* sCounterDigitTextures[] = {
+    gCounterDigit0Tex,
+    gCounterDigit1Tex,
+    gCounterDigit2Tex,
+    gCounterDigit3Tex,
+    gCounterDigit4Tex,
+    gCounterDigit5Tex,
+    gCounterDigit6Tex,
+    gCounterDigit7Tex,
+    gCounterDigit8Tex,
+    gCounterDigit9Tex,
+};
+#define COUNTER_DIGIT_TEXTURE(digit) sCounterDigitTextures[(digit)]
+#else
+#define COUNTER_DIGIT_TEXTURE(digit) ((u8*)gCounterDigit0Tex + (8 * 16 * (digit)))
+#endif
+
 typedef struct RestrictionFlags {
     /* 0x00 */ u8 sceneId;
     /* 0x01 */ u8 flags1;
@@ -3299,13 +3317,12 @@ void Interface_Draw(PlayState* play) {
 
                     if (interfaceCtx->counterDigits[2] != 0) {
                         OVERLAY_DISP = Gfx_TextureI8(
-                            OVERLAY_DISP, ((u8*)gCounterDigit0Tex + (8 * 16 * interfaceCtx->counterDigits[2])), 8, 16,
-                            svar3, 190, 8, 16, 1 << 10, 1 << 10);
+                            OVERLAY_DISP, COUNTER_DIGIT_TEXTURE(interfaceCtx->counterDigits[2]), 8, 16, svar3, 190, 8,
+                            16, 1 << 10, 1 << 10);
                         svar3 += 8;
                     }
 
-                    OVERLAY_DISP = Gfx_TextureI8(OVERLAY_DISP,
-                                                 ((u8*)gCounterDigit0Tex + (8 * 16 * interfaceCtx->counterDigits[3])),
+                    OVERLAY_DISP = Gfx_TextureI8(OVERLAY_DISP, COUNTER_DIGIT_TEXTURE(interfaceCtx->counterDigits[3]),
                                                  8, 16, svar3, 190, 8, 16, 1 << 10, 1 << 10);
                 }
                 break;
@@ -3348,9 +3365,8 @@ void Interface_Draw(PlayState* play) {
         svar4 = rupeeDigitsCount[CUR_UPG_VALUE(UPG_WALLET)];
 
         for (svar1 = 0, svar3 = 42; svar1 < svar4; svar1++, svar2++, svar3 += 8) {
-            OVERLAY_DISP =
-                Gfx_TextureI8(OVERLAY_DISP, ((u8*)gCounterDigit0Tex + (8 * 16 * interfaceCtx->counterDigits[svar2])), 8,
-                              16, svar3, 206, 8, 16, 1 << 10, 1 << 10);
+            OVERLAY_DISP = Gfx_TextureI8(OVERLAY_DISP, COUNTER_DIGIT_TEXTURE(interfaceCtx->counterDigits[svar2]), 8,
+                                         16, svar3, 206, 8, 16, 1 << 10, 1 << 10);
         }
 
         Magic_DrawMeter(play);
@@ -3569,9 +3585,9 @@ void Interface_Draw(PlayState* play) {
 
                 for (svar1 = svar2 = 0; svar1 < 4; svar1++) {
                     if (sHBAScoreDigits[svar1] != 0 || (svar2 != 0) || (svar1 >= 3)) {
-                        OVERLAY_DISP = Gfx_TextureI8(
-                            OVERLAY_DISP, ((u8*)gCounterDigit0Tex + (8 * 16 * sHBAScoreDigits[svar1])), 8, 16, svar5,
-                            (ZREG(15) - 2), sDigitWidths[0], VREG(42), VREG(43) << 1, VREG(43) << 1);
+                        OVERLAY_DISP = Gfx_TextureI8(OVERLAY_DISP, COUNTER_DIGIT_TEXTURE(sHBAScoreDigits[svar1]), 8,
+                                                     16, svar5, (ZREG(15) - 2), sDigitWidths[0], VREG(42),
+                                                     VREG(43) << 1, VREG(43) << 1);
                         svar5 += 9;
                         svar2++;
                     }
@@ -4024,7 +4040,7 @@ void Interface_Draw(PlayState* play) {
 
                 for (svar1 = 0; svar1 < ARRAY_COUNT(sTimerDigits); svar1++) {
                     OVERLAY_DISP =
-                        Gfx_TextureI8(OVERLAY_DISP, ((u8*)gCounterDigit0Tex + (8 * 16 * sTimerDigits[svar1])), 8, 16,
+                        Gfx_TextureI8(OVERLAY_DISP, COUNTER_DIGIT_TEXTURE(sTimerDigits[svar1]), 8, 16,
                                       ((void)0, gSaveContext.timerX[timerId]) + timerDigitLeftPos[svar1],
                                       ((void)0, gSaveContext.timerY[timerId]), sDigitWidths[svar1], VREG(42),
                                       VREG(43) << 1, VREG(43) << 1);
