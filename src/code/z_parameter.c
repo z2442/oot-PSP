@@ -2803,6 +2803,14 @@ void Interface_DrawActionLabel(GraphicsContext* gfxCtx, void* texture) {
 
 void Interface_DrawItemButtons(PlayState* play) {
     static void* cUpLabelTextures[] = LANGUAGE_ARRAY(gNaviCUpJPNTex, gNaviCUpENGTex, gNaviCUpENGTex, gNaviCUpENGTex);
+#if PLATFORM_PSP
+    static void* emptyCButtonTextures[] = {
+        NULL,
+        gEmptyCLeftArrowTex,
+        gEmptyCDownArrowTex,
+        gEmptyCRightArrowTex,
+    };
+#endif
 #if OOT_VERSION >= PAL_1_0
     static s16 startButtonLeftPos[] = { 132, 130, 130 };
 #endif
@@ -2832,23 +2840,41 @@ void Interface_DrawItemButtons(PlayState* play) {
     gDPPipeSync(OVERLAY_DISP++);
     gDPSetPrimColor(OVERLAY_DISP++, 0, 0, R_C_BTN_COLOR(0), R_C_BTN_COLOR(1), R_C_BTN_COLOR(2),
                     interfaceCtx->cLeftAlpha);
+#if PLATFORM_PSP
+    OVERLAY_DISP =
+        Gfx_TextureIA8(OVERLAY_DISP, gButtonBackgroundTex, 32, 32, R_ITEM_BTN_X(1), R_ITEM_BTN_Y(1),
+                       R_ITEM_BTN_WIDTH(1), R_ITEM_BTN_WIDTH(1), R_ITEM_BTN_DD(1) << 1, R_ITEM_BTN_DD(1) << 1);
+#else
     gSPTextureRectangle(OVERLAY_DISP++, R_ITEM_BTN_X(1) << 2, R_ITEM_BTN_Y(1) << 2,
                         (R_ITEM_BTN_X(1) + R_ITEM_BTN_WIDTH(1)) << 2, (R_ITEM_BTN_Y(1) + R_ITEM_BTN_WIDTH(1)) << 2,
                         G_TX_RENDERTILE, 0, 0, R_ITEM_BTN_DD(1) << 1, R_ITEM_BTN_DD(1) << 1);
+#endif
 
     // C-Down Button Color & Texture
     gDPSetPrimColor(OVERLAY_DISP++, 0, 0, R_C_BTN_COLOR(0), R_C_BTN_COLOR(1), R_C_BTN_COLOR(2),
                     interfaceCtx->cDownAlpha);
+#if PLATFORM_PSP
+    OVERLAY_DISP =
+        Gfx_TextureIA8(OVERLAY_DISP, gButtonBackgroundTex, 32, 32, R_ITEM_BTN_X(2), R_ITEM_BTN_Y(2),
+                       R_ITEM_BTN_WIDTH(2), R_ITEM_BTN_WIDTH(2), R_ITEM_BTN_DD(2) << 1, R_ITEM_BTN_DD(2) << 1);
+#else
     gSPTextureRectangle(OVERLAY_DISP++, R_ITEM_BTN_X(2) << 2, R_ITEM_BTN_Y(2) << 2,
                         (R_ITEM_BTN_X(2) + R_ITEM_BTN_WIDTH(2)) << 2, (R_ITEM_BTN_Y(2) + R_ITEM_BTN_WIDTH(2)) << 2,
                         G_TX_RENDERTILE, 0, 0, R_ITEM_BTN_DD(2) << 1, R_ITEM_BTN_DD(2) << 1);
+#endif
 
     // C-Right Button Color & Texture
     gDPSetPrimColor(OVERLAY_DISP++, 0, 0, R_C_BTN_COLOR(0), R_C_BTN_COLOR(1), R_C_BTN_COLOR(2),
                     interfaceCtx->cRightAlpha);
+#if PLATFORM_PSP
+    OVERLAY_DISP =
+        Gfx_TextureIA8(OVERLAY_DISP, gButtonBackgroundTex, 32, 32, R_ITEM_BTN_X(3), R_ITEM_BTN_Y(3),
+                       R_ITEM_BTN_WIDTH(3), R_ITEM_BTN_WIDTH(3), R_ITEM_BTN_DD(3) << 1, R_ITEM_BTN_DD(3) << 1);
+#else
     gSPTextureRectangle(OVERLAY_DISP++, R_ITEM_BTN_X(3) << 2, R_ITEM_BTN_Y(3) << 2,
                         (R_ITEM_BTN_X(3) + R_ITEM_BTN_WIDTH(3)) << 2, (R_ITEM_BTN_Y(3) + R_ITEM_BTN_WIDTH(3)) << 2,
                         G_TX_RENDERTILE, 0, 0, R_ITEM_BTN_DD(3) << 1, R_ITEM_BTN_DD(3) << 1);
+#endif
 
     if (!IS_PAUSE_STATE_GAMEOVER(pauseCtx)) {
         if (IS_PAUSED(&play->pauseCtx)) {
@@ -2968,9 +2994,14 @@ void Interface_DrawItemButtons(PlayState* play) {
                                 interfaceCtx->cRightAlpha);
             }
 
-            OVERLAY_DISP = Gfx_TextureIA8(OVERLAY_DISP, ((u8*)gButtonBackgroundTex + ((32 * 32) * (temp + 1))), 32, 32,
-                                          R_ITEM_BTN_X(temp), R_ITEM_BTN_Y(temp), R_ITEM_BTN_WIDTH(temp),
-                                          R_ITEM_BTN_WIDTH(temp), R_ITEM_BTN_DD(temp) << 1, R_ITEM_BTN_DD(temp) << 1);
+            OVERLAY_DISP = Gfx_TextureIA8(
+#if PLATFORM_PSP
+                OVERLAY_DISP, emptyCButtonTextures[temp],
+#else
+                OVERLAY_DISP, ((u8*)gButtonBackgroundTex + ((32 * 32) * (temp + 1))),
+#endif
+                32, 32, R_ITEM_BTN_X(temp), R_ITEM_BTN_Y(temp), R_ITEM_BTN_WIDTH(temp), R_ITEM_BTN_WIDTH(temp),
+                R_ITEM_BTN_DD(temp) << 1, R_ITEM_BTN_DD(temp) << 1);
         }
     }
 

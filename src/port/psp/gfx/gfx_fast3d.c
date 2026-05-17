@@ -125,6 +125,7 @@ struct TextureHashmapNode {
     uint32_t source_key;
     const uint8_t* palette_addr;
     uint32_t palette_key;
+    uint16_t upload_width, upload_height;
 #endif
     
     uint32_t texture_id;
@@ -620,18 +621,37 @@ static void gfx_upload_gu_matrix(int type, const float matrix[4][4]);
 #if defined(TARGET_PSP)
 static uint8_t psp_texture_stage_buf[256 * 256 * 4] __attribute__((aligned(16)));
 
+static uint32_t gfx_next_power_of_two(uint32_t value) {
+    uint32_t result = 1;
+
+    while (result < value) {
+        result <<= 1;
+    }
+
+    return result;
+}
+
 static const uint8_t *gfx_prepare_psp_texture_for_upload(const uint8_t *src, uint32_t width, uint32_t height, unsigned int type, bool mirror_s, bool mirror_t, uint32_t *upload_width, uint32_t *upload_height, bool *applied_mirror_s, bool *applied_mirror_t) {
     const size_t bytes_per_pixel = type == GU_PSM_5551 ? 2 : 4;
-    const uint32_t source_x_offset = mirror_s ? width : 0;
-    const uint32_t source_y_offset = mirror_t ? height : 0;
+    const uint32_t pot_width = gfx_next_power_of_two(width);
+    const uint32_t pot_height = gfx_next_power_of_two(height);
+    bool use_mirror_s = mirror_s;
+    bool use_mirror_t = mirror_t;
+    uint32_t source_x_offset;
+    uint32_t source_y_offset;
 
-    *applied_mirror_s = mirror_s;
-    *applied_mirror_t = mirror_t;
-    *upload_width = width * (mirror_s ? 2 : 1);
-    *upload_height = height * (mirror_t ? 2 : 1);
+    *upload_width = pot_width * (use_mirror_s ? 2 : 1);
+    *upload_height = pot_height * (use_mirror_t ? 2 : 1);
 
-    if (!mirror_s && !mirror_t) {
+    if (!use_mirror_s && !use_mirror_t && pot_width == width && pot_height == height) {
         return src;
+    }
+
+    if ((size_t)(*upload_width) * (*upload_height) * bytes_per_pixel > sizeof(psp_texture_stage_buf)) {
+        use_mirror_s = false;
+        use_mirror_t = false;
+        *upload_width = pot_width;
+        *upload_height = pot_height;
     }
 
     if ((size_t)(*upload_width) * (*upload_height) * bytes_per_pixel > sizeof(psp_texture_stage_buf)) {
@@ -641,6 +661,12 @@ static const uint8_t *gfx_prepare_psp_texture_for_upload(const uint8_t *src, uin
         *applied_mirror_t = false;
         return src;
     }
+
+    *applied_mirror_s = use_mirror_s;
+    *applied_mirror_t = use_mirror_t;
+
+    source_x_offset = use_mirror_s ? pot_width : 0;
+    source_y_offset = use_mirror_t ? pot_height : 0;
 
     const size_t src_row_bytes = (size_t)width * bytes_per_pixel;
     const size_t dst_row_bytes = (size_t)(*upload_width) * bytes_per_pixel;
@@ -653,21 +679,24 @@ static const uint8_t *gfx_prepare_psp_texture_for_upload(const uint8_t *src, uin
 
         memcpy(dst_row, src_row, src_row_bytes);
 
-        if (mirror_s) {
+        if (use_mirror_s) {
             uint8_t *dst_mirror_row = psp_texture_stage_buf + (size_t)(source_y_offset + y) * dst_row_bytes;
-            for (uint32_t x = 0; x < width; x++) {
+            const uint8_t *src_mirror_row = psp_texture_stage_buf + (size_t)(source_y_offset + y) * dst_row_bytes +
+                                            (size_t)source_x_offset * bytes_per_pixel;
+
+            for (uint32_t x = 0; x < pot_width; x++) {
                 memcpy(dst_mirror_row + (size_t)x * bytes_per_pixel,
-                       src_row + (size_t)(width - 1 - x) * bytes_per_pixel,
+                       src_mirror_row + (size_t)(pot_width - 1 - x) * bytes_per_pixel,
                        bytes_per_pixel);
             }
         }
     }
 
-    if (mirror_t) {
-        const uint32_t mirror_y_offset = source_y_offset ? 0 : height;
-        for (uint32_t y = 0; y < height; y++) {
+    if (use_mirror_t) {
+        const uint32_t mirror_y_offset = source_y_offset ? 0 : pot_height;
+        for (uint32_t y = 0; y < pot_height; y++) {
             memcpy(psp_texture_stage_buf + (size_t)(mirror_y_offset + y) * dst_row_bytes,
-                   psp_texture_stage_buf + (size_t)(source_y_offset + height - 1 - y) * dst_row_bytes,
+                   psp_texture_stage_buf + (size_t)(source_y_offset + pot_height - 1 - y) * dst_row_bytes,
                    dst_row_bytes);
         }
     }
@@ -686,6 +715,8 @@ static void gfx_upload_texture(int tile, const uint8_t *buf, uint32_t width, uin
 
     rendering_state.textures[tile]->mirror_s = applied_mirror_s;
     rendering_state.textures[tile]->mirror_t = applied_mirror_t;
+    rendering_state.textures[tile]->upload_width = upload_width;
+    rendering_state.textures[tile]->upload_height = upload_height;
 
     gfx_rapi->upload_texture(upload_buf, upload_width, upload_height, type);
 }
@@ -1129,6 +1160,8 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
     (*node)->source_key = source_key;
     (*node)->palette_addr = palette_addr;
     (*node)->palette_key = palette_key;
+    (*node)->upload_width = width;
+    (*node)->upload_height = height;
     (*node)->mirror_s = mirror_s;
     (*node)->mirror_t = mirror_t;
 #endif
@@ -1713,16 +1746,29 @@ static void gfx_prepare_tri_pipeline_state(void) {
             const uint32_t tile_width = (rdp.texture_tile.lrs - rdp.texture_tile.uls + 4) / 4;
             const uint32_t tile_height = (rdp.texture_tile.lrt - rdp.texture_tile.ult + 4) / 4;
 
-            if (texture_node != NULL && texture_node->mirror_s && texture_node->mirror_t
-                && tile_width == 32 && tile_height == 64) {
+            if (texture_node != NULL && tile_width != 0 && tile_height != 0) {
+                if (texture_node->upload_width != 0) {
+                    const float upload_width = texture_node->upload_width;
+                    const float u_factor = (float)tile_width / upload_width;
+
+                    state->tex_u_scale *= u_factor;
+                    state->tex_u_bias *= u_factor;
+                }
+
+                if (texture_node->upload_height != 0) {
+                    const float upload_height = texture_node->upload_height;
+                    const float v_factor = (float)tile_height / upload_height;
+
+                    state->tex_v_scale *= v_factor;
+                    state->tex_v_bias *= v_factor;
+                }
+
                 if (texture_node->mirror_s) {
-                    state->tex_u_scale *= 0.5f;
-                    state->tex_u_bias = state->tex_u_bias * 0.5f + 0.5f;
+                    state->tex_u_bias += 0.5f;
                 }
 
                 if (texture_node->mirror_t) {
-                    state->tex_v_scale *= 0.5f;
-                    state->tex_v_bias = state->tex_v_bias * 0.5f + 0.5f;
+                    state->tex_v_bias += 0.5f;
                 }
             }
         }
