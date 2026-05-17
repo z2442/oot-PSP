@@ -1,0 +1,2 @@
+VERSION := ntsc-1.0
+REGION := US
