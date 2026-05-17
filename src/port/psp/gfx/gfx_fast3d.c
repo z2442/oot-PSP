@@ -129,6 +129,7 @@ struct TextureHashmapNode {
     
     uint32_t texture_id;
     uint8_t cms, cmt;
+    uint8_t masks, maskt;
 #if defined(TARGET_PSP)
     uint8_t mirror_s, mirror_t;
 #endif
@@ -159,6 +160,8 @@ struct TriPipelineState {
     bool color_mul_prim;
     float tex_u_scale, tex_v_scale;
     float tex_u_bias, tex_v_bias;
+    float tex_u_nominal_span, tex_v_nominal_span;
+    bool tex_u_scale_to_primitive, tex_v_scale_to_primitive;
 } __attribute__((packed, aligned(4)));
 
 static struct RSP {
@@ -218,6 +221,7 @@ static struct RDP {
         uint8_t fmt;
         uint8_t siz;
         uint8_t cms, cmt;
+        uint8_t masks, maskt;
         uint16_t uls, ult, lrs, lrt; // U10.2
         uint32_t line_size_bytes;
     } texture_tile;
@@ -672,8 +676,8 @@ static const uint8_t *gfx_prepare_psp_texture_for_upload(const uint8_t *src, uin
 }
 
 static void gfx_upload_texture(int tile, const uint8_t *buf, uint32_t width, uint32_t height, unsigned int type) {
-    const bool mirror_s = (rdp.texture_tile.cms & G_TX_MIRROR) != 0;
-    const bool mirror_t = (rdp.texture_tile.cmt & G_TX_MIRROR) != 0;
+    const bool mirror_s = (rdp.texture_tile.cms & G_TX_MIRROR) != 0 && rdp.texture_tile.masks != G_TX_NOMASK;
+    const bool mirror_t = (rdp.texture_tile.cmt & G_TX_MIRROR) != 0 && rdp.texture_tile.maskt != G_TX_NOMASK;
     uint32_t upload_width = width;
     uint32_t upload_height = height;
     bool applied_mirror_s = false;
@@ -1069,8 +1073,8 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
     const uint8_t* palette_addr = uses_palette ? rdp.palette : NULL;
     const uint32_t palette_key =
         uses_palette ? OotPsp_GetExternalAssetRangeSerial(palette_addr, palette_size) : 0;
-    const uint8_t mirror_s = (rdp.texture_tile.cms & G_TX_MIRROR) != 0;
-    const uint8_t mirror_t = (rdp.texture_tile.cmt & G_TX_MIRROR) != 0;
+    const uint8_t mirror_s = (rdp.texture_tile.cms & G_TX_MIRROR) != 0 && rdp.texture_tile.masks != G_TX_NOMASK;
+    const uint8_t mirror_t = (rdp.texture_tile.cmt & G_TX_MIRROR) != 0 && rdp.texture_tile.maskt != G_TX_NOMASK;
 
     hash ^= (size_t)source_key * 2654435761U;
     hash ^= (size_t)palette_addr >> 4;
@@ -1092,7 +1096,8 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
 #endif
         ) {
             gfx_rapi->select_texture(tile, (*node)->texture_id);
-            gfx_rapi->set_sampler_parameters(tile, (*node)->linear_filter, (*node)->cms, (*node)->cmt);
+            gfx_rapi->set_sampler_parameters(tile, (*node)->linear_filter, (*node)->cms, (*node)->cmt,
+                                             (*node)->masks, (*node)->maskt);
             *n = *node;
             return true;
         }
@@ -1114,9 +1119,11 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
     }
     /*@Note: unneeded due to sequential GE flow */
     //gfx_rapi->select_texture(tile, (*node)->texture_id);
-    gfx_rapi->set_sampler_parameters(tile, false, 0, 0);
+    gfx_rapi->set_sampler_parameters(tile, false, 0, 0, G_TX_NOMASK, G_TX_NOMASK);
     (*node)->cms = 0;
     (*node)->cmt = 0;
+    (*node)->masks = G_TX_NOMASK;
+    (*node)->maskt = G_TX_NOMASK;
     (*node)->linear_filter = false;
 #if defined(TARGET_PSP)
     (*node)->source_key = source_key;
@@ -1659,12 +1666,17 @@ static void gfx_prepare_tri_pipeline_state(void) {
             }
             if (linear_filter != rendering_state.textures[i]->linear_filter ||
                 rdp.texture_tile.cms != rendering_state.textures[i]->cms ||
-                rdp.texture_tile.cmt != rendering_state.textures[i]->cmt) {
+                rdp.texture_tile.cmt != rendering_state.textures[i]->cmt ||
+                rdp.texture_tile.masks != rendering_state.textures[i]->masks ||
+                rdp.texture_tile.maskt != rendering_state.textures[i]->maskt) {
                 gfx_flush();
-                gfx_rapi->set_sampler_parameters(i, linear_filter, rdp.texture_tile.cms, rdp.texture_tile.cmt);
+                gfx_rapi->set_sampler_parameters(i, linear_filter, rdp.texture_tile.cms, rdp.texture_tile.cmt,
+                                                 rdp.texture_tile.masks, rdp.texture_tile.maskt);
                 rendering_state.textures[i]->linear_filter = linear_filter;
                 rendering_state.textures[i]->cms = rdp.texture_tile.cms;
                 rendering_state.textures[i]->cmt = rdp.texture_tile.cmt;
+                rendering_state.textures[i]->masks = rdp.texture_tile.masks;
+                rendering_state.textures[i]->maskt = rdp.texture_tile.maskt;
             }
         }
     }
@@ -1681,12 +1693,20 @@ static void gfx_prepare_tri_pipeline_state(void) {
     state->tex_v_scale = 0.0f;
     state->tex_u_bias = 0.0f;
     state->tex_v_bias = 0.0f;
+    state->tex_u_nominal_span = 0.0f;
+    state->tex_v_nominal_span = 0.0f;
+    state->tex_u_scale_to_primitive = false;
+    state->tex_v_scale_to_primitive = false;
     if (state->use_texture) {
         const float filter_bias = linear_filter ? 16.0f : 0.0f;
-        state->tex_u_scale = 1.0f / (8.0f * (rdp.texture_tile.lrs - rdp.texture_tile.uls + 4));
-        state->tex_v_scale = 1.0f / (8.0f * (rdp.texture_tile.lrt - rdp.texture_tile.ult + 4));
+        state->tex_u_nominal_span = 8.0f * (rdp.texture_tile.lrs - rdp.texture_tile.uls + 4);
+        state->tex_v_nominal_span = 8.0f * (rdp.texture_tile.lrt - rdp.texture_tile.ult + 4);
+        state->tex_u_scale = 1.0f / state->tex_u_nominal_span;
+        state->tex_v_scale = 1.0f / state->tex_v_nominal_span;
         state->tex_u_bias = (filter_bias - rdp.texture_tile.uls * 8.0f) * state->tex_u_scale;
         state->tex_v_bias = (filter_bias - rdp.texture_tile.ult * 8.0f) * state->tex_v_scale;
+        state->tex_u_scale_to_primitive = rdp.texture_tile.masks == G_TX_NOMASK;
+        state->tex_v_scale_to_primitive = rdp.texture_tile.maskt == G_TX_NOMASK;
 #if defined(TARGET_PSP)
         {
             const struct TextureHashmapNode *texture_node = used_textures[0] ? rendering_state.textures[0] : rendering_state.textures[1];
@@ -1844,6 +1864,40 @@ static void gfx_sp_pop_matrix(uint32_t count) {
 
 static float gfx_adjust_x_for_aspect_ratio(float x) {
     return x * (4.0f / 3.0f) / ((float)gfx_current_dimensions.width / (float)gfx_current_dimensions.height);
+}
+
+static void gfx_apply_unmasked_texture_axis(const struct LoadedVertex *const vertices[], size_t n_vertices,
+                                            bool use_u, float nominal_span, float *scale, float *bias) {
+    float min_coord;
+    float max_coord;
+    float span;
+
+    if (n_vertices == 0 || nominal_span <= 0.0f) {
+        return;
+    }
+
+    min_coord = use_u ? vertices[0]->u : vertices[0]->v;
+    max_coord = min_coord;
+
+    for (size_t i = 1; i < n_vertices; i++) {
+        const float coord = use_u ? vertices[i]->u : vertices[i]->v;
+
+        if (coord < min_coord) {
+            min_coord = coord;
+        }
+        if (coord > max_coord) {
+            max_coord = coord;
+        }
+    }
+
+    span = max_coord - min_coord;
+    if (span <= nominal_span + 1.0f) {
+        return;
+    }
+
+    /* Unmasked axes can use oversize UVs to stretch one tile, not repeat it. */
+    *scale = 1.0f / (span + 1.0f);
+    *bias = -min_coord * *scale;
 }
 
 struct ShaderProgram {
@@ -2074,11 +2128,24 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
     struct ColorCombiner *comb = state->comb;
     const bool use_alpha = state->use_alpha;
     const bool use_texture = state->use_texture;
-    const float tex_u_scale = state->tex_u_scale;
-    const float tex_v_scale = state->tex_v_scale;
-    const float tex_u_bias = state->tex_u_bias;
-    const float tex_v_bias = state->tex_v_bias;
+    float tex_u_scale = state->tex_u_scale;
+    float tex_v_scale = state->tex_v_scale;
+    float tex_u_bias = state->tex_u_bias;
+    float tex_v_bias = state->tex_v_bias;
     const uint32_t shader_program_id = rendering_state.shader_program->shader_id;
+
+    if (use_texture && (state->tex_u_scale_to_primitive || state->tex_v_scale_to_primitive)) {
+        const struct LoadedVertex *uv_vertices[3] = {v1, v2, v3};
+
+        if (state->tex_u_scale_to_primitive) {
+            gfx_apply_unmasked_texture_axis(uv_vertices, 3, true, state->tex_u_nominal_span, &tex_u_scale,
+                                            &tex_u_bias);
+        }
+        if (state->tex_v_scale_to_primitive) {
+            gfx_apply_unmasked_texture_axis(uv_vertices, 3, false, state->tex_v_nominal_span, &tex_v_scale,
+                                            &tex_v_bias);
+        }
+    }
     
     size_t i;
     for (i = 0; i < clipped_vertices_num; i++) {
@@ -2356,9 +2423,7 @@ static void gfx_dp_set_texture_image(uint32_t format, uint32_t size, uint32_t wi
 }
 
 static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t tmem, uint8_t tile, UNUSED uint32_t palette, uint32_t cmt, uint32_t maskt, uint32_t shiftt, uint32_t cms, uint32_t masks, uint32_t shifts) {
-    _UNUSED(maskt);
     _UNUSED(shiftt);
-    _UNUSED(masks);
     _UNUSED(shifts);
 
     if (tile == G_TX_RENDERTILE) {
@@ -2367,6 +2432,8 @@ static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t t
         rdp.texture_tile.siz = siz;
         rdp.texture_tile.cms = cms;
         rdp.texture_tile.cmt = cmt;
+        rdp.texture_tile.masks = masks;
+        rdp.texture_tile.maskt = maskt;
         rdp.texture_tile.line_size_bytes = line * 8;
         rdp.textures_changed[0] = true;
         rdp.textures_changed[1] = true;

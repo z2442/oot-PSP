@@ -468,10 +468,8 @@ static uint32_t gfx_scegu_new_texture(void) {
     return texman_create();
 }
 
-static uint32_t gfx_cm_to_opengl(uint32_t val) {
-    if (val & G_TX_MIRROR)
-        return GU_REPEAT;
-    if (val & G_TX_CLAMP)
+static uint32_t gfx_cm_to_opengl(uint32_t val, uint32_t mask) {
+    if ((val & G_TX_CLAMP) || mask == G_TX_NOMASK)
         return GU_CLAMP;
     return GU_REPEAT;
 }
@@ -495,11 +493,12 @@ static inline void gfx_scegu_apply_tmu_state(const int tile) {
     sceGuTexWrap(tmu_state[tile].wrap_s, tmu_state[tile].wrap_t);
 }
 
-static void gfx_scegu_set_sampler_parameters(const int tile, const bool linear_filter, const uint32_t cms, const uint32_t cmt) {
+static void gfx_scegu_set_sampler_parameters(const int tile, const bool linear_filter, const uint32_t cms,
+                                             const uint32_t cmt, const uint32_t masks, const uint32_t maskt) {
     const int filter = linear_filter ? GU_LINEAR : GU_NEAREST;
 
-    const int wrap_s = gfx_cm_to_opengl(cms);
-    const int wrap_t = gfx_cm_to_opengl(cmt);
+    const int wrap_s = gfx_cm_to_opengl(cms, masks);
+    const int wrap_t = gfx_cm_to_opengl(cmt, maskt);
 
     tmu_state[tile].min_filter = filter;
     tmu_state[tile].mag_filter = filter;
@@ -515,7 +514,7 @@ static void gfx_scegu_select_texture(int tile, uint32_t texture_id) {
     if (tmu_state[tile].tex != texture_id) {
         tmu_state[tile].tex = texture_id;
         texman_bind_tex(texture_id);
-        gfx_scegu_set_sampler_parameters(tile, false, 0, 0);
+        gfx_scegu_set_sampler_parameters(tile, false, 0, 0, G_TX_NOMASK, G_TX_NOMASK);
     }
 }
 
