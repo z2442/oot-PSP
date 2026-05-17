@@ -777,12 +777,13 @@ static inline void vec4_sub(float *out, const float* lhs, const float*rhs){
 
 void gfx_clip_interpolate_vert(struct LoadedVertex* out, const struct  LoadedVertex* lhs, const struct LoadedVertex* rhs, const float factor )
 {
-    // clip-space pos emitted to the PSP after perspective divide
+    // modelview-space position emitted to the PSP for projection
     out->x = lhs->x + (rhs->x - lhs->x) * factor;
     out->y = lhs->y + (rhs->y - lhs->y) * factor;
     out->z = lhs->z + (rhs->z - lhs->z) * factor;
+    // projected w retained for combiner LOD behavior
     out->w = lhs->w + (rhs->w - lhs->w) * factor;
-    // duplicate clip-space pos used by the frustum clipper
+    // clip-space position used by the frustum clipper
     out->_x = lhs->_x + (rhs->_x - lhs->_x) * factor;
     out->_y = lhs->_y + (rhs->_y - lhs->_y) * factor;
     out->_z = lhs->_z + (rhs->_z - lhs->_z) * factor;
@@ -1842,7 +1843,14 @@ static void gfx_apply_projection_matrix(void) {
 }
 
 static void gfx_apply_modelview_matrix(void) {
-    gfx_upload_gu_matrix(GU_MODEL, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1]);
+    /*
+     * F3DEX2 transforms vertices when SPVertex runs. Link's flexible limb display
+     * lists rely on that: they load a few vertices under one segment-D matrix,
+     * switch matrices, then emit triangles using both batches. Keep the PSP GU
+     * model matrix at identity and store modelview-transformed positions per
+     * loaded vertex so later matrix commands cannot retarget old vertices.
+     */
+    gfx_upload_gu_matrix(GU_MODEL, identity_matrix);
     gfx_matrix_mul(rsp.MP_matrix, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], rsp.P_matrix);
     rsp.lights_changed = true;
 }
@@ -1958,6 +1966,7 @@ struct ShaderProgram {
 
 static bool gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *vertices) {
     float temp_vec[4] __attribute__((aligned(16)));
+    float model_vec[4] __attribute__((aligned(16)));
     float proj_vec[4] __attribute__((aligned(16)));
 #if defined(TARGET_PSP)
     const void* normalizedSource;
@@ -1986,7 +1995,8 @@ static bool gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
         temp_vec[2] = v->ob[2];
         temp_vec[3] = 1.0f;
 
-        gfx_transform_vec4(proj_vec, rsp.MP_matrix, temp_vec);
+        gfx_transform_vec4(model_vec, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], temp_vec);
+        gfx_transform_vec4(proj_vec, rsp.P_matrix, model_vec);
 
         //const float x = proj_vec[0];
         const float x = gfx_adjust_x_for_aspect_ratio(proj_vec[0]);
@@ -2060,9 +2070,9 @@ static bool gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
         if (z < -w) d->clip_rej |= Z_POS;
         if (z > w) d->clip_rej |= Z_NEG;
 
-        d->x = v->ob[0];
-        d->y = v->ob[1];
-        d->z = v->ob[2];
+        d->x = model_vec[0];
+        d->y = model_vec[1];
+        d->z = model_vec[2];
         d->w = w;
 
         d->_x = x;
