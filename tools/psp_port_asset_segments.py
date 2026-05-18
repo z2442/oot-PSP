@@ -124,9 +124,7 @@ def texture_size_bytes(format_name: str, width: int, height: int) -> int | None:
 
 
 def texture_storage_range(offset: int, size: int) -> tuple[int, int]:
-    start = offset & ~(TEXTURE_WORD_ALIGN - 1)
-    end = (offset + size + TEXTURE_WORD_ALIGN - 1) & ~(TEXTURE_WORD_ALIGN - 1)
-    return start, end
+    return offset, offset + size
 
 
 def copy_native_texture_words(output: bytearray, source: bytes, start: int, end: int) -> None:
@@ -137,11 +135,9 @@ def copy_native_texture_words(output: bytearray, source: bytes, start: int, end:
     if end <= start:
         return
 
-    start &= ~(TEXTURE_WORD_ALIGN - 1)
-    end &= ~(TEXTURE_WORD_ALIGN - 1)
-
     for offset in range(start, end, TEXTURE_WORD_ALIGN):
-        output[offset : offset + TEXTURE_WORD_ALIGN] = source[offset : offset + TEXTURE_WORD_ALIGN][::-1]
+        word_end = min(offset + TEXTURE_WORD_ALIGN, end)
+        output[offset:word_end] = source[offset:word_end][::-1]
 
 
 def parse_xml_int(text: str) -> int:

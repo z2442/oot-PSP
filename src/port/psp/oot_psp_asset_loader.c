@@ -561,10 +561,15 @@ static s32 OotPsp_IsNativeLoadedAssetByteRange(const OotPspLoadedAssetRange* ran
            (ram >= range->ramStart) && (ram < range->ramEnd);
 }
 
+static s32 OotPsp_IsNativeLoadedTextureByteRange(const OotPspLoadedAssetRange* range, uintptr_t ram) {
+    return OotPsp_IsNativeLoadedAssetByteRange(range, ram) &&
+           ((range->flags & OOT_PSP_EXTERNAL_ASSET_TEXTURE_WORDS) != 0);
+}
+
 static void OotPsp_RememberNativeTextureRange(const OotPspLoadedAssetRange* range) {
     size_t i;
 
-    if (range == NULL) {
+    if ((range == NULL) || ((range->flags & OOT_PSP_EXTERNAL_ASSET_TEXTURE_WORDS) == 0)) {
         return;
     }
 
@@ -585,7 +590,7 @@ static const OotPspLoadedAssetRange* OotPsp_FindCachedNativeTextureRange(uintptr
     for (i = 0; i < OOT_PSP_NATIVE_TEXTURE_RANGE_CACHE_COUNT; i++) {
         const OotPspLoadedAssetRange* range = sOotPspNativeTextureRangeCache[i];
 
-        if (OotPsp_IsNativeLoadedAssetByteRange(range, ram)) {
+        if (OotPsp_IsNativeLoadedTextureByteRange(range, ram)) {
             return range;
         }
     }
@@ -596,9 +601,9 @@ static const OotPspLoadedAssetRange* OotPsp_FindCachedNativeTextureRange(uintptr
 static s32 OotPsp_MapNativeExternalTextureByteInRange(const OotPspLoadedAssetRange* range, uintptr_t ram,
                                                       const void** mapped) {
     uintptr_t assetOffset;
-    uintptr_t assetEnd;
     uintptr_t assetSpan;
-    uintptr_t mappedAssetOffset;
+    uintptr_t relativeAssetOffset;
+    uintptr_t mappedRelativeAssetOffset;
     uintptr_t mappedRam;
 
     assetSpan = range->ramEnd - range->ramStart;
@@ -606,15 +611,15 @@ static s32 OotPsp_MapNativeExternalTextureByteInRange(const OotPspLoadedAssetRan
         return false;
     }
 
-    assetEnd = range->assetOffsetStart + assetSpan;
     assetOffset = range->assetOffsetStart + (ram - range->ramStart);
-    mappedAssetOffset = assetOffset ^ 7U;
+    relativeAssetOffset = assetOffset - range->assetOffsetStart;
+    mappedRelativeAssetOffset = relativeAssetOffset ^ 7U;
 
-    if ((mappedAssetOffset < range->assetOffsetStart) || (mappedAssetOffset >= assetEnd)) {
+    if (mappedRelativeAssetOffset >= assetSpan) {
         return false;
     }
 
-    mappedRam = range->ramStart + (mappedAssetOffset - range->assetOffsetStart);
+    mappedRam = range->ramStart + mappedRelativeAssetOffset;
     *mapped = (const void*)mappedRam;
     return true;
 }
@@ -1042,6 +1047,17 @@ s32 OotPsp_MapNativeExternalTextureByte(const void* ptr, const void** mapped) {
     for (i = 0; i < OOT_PSP_LOADED_ASSET_RANGE_COUNT; i++) {
         const OotPspLoadedAssetRange* range = &sOotPspLoadedAssetRanges[i];
 
+        if (!OotPsp_IsNativeLoadedTextureByteRange(range, ram)) {
+            continue;
+        }
+
+        OotPsp_RememberNativeTextureRange(range);
+        return OotPsp_MapNativeExternalTextureByteInRange(range, ram, mapped);
+    }
+
+    for (i = 0; i < OOT_PSP_LOADED_ASSET_RANGE_COUNT; i++) {
+        const OotPspLoadedAssetRange* range = &sOotPspLoadedAssetRanges[i];
+
         /*
          * Texture subranges are best-effort. Native object bins still store
          * compiled u64 texture words, so fall back to the full native asset
@@ -1051,7 +1067,6 @@ s32 OotPsp_MapNativeExternalTextureByte(const void* ptr, const void** mapped) {
             continue;
         }
 
-        OotPsp_RememberNativeTextureRange(range);
         return OotPsp_MapNativeExternalTextureByteInRange(range, ram, mapped);
     }
 

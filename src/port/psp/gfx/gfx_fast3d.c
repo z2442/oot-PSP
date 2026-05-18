@@ -60,7 +60,7 @@
 #define RATIO_Y (gfx_current_dimensions.height / (2.0f * HALF_SCREEN_HEIGHT))
 
 #define MAX_BUFFERED (1024)
-#define MAX_LIGHTS 2
+#define MAX_LIGHTS 7
 #define MAX_VERTICES 64
 #define GFX_TLUT_SIZE_BYTES 512
 #define GFX_CI4_TLUT_SIZE_BYTES 32
@@ -146,6 +146,7 @@ struct ColorCombiner {
     uint32_t cc_id;
     struct ShaderProgram *prg;
     uint8_t used_textures[2];
+    int8_t active_texture;
     uint8_t vertex_color_source[2];
 } __attribute__((packed, aligned(4)));
 
@@ -1013,8 +1014,19 @@ static void gfx_generate_cc(struct ColorCombiner *comb, uint32_t cc_id) {
     gfx_cc_get_features(shader_id, &cc_features);
     comb->cc_id = cc_id;
     comb->prg = gfx_lookup_or_create_shader_program(shader_id);
+#if defined(TARGET_PSP)
+    const bool collapse_tex1 = cc_features.used_textures[0] && cc_features.used_textures[1];
+
+    comb->used_textures[0] = cc_features.used_textures[0];
+    comb->used_textures[1] = cc_features.used_textures[1] && !collapse_tex1;
+    comb->active_texture = cc_features.used_textures[0] ? 0 : (cc_features.used_textures[1] ? 1 : -1);
+#else
     comb->used_textures[0] = cc_features.used_textures[0];
     comb->used_textures[1] = cc_features.used_textures[1];
+    comb->active_texture =
+        (cc_features.used_textures[0] && cc_features.used_textures[1]) ? (cc_features.do_single[1] ? 1 : 0) :
+        (cc_features.used_textures[0] ? 0 : (cc_features.used_textures[1] ? 1 : -1));
+#endif
     comb->vertex_color_source[0] = cc_features.num_inputs == 0 ? CC_0 : shader_input_mapping[0][cc_features.num_inputs - 1];
     comb->vertex_color_source[1] = cc_features.num_inputs == 0 ? CC_0 : shader_input_mapping[1][cc_features.num_inputs - 1];
 }
@@ -1089,10 +1101,15 @@ extern void texman_clear(void);
 extern int texman_texture_slot_available(void);
 
 static void gfx_texture_cache_clear(void) {
+    gfx_flush();
     texman_clear();
     gfx_texture_cache.pool_pos = 0;
     memset(gfx_texture_cache.pool, 0, sizeof(gfx_texture_cache.pool));
     memset(gfx_texture_cache.hashmap, 0, sizeof(gfx_texture_cache.hashmap));
+    rdp.textures_changed[0] = true;
+    rdp.textures_changed[1] = true;
+    memset(rendering_state.textures, 0, sizeof(rendering_state.textures));
+    rendering_state.tri_pipeline_dirty = true;
 }
 
 static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, const uint8_t *orig_addr, uint32_t fmt, uint32_t siz) {
@@ -1690,9 +1707,14 @@ static void gfx_prepare_tri_pipeline_state(void) {
 
     const bool used_textures[2] = {comb->used_textures[0], comb->used_textures[1]};
     const bool linear_filter = (rdp.other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT;
+    const int active_texture = comb->active_texture;
 
     for (int i = 0; i < 2; i++) {
         if (used_textures[i]) {
+            if (rendering_state.textures[i] == NULL) {
+                rdp.textures_changed[i] = true;
+            }
+
             if (rdp.textures_changed[i]) {
                 gfx_flush();
                 import_texture(i);
@@ -1713,6 +1735,13 @@ static void gfx_prepare_tri_pipeline_state(void) {
                 rendering_state.textures[i]->maskt = rdp.texture_tile.maskt;
             }
         }
+    }
+
+    if ((active_texture >= 0) && (rendering_state.textures[active_texture] != NULL)) {
+        gfx_flush();
+        gfx_rapi->set_sampler_parameters(active_texture, linear_filter, rdp.texture_tile.cms, rdp.texture_tile.cmt,
+                                         rdp.texture_tile.masks, rdp.texture_tile.maskt);
+        gfx_rapi->select_texture(active_texture, rendering_state.textures[active_texture]->texture_id);
     }
 
     struct TriPipelineState *state = &rendering_state.tri_pipeline;
@@ -1743,7 +1772,8 @@ static void gfx_prepare_tri_pipeline_state(void) {
         state->tex_v_scale_to_primitive = rdp.texture_tile.maskt == G_TX_NOMASK;
 #if defined(TARGET_PSP)
         {
-            const struct TextureHashmapNode *texture_node = used_textures[0] ? rendering_state.textures[0] : rendering_state.textures[1];
+            const struct TextureHashmapNode *texture_node =
+                active_texture >= 0 ? rendering_state.textures[active_texture] : NULL;
             const uint32_t tile_width = (rdp.texture_tile.lrs - rdp.texture_tile.uls + 4) / 4;
             const uint32_t tile_height = (rdp.texture_tile.lrt - rdp.texture_tile.ult + 4) / 4;
 
@@ -1782,6 +1812,12 @@ static void gfx_prepare_tri_pipeline_state(void) {
 static inline float dot(const float a[3], const float b[3])
 {
     return (a[0] * b[0]) + (a[1] * b[1]) + (a[2] * b[2]);
+}
+
+static uint8_t gfx_clamp_num_lights(uint32_t num_lights) {
+    const uint32_t max_lights_with_ambient = MAX_LIGHTS + 1;
+
+    return (num_lights > max_lights_with_ambient) ? max_lights_with_ambient : num_lights;
 }
 
 static void gfx_normalize_vector(float v[3]) {
@@ -2116,6 +2152,37 @@ static bool gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
     return true;
 }
 
+#if defined(TARGET_PSP) && defined(F3DEX_GBI_2)
+static inline void *seg_addr(uintptr_t w1);
+
+static bool gfx_decode_vertex_cmd_f3dex2(uint32_t w0, uint32_t* n, uint32_t* destIndex) {
+    const uint32_t count = (w0 >> 12) & 0xFF;
+    const uint32_t end = (w0 >> 1) & 0x7F;
+
+    if (((w0 & 0x00F00F01U) != 0) || (count == 0) || (count > MAX_VERTICES) || (end > MAX_VERTICES) ||
+        (end < count)) {
+        return false;
+    }
+
+    *n = count;
+    *destIndex = end - count;
+    return true;
+}
+
+static bool gfx_sp_vertex_f3dex2(uint32_t w0, uintptr_t rawAddr) {
+    uint32_t n;
+    uint32_t destIndex;
+
+    if (!gfx_decode_vertex_cmd_f3dex2(w0, &n, &destIndex)) {
+        n = (w0 >> 12) & 0xFF;
+        gfx_log_bad_data_source("vertex-cmd", (const void*)rawAddr, n * sizeof(Vtx));
+        return false;
+    }
+
+    return gfx_sp_vertex(n, destIndex, seg_addr(rawAddr));
+}
+#endif
+
 static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
     struct LoadedVertex *v1 = &rsp.loaded_vertices[vtx1_idx];
     struct LoadedVertex *v2 = &rsp.loaded_vertices[vtx2_idx];
@@ -2203,6 +2270,22 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
         }
     }
     
+    const size_t new_tri_count = clipped_vertices_num / 3;
+
+    if (new_tri_count == 0) {
+        return;
+    }
+
+#if defined(TARGET_PSP)
+    if ((buf_num_vert + clipped_vertices_num) > (sizeof(buf_vbo) / sizeof(buf_vbo[0]))) {
+        gfx_flush();
+    }
+#endif
+
+    if ((buf_vbo_num_tris + new_tri_count) > MAX_BUFFERED) {
+        gfx_flush();
+    }
+
     size_t i;
     for (i = 0; i < clipped_vertices_num; i++) {
         const struct LoadedVertex *vertex = clipped_vertices[i];
@@ -2250,8 +2333,8 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
         buf_num_vert++;
         buf_vbo_len += sizeof(psp_fast_t);
     }
-    buf_vbo_num_tris += clipped_vertices_num / 3;
-    if (buf_vbo_num_tris == MAX_BUFFERED) {
+    buf_vbo_num_tris += new_tri_count;
+    if (buf_vbo_num_tris >= MAX_BUFFERED) {
         gfx_flush();
     }
 }
@@ -2412,11 +2495,11 @@ static void gfx_sp_moveword(uint8_t index, uint16_t offset, uint32_t data) {
     switch (index) {
         case G_MW_NUMLIGHT:
 #ifdef F3DEX_GBI_2
-            rsp.current_num_lights = data / 24 + 1; // add ambient light
+            rsp.current_num_lights = gfx_clamp_num_lights(data / 24 + 1); // add ambient light
 #else
             // Ambient light is included
             // The 31th bit is a flag that lights should be recalculated
-            rsp.current_num_lights = (data - 0x80000000U) / 32;
+            rsp.current_num_lights = gfx_clamp_num_lights((data - 0x80000000U) / 32);
 #endif
             rsp.lights_changed = 1;
             break;
@@ -3224,9 +3307,15 @@ static void gfx_run_dl(Gfx* cmd) {
                 break;
             case G_VTX:
 #ifdef F3DEX_GBI_2
+#if defined(TARGET_PSP)
+                if (!gfx_sp_vertex_f3dex2(cmd->words.w0, cmd->words.w1)) {
+                    return;
+                }
+#else
                 if (!gfx_sp_vertex(C0(12, 8), C0(1, 7) - C0(12, 8), seg_addr(cmd->words.w1))) {
                     return;
                 }
+#endif
 #elif defined(F3DEX_GBI) || defined(F3DLP_GBI)
                 if (!gfx_sp_vertex(C0(10, 6), C0(16, 8) / 2, seg_addr(cmd->words.w1))) {
                     return;
@@ -3238,14 +3327,18 @@ static void gfx_run_dl(Gfx* cmd) {
 #endif
                 break;
             case G_DL:
+            {
+                void* target = seg_addr(cmd->words.w1);
+
                 if (C0(16, 1) == 0) {
                     // Push return address
-                    gfx_run_dl((Gfx *)seg_addr(cmd->words.w1));
+                    gfx_run_dl((Gfx *)target);
                 } else {
-                    cmd = (Gfx *)seg_addr(cmd->words.w1);
+                    cmd = (Gfx *)target;
                     --cmd; // increase after break
                 }
                 break;
+            }
             case (uint8_t)G_ENDDL:
                 return;
 #ifdef F3DEX_GBI_2

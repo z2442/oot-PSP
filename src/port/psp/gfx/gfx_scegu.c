@@ -252,6 +252,7 @@ static struct ShaderProgram shader_program_pool[64];
 static uint8_t shader_program_pool_size;
 static struct ShaderProgram *cur_shader = NULL;
 static struct SamplerState tmu_state[2];
+static int active_texture_tile = -1;
 static bool gl_blend = false;
 
 static inline uint32_t get_shader_index(uint32_t id) {
@@ -330,12 +331,17 @@ static inline int texenv_set_texture_texture(UNUSED struct ShaderProgram *prg) {
 }
 
 static void gfx_scegu_apply_shader(struct ShaderProgram *prg) {
-    // If we have textures, Enable otherwise Disable
-    if (prg->texture_used[0] || prg->texture_used[1]) {
+    int mode;
+    const bool use_texture = prg != NULL && (prg->texture_used[0] || prg->texture_used[1]);
+
+    if (prg == NULL) {
+        return;
+    }
+
+    if (use_texture) {
         sceGuEnable(GU_TEXTURE_2D);
     } else {
         sceGuDisable(GU_TEXTURE_2D);
-        return;
     }
 /*@Note: Revisit one day! */
 #if 0
@@ -369,11 +375,7 @@ static void gfx_scegu_apply_shader(struct ShaderProgram *prg) {
         sceGuDisable(GU_ALPHA_TEST);
     }
 
-    if (!prg->enabled) {
-        // configure formulae, we only need to do this once
-        prg->enabled = true;
-
-        int mode;
+    if (use_texture) {
         switch (prg->mix) {
             case SH_MT_TEXTURE:
                 mode = texenv_set_texture(prg);
@@ -395,6 +397,8 @@ static void gfx_scegu_apply_shader(struct ShaderProgram *prg) {
         }
         sceGuTexFunc(mode, GU_TCC_RGBA);
     }
+
+    prg->enabled = true;
 }
 
 static void gfx_scegu_unload_shader(struct ShaderProgram *old_prg) {
@@ -407,8 +411,6 @@ static void gfx_scegu_unload_shader(struct ShaderProgram *old_prg) {
 static void gfx_scegu_load_shader(struct ShaderProgram *new_prg) {
     cur_shader = new_prg;
     gfx_scegu_apply_shader(cur_shader);
-    if (cur_shader)
-        cur_shader->enabled = false;
 }
 
 static struct ShaderProgram *gfx_scegu_create_and_load_new_shader(uint32_t shader_id) {
@@ -420,21 +422,12 @@ static struct ShaderProgram *gfx_scegu_create_and_load_new_shader(uint32_t shade
     prg->shader_id = shader_id;
     prg->cc = ccf;
     prg->num_inputs = ccf.num_inputs;
-    prg->texture_used[0] = ccf.used_textures[0];
-    prg->texture_used[1] = ccf.used_textures[1];
+    prg->texture_used[0] = ccf.used_textures[0] || ccf.used_textures[1];
+    prg->texture_used[1] = false;
 
-    if (ccf.used_textures[0] && ccf.used_textures[1]) {
-        prg->mix = SH_MT_TEXTURE_TEXTURE;
-        if (ccf.do_single[1]) {
-            prg->texture_ord[0] = 1;
-            prg->texture_ord[1] = 0;
-        } else {
-            prg->texture_ord[0] = 0;
-            prg->texture_ord[1] = 1;
-        }
-    } else if (ccf.used_textures[0] && ccf.num_inputs) {
+    if (prg->texture_used[0] && ccf.num_inputs) {
         prg->mix = SH_MT_TEXTURE_COLOR;
-    } else if (ccf.used_textures[0]) {
+    } else if (prg->texture_used[0]) {
         prg->mix = SH_MT_TEXTURE;
     } else if (ccf.num_inputs > 1) {
         prg->mix = SH_MT_COLOR_COLOR;
@@ -505,17 +498,16 @@ static void gfx_scegu_set_sampler_parameters(const int tile, const bool linear_f
     tmu_state[tile].wrap_s = wrap_s;
     tmu_state[tile].wrap_t = wrap_t;
 
-    // set state for the first texture right away
-    if (!tile)
+    if (active_texture_tile == tile) {
         gfx_scegu_apply_tmu_state(tile);
+    }
 }
 
 static void gfx_scegu_select_texture(int tile, uint32_t texture_id) {
-    if (tmu_state[tile].tex != texture_id) {
-        tmu_state[tile].tex = texture_id;
-        texman_bind_tex(texture_id);
-        gfx_scegu_set_sampler_parameters(tile, false, 0, 0, G_TX_NOMASK, G_TX_NOMASK);
-    }
+    tmu_state[tile].tex = texture_id;
+    texman_bind_tex(texture_id);
+    active_texture_tile = tile;
+    gfx_scegu_apply_tmu_state(tile);
 }
 
 /* Used for rescaling textures ROUGHLY into pow2 dims */
@@ -637,6 +629,7 @@ static void gfx_scegu_set_scissor(int x, int y, int width, int height) {
 
 static void gfx_scegu_set_use_alpha(bool use_alpha) {
     gl_blend = use_alpha;
+    sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
     if (use_alpha) {
         sceGuEnable(GU_BLEND);
     } else {
@@ -699,6 +692,8 @@ void gfx_scegu_draw_triangles_2d(float buf_vbo[], UNUSED size_t buf_vbo_len, UNU
 
 static void gfx_scegu_init(void) {
     sceGuInit();
+    active_texture_tile = -1;
+    memset(tmu_state, 0, sizeof(tmu_state));
 
     void *fbp0 = getStaticVramBuffer(BUF_WIDTH, SCR_HEIGHT, GU_PSM_5650);
     void *fbp1 = getStaticVramBuffer(BUF_WIDTH, SCR_HEIGHT, GU_PSM_5650);
