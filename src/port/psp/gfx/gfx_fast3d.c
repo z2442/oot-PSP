@@ -968,10 +968,28 @@ static struct ShaderProgram *gfx_lookup_or_create_shader_program(uint32_t shader
     return prg;
 }
 
+static uint8_t gfx_cc_pick_vertex_color_source(const uint8_t components[4], const uint8_t input_mapping[4],
+                                               uint8_t input_count) {
+    if (input_count == 0) {
+        return CC_0;
+    }
+
+#if defined(TARGET_PSP)
+    /* PSP GU has one primary color; approximate UI foreground/background texture blends with the foreground. */
+    if ((components[0] == CC_PRIM) && (components[1] == CC_ENV) && (components[3] == CC_ENV) &&
+        ((components[2] == CC_TEXEL0) || (components[2] == CC_TEXEL0A) || (components[2] == CC_TEXEL1))) {
+        return CC_PRIM;
+    }
+#endif
+
+    return input_mapping[input_count - 1];
+}
+
 static void gfx_generate_cc(struct ColorCombiner *comb, uint32_t cc_id) {
     uint8_t c[2][4];
     uint32_t shader_id = (cc_id >> 24) << 24;
     uint8_t shader_input_mapping[2][4] = {{0}};
+    uint8_t shader_input_count[2] = {0};
     struct CCFeatures cc_features;
     for (int i = 0; i < 4; i++) {
         c[0][i] = (cc_id >> (i * 3)) & 7;
@@ -1010,6 +1028,7 @@ static void gfx_generate_cc(struct ColorCombiner *comb, uint32_t cc_id) {
             }
             shader_id |= val << (i * 12 + j * 3);
         }
+        shader_input_count[i] = next_input_number - SHADER_INPUT_1;
     }
     gfx_cc_get_features(shader_id, &cc_features);
     comb->cc_id = cc_id;
@@ -1027,8 +1046,10 @@ static void gfx_generate_cc(struct ColorCombiner *comb, uint32_t cc_id) {
         (cc_features.used_textures[0] && cc_features.used_textures[1]) ? (cc_features.do_single[1] ? 1 : 0) :
         (cc_features.used_textures[0] ? 0 : (cc_features.used_textures[1] ? 1 : -1));
 #endif
-    comb->vertex_color_source[0] = cc_features.num_inputs == 0 ? CC_0 : shader_input_mapping[0][cc_features.num_inputs - 1];
-    comb->vertex_color_source[1] = cc_features.num_inputs == 0 ? CC_0 : shader_input_mapping[1][cc_features.num_inputs - 1];
+    comb->vertex_color_source[0] =
+        gfx_cc_pick_vertex_color_source(c[0], shader_input_mapping[0], shader_input_count[0]);
+    comb->vertex_color_source[1] =
+        gfx_cc_pick_vertex_color_source(c[1], shader_input_mapping[1], shader_input_count[1]);
 }
 
 static inline struct RGBA gfx_get_vertex_color(const struct ColorCombiner *comb, bool use_alpha, const struct RGBA *shade_color, float lod_w, bool allow_lod) {
@@ -2999,6 +3020,12 @@ static void gfx_sp_set_other_mode(uint32_t shift, uint32_t num_bits, uint64_t mo
     gfx_mark_tri_pipeline_dirty();
 }
 
+static void gfx_dp_set_other_mode(uint32_t mode_h, uint32_t mode_l) {
+    rdp.other_mode_h = mode_h;
+    rdp.other_mode_l = mode_l;
+    gfx_mark_tri_pipeline_dirty();
+}
+
 static inline bool gfx_addr_looks_segmented(uintptr_t addr) {
     uint8_t segment = addr >> 24;
     uintptr_t offset = addr & 0x00FFFFFFU;
@@ -3390,6 +3417,9 @@ static void gfx_run_dl(Gfx* cmd) {
                 break;
             
             // RDP Commands:
+            case G_RDPSETOTHERMODE:
+                gfx_dp_set_other_mode(cmd->words.w0 & 0x00FFFFFFU, cmd->words.w1);
+                break;
             case G_SETTIMG:
                 gfx_dp_set_texture_image(C0(21, 3), C0(19, 2), C0(0, 12) + 1, seg_addr(cmd->words.w1));
                 break;
