@@ -15,6 +15,7 @@
 #ifdef GU_PI
 #undef GU_PI
 #endif
+#include <pspfpu.h>
 #include <pspgu.h>
 #include <pspgum.h>
 #include <pspkernel.h>
@@ -1847,7 +1848,7 @@ static uint8_t gfx_clamp_num_lights(uint32_t num_lights) {
 static void gfx_normalize_vector(float v[3]) {
     float dot = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
     if(dot > 0.00001f){
-        const float scale = 1.0f / sqrtf(dot);
+        const float scale = 1.0f / pspFpuSqrt(dot);
         v[0] *= scale;
         v[1] *= scale;
         v[2] *= scale;
