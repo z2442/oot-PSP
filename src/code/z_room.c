@@ -277,8 +277,6 @@ void Room_DrawCullable(PlayState* play, Room* room, u32 flags) {
     CLOSE_DISPS(play->state.gfxCtx, "../z_room.c", 430);
 }
 
-#define JPEG_MARKER 0xFFD8FFE0
-
 /**
  * If the data is JPEG, decode it and overwrite the initial data with the result.
  * Uses the depth frame buffer as temporary storage.
@@ -286,23 +284,29 @@ void Room_DrawCullable(PlayState* play, Room* room, u32 flags) {
 s32 Room_DecodeJpeg(void* data) {
     OSTime time;
 
-    if (*(u32*)data == JPEG_MARKER) {
+    if (Jpeg_IsJpeg(data)) {
         PRINTF(T("JPEGデータを展開します\n", "Expanding jpeg data\n"));
         PRINTF(T("JPEGデータアドレス %08x\n", "Jpeg data address %08x\n"), data);
         PRINTF(T("ワークバッファアドレス（Ｚバッファ）%08x\n", "Work buffer address (Z buffer) %08x\n"), gZBuffer);
 
         time = osGetTime();
+#if defined(TARGET_PSP)
+        if (!Jpeg_Decode(data, data, gGfxSPTaskOutputBuffer, sizeof(gGfxSPTaskOutputBuffer))) {
+#else
         if (!Jpeg_Decode(data, gZBuffer, gGfxSPTaskOutputBuffer, sizeof(gGfxSPTaskOutputBuffer))) {
+#endif
             time = osGetTime() - time;
 
             PRINTF(T("成功…だと思う。 time = %6.3f ms \n", "Success... I think. time = %6.3f ms\n"),
                    OS_CYCLES_TO_USEC(time) / 1000.0f);
+#if !defined(TARGET_PSP)
             PRINTF(T("ワークバッファから元のアドレスに書き戻します。\n",
                      "Writing back to original address from work buffer.\n"));
             PRINTF(T("元のバッファのサイズが150キロバイト無いと暴走するでしょう。\n",
                      "If the original buffer size isn't at least 150kB, it will be out of control.\n"));
 
             bcopy(gZBuffer, data, sizeof(u16[SCREEN_HEIGHT][SCREEN_WIDTH]));
+#endif
         } else {
             PRINTF(T("失敗！なんで〜\n", "Failure! Why is it ~\n"));
         }

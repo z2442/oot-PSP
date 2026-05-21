@@ -1493,7 +1493,7 @@ PSP_PORT_CFLAGS := -G0 -O2 -g3 -Wall -Wextra -Wno-format-security -Wno-unused-pa
 	$(PSP_PORT_DEFINES) $(PSP_PORT_INCLUDES)
 
 PSP_PORT_LDFLAGS := -specs=$(PSP_PORT_PSPSDK)/lib/prxspecs -Wl,-q,-T$(PSP_PORT_PSPSDK)/lib/linkfile.prx \
-	-Wl,-zmax-page-size=128 -Wl,--gc-sections -Wl,-u,module_info -Wl,-u,sceKernelChangeThreadPriority $(PSP_PORT_PSPSDK)/lib/prxexports.o -L$(PSP_PORT_PSPSDK)/lib -L$(PSP_PORT_PREFIX)/lib -lpspgu -lpspgum \
+	-Wl,-zmax-page-size=128 -Wl,--gc-sections -Wl,-u,module_info -Wl,-u,sceKernelChangeThreadPriority $(PSP_PORT_PSPSDK)/lib/prxexports.o -L$(PSP_PORT_PSPSDK)/lib -L$(PSP_PORT_PREFIX)/lib -lpspgu -lpspgum -lpspjpeg -lpsputility \
 	-lpspdisplay -lpspge -lpspctrl -lpsprtc -lpsppower -lpspdebug -lpspsdk -lpspuser -lm -lc
 
 psp-port: $(PSP_PORT_PBP) $(PSP_PORT_ASSET_SEGMENT_DATA_STAMP)

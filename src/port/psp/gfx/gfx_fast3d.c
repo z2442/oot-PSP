@@ -10,6 +10,7 @@
 #define _LANGUAGE_C
 #endif
 #include "ultra64.h"
+#include "ultra64/gs2dex.h"
 
 #ifdef GU_PI
 #undef GU_PI
@@ -1119,6 +1120,8 @@ static struct ColorCombiner *gfx_lookup_or_create_color_combiner(uint32_t cc_id)
 
 extern int gfx_vram_space_available(void);
 extern void texman_clear(void);
+extern void texman_upload(int width, int height, unsigned int type, const void* buffer);
+extern int texman_vram_space_available(unsigned int size);
 extern int texman_texture_slot_available(void);
 
 static void gfx_texture_cache_clear(void) {
@@ -2886,12 +2889,14 @@ static void gfx_draw_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lr
     lr->x = (unsigned short)lrxf;
     lr->y = (unsigned short)lryf;
 
-    // The coordinates for texture rectangle shall bypass the viewport setting
+    // The coordinates for texture rectangles shall bypass the 3D viewport/scissor state.
     struct XYWidthHeight default_viewport = {0, 0, gfx_current_dimensions.width, gfx_current_dimensions.height};
     struct XYWidthHeight viewport_saved = rdp.viewport;
+    struct XYWidthHeight scissor_saved = rdp.scissor;
     uint32_t geometry_mode_saved = rsp.geometry_mode;
     
     rdp.viewport = default_viewport;
+    rdp.scissor = default_viewport;
     rdp.viewport_or_scissor_changed = true;
     rsp.geometry_mode = 0;
     gfx_mark_tri_pipeline_dirty();
@@ -2900,6 +2905,7 @@ static void gfx_draw_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lr
     
     rsp.geometry_mode = geometry_mode_saved;
     rdp.viewport = viewport_saved;
+    rdp.scissor = scissor_saved;
     rdp.viewport_or_scissor_changed = true;
     gfx_mark_tri_pipeline_dirty();
     
@@ -3246,6 +3252,248 @@ static inline void *seg_addr(uintptr_t w1) {
     return (void*)w1;
 }
 
+#if defined(TARGET_PSP) && defined(F3DEX_GBI_2)
+#define GFX_S2DEX_BG_MAX_UPLOAD_WIDTH 256U
+#define GFX_S2DEX_BG_MAX_UPLOAD_HEIGHT 256U
+
+static void gfx_s2dex_bg_compute_upload_size(uint32_t sourceWidth, uint32_t sourceHeight, uint32_t* contentWidth,
+                                             uint32_t* contentHeight, uint32_t* uploadWidth,
+                                             uint32_t* uploadHeight) {
+    *contentWidth = sourceWidth;
+    *contentHeight = sourceHeight;
+
+    if ((*contentWidth > GFX_S2DEX_BG_MAX_UPLOAD_WIDTH) || (*contentHeight > GFX_S2DEX_BG_MAX_UPLOAD_HEIGHT)) {
+        if ((uint64_t)sourceWidth * GFX_S2DEX_BG_MAX_UPLOAD_HEIGHT >
+            (uint64_t)sourceHeight * GFX_S2DEX_BG_MAX_UPLOAD_WIDTH) {
+            *contentWidth = GFX_S2DEX_BG_MAX_UPLOAD_WIDTH;
+            *contentHeight = ((uint64_t)sourceHeight * GFX_S2DEX_BG_MAX_UPLOAD_WIDTH + (sourceWidth / 2)) /
+                             sourceWidth;
+        } else {
+            *contentHeight = GFX_S2DEX_BG_MAX_UPLOAD_HEIGHT;
+            *contentWidth = ((uint64_t)sourceWidth * GFX_S2DEX_BG_MAX_UPLOAD_HEIGHT + (sourceHeight / 2)) /
+                            sourceHeight;
+        }
+
+        if (*contentWidth == 0) {
+            *contentWidth = 1;
+        }
+        if (*contentHeight == 0) {
+            *contentHeight = 1;
+        }
+    }
+
+    *uploadWidth = gfx_next_power_of_two(*contentWidth);
+    *uploadHeight = gfx_next_power_of_two(*contentHeight);
+}
+
+static bool gfx_s2dex_bg_upload_rgba16_texture(const uint8_t* source, uint32_t width, uint32_t height,
+                                               uint32_t rowBytes, uint32_t sourceSpan, uint32_t contentWidth,
+                                               uint32_t contentHeight, uint32_t uploadWidth, uint32_t uploadHeight,
+                                               struct TextureHashmapNode* node) {
+    const size_t uploadSize = (size_t)uploadWidth * uploadHeight * sizeof(uint16_t);
+    GfxTextureSwapMode swapMode;
+    uint16_t* dst;
+
+    if (uploadSize > sizeof(psp_texture_stage_buf)) {
+        gfx_log_bad_texture_source(0, "s2dex-bg-upload-size", source, sourceSpan);
+        return false;
+    }
+
+    memset(psp_texture_stage_buf, 0, uploadSize);
+    dst = (uint16_t*)psp_texture_stage_buf;
+    swapMode = gfx_texture_source_swap_mode(source, sourceSpan);
+
+    for (uint32_t y = 0; y < contentHeight; y++) {
+        uint32_t sourceY = (uint64_t)y * height / contentHeight;
+        const uint8_t* row = source + (size_t)sourceY * rowBytes;
+        uint16_t* dstRow = dst + (size_t)y * uploadWidth;
+
+        for (uint32_t x = 0; x < contentWidth; x++) {
+            uint32_t sourceX = (uint64_t)x * width / contentWidth;
+            uint16_t col16 = gfx_read_texture_source_be16(row, sourceX * sizeof(uint16_t), swapMode);
+            const uint8_t a = col16 & 1;
+            const uint8_t r = (col16 >> 11) & 0x1f;
+            const uint8_t g = (col16 >> 6) & 0x1f;
+            const uint8_t b = (col16 >> 1) & 0x1f;
+
+            dstRow[x] = (a << 15) | (b << 10) | (g << 5) | r;
+        }
+    }
+
+    texman_upload(uploadWidth, uploadHeight, GU_PSM_5551, psp_texture_stage_buf);
+    node->upload_width = uploadWidth;
+    node->upload_height = uploadHeight;
+    node->mirror_s = false;
+    node->mirror_t = false;
+    return true;
+}
+
+static bool gfx_s2dex_bg_prepare_texture(const uint8_t* source, uint32_t width, uint32_t height, uint8_t fmt,
+                                         uint8_t siz, uint32_t* contentWidth, uint32_t* contentHeight) {
+    const int tile = 0;
+    uint32_t rowBytes;
+    uint32_t sourceSpan;
+    uint32_t uploadWidth;
+    uint32_t uploadHeight;
+    unsigned int uploadSize;
+
+    if ((source == NULL) || (width == 0) || (height == 0) || (height > (UINT32_MAX / width))) {
+        gfx_log_bad_texture_source(tile, "s2dex-bg-dimensions", source, 1);
+        return false;
+    }
+
+    rowBytes = gfx_texture_row_bytes(width, siz);
+    if ((rowBytes == 0) || (height > (UINT32_MAX / rowBytes))) {
+        gfx_log_bad_texture_source(tile, "s2dex-bg-rowbytes", source, rowBytes);
+        return false;
+    }
+
+    sourceSpan = rowBytes * height;
+    if ((fmt != G_IM_FMT_RGBA) || (siz != G_IM_SIZ_16b)) {
+        gfx_log_bad_texture_source(tile, "s2dex-bg-format", source, sourceSpan);
+        return false;
+    }
+
+    gfx_s2dex_bg_compute_upload_size(width, height, contentWidth, contentHeight, &uploadWidth, &uploadHeight);
+
+    if ((size_t)uploadWidth * uploadHeight * sizeof(uint16_t) > sizeof(psp_texture_stage_buf)) {
+        gfx_log_bad_texture_source(tile, "s2dex-bg-too-large", source, sourceSpan);
+        return false;
+    }
+
+    uploadSize = uploadWidth * uploadHeight * sizeof(uint16_t);
+    if (!texman_vram_space_available(uploadSize) || !texman_texture_slot_available()) {
+        gfx_texture_cache_clear();
+    }
+
+    gfx_flush();
+
+    rdp.texture_to_load.addr = source;
+    rdp.texture_to_load.fmt = fmt;
+    rdp.texture_to_load.siz = siz;
+    rdp.texture_to_load.width = width;
+    rdp.texture_to_load.tile_number = tile;
+    rdp.texture_to_load.image_cmd = sCurrentCmd;
+
+    rdp.loaded_texture[tile].addr = source;
+    rdp.loaded_texture[tile].size_bytes = sourceSpan;
+    rdp.loaded_texture[tile].source_size_bytes = sourceSpan;
+    rdp.loaded_texture[tile].row_stride_bytes = rowBytes;
+    rdp.loaded_texture[tile].source_nibble_offset = 0;
+    rdp.loaded_texture[tile].image_cmd = sCurrentCmd;
+    rdp.loaded_texture[tile].load_cmd = sCurrentCmd;
+
+    rdp.texture_tile.fmt = fmt;
+    rdp.texture_tile.siz = siz;
+    rdp.texture_tile.cms = G_TX_CLAMP;
+    rdp.texture_tile.cmt = G_TX_CLAMP;
+    rdp.texture_tile.masks = G_TX_NOMASK;
+    rdp.texture_tile.maskt = G_TX_NOMASK;
+    rdp.texture_tile.line_size_bytes = rowBytes;
+    rdp.texture_tile.uls = 0;
+    rdp.texture_tile.ult = 0;
+    rdp.texture_tile.lrs = (width - 1) << G_TEXTURE_IMAGE_FRAC;
+    rdp.texture_tile.lrt = (height - 1) << G_TEXTURE_IMAGE_FRAC;
+
+    if (!gfx_texture_cache_lookup(tile, &rendering_state.textures[tile], source, fmt, siz)) {
+        if (!gfx_s2dex_bg_upload_rgba16_texture(source, width, height, rowBytes, sourceSpan, *contentWidth,
+                                                *contentHeight, uploadWidth, uploadHeight,
+                                                rendering_state.textures[tile])) {
+            rendering_state.textures[tile] = NULL;
+            rdp.textures_changed[tile] = true;
+            return false;
+        }
+
+        gfx_rapi->select_texture(tile, rendering_state.textures[tile]->texture_id);
+        gfx_rapi->set_sampler_parameters(tile, false, rdp.texture_tile.cms, rdp.texture_tile.cmt,
+                                         rdp.texture_tile.masks, rdp.texture_tile.maskt);
+    }
+
+    rdp.textures_changed[tile] = false;
+    gfx_mark_tri_pipeline_dirty();
+    return true;
+}
+
+static uint32_t gfx_s2dex_bg_texcoord_span(uint32_t frameSpan, uint16_t scale, bool scaled) {
+    if (scaled && (scale != 0)) {
+        return (uint32_t)(((uint64_t)frameSpan * scale) >> 7);
+    }
+
+    return frameSpan * 8;
+}
+
+static void gfx_sp_s2dex_bg_rect(uint32_t opcode, const void* bgAddr) {
+    const void* normalizedBg;
+    const uObjBg* bg;
+    const uint8_t* source;
+    uint32_t imageWidth;
+    uint32_t imageHeight;
+    int32_t frameX;
+    int32_t frameY;
+    uint32_t frameW;
+    uint32_t frameH;
+    uint32_t texSpanS;
+    uint32_t texSpanT;
+    uint32_t texStartS;
+    uint32_t texStartT;
+    uint32_t contentWidth;
+    uint32_t contentHeight;
+    struct VertexColor* ul = &rsp.loaded_vertices_2D[0];
+    struct VertexColor* lr = &rsp.loaded_vertices_2D[1];
+    uint32_t savedCombineMode;
+    bool savedColorMulEnv;
+    bool savedColorMulPrim;
+    const bool scaled = opcode == G_BG_1CYC;
+
+    if (!gfx_normalize_read_source(bgAddr, sizeof(uObjBg), "s2dex-bg", &normalizedBg)) {
+        return;
+    }
+
+    bg = (const uObjBg*)normalizedBg;
+    imageWidth = bg->b.imageW >> 2;
+    imageHeight = bg->b.imageH >> 2;
+    source = (const uint8_t*)seg_addr((uintptr_t)bg->b.imagePtr);
+
+    if (!gfx_s2dex_bg_prepare_texture(source, imageWidth, imageHeight, bg->b.imageFmt, bg->b.imageSiz, &contentWidth,
+                                      &contentHeight)) {
+        return;
+    }
+
+    frameX = bg->b.frameX;
+    frameY = bg->b.frameY;
+    frameW = scaled ? bg->s.frameW : bg->b.frameW;
+    frameH = scaled ? bg->s.frameH : bg->b.frameH;
+    texSpanS = gfx_s2dex_bg_texcoord_span(frameW, bg->s.scaleW, scaled);
+    texSpanT = gfx_s2dex_bg_texcoord_span(frameH, bg->s.scaleH, scaled);
+    texStartS = (uint64_t)bg->b.imageX * contentWidth / imageWidth;
+    texStartT = (uint64_t)bg->b.imageY * contentHeight / imageHeight;
+    texSpanS = (uint64_t)texSpanS * contentWidth / imageWidth;
+    texSpanT = (uint64_t)texSpanT * contentHeight / imageHeight;
+
+    ul->u = texStartS;
+    ul->v = texStartT;
+    ul->color = white_color;
+    lr->u = texStartS + texSpanS;
+    lr->v = texStartT + texSpanT;
+    lr->color = white_color;
+
+    savedCombineMode = rdp.combine_mode;
+    savedColorMulEnv = rdp.combine_color_mul_env;
+    savedColorMulPrim = rdp.combine_color_mul_prim;
+    if ((rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_COPY) {
+        gfx_dp_set_combine_mode(color_comb(0, 0, 0, G_CCMUX_TEXEL0), color_comb(0, 0, 0, G_ACMUX_TEXEL0), false,
+                                false);
+    }
+
+    gfx_draw_rectangle(frameX, frameY, frameX + frameW, frameY + frameH);
+
+    rdp.combine_mode = savedCombineMode;
+    rdp.combine_color_mul_env = savedColorMulEnv;
+    rdp.combine_color_mul_prim = savedColorMulPrim;
+    gfx_mark_tri_pipeline_dirty();
+}
+#endif
+
 static bool gfx_translate_dl_cursor(Gfx** cmdP) {
     uintptr_t raw = (uintptr_t)*cmdP;
     uintptr_t normalizedSegmented;
@@ -3366,6 +3614,12 @@ static void gfx_run_dl(Gfx* cmd) {
                 }
                 break;
             }
+#if defined(TARGET_PSP) && defined(F3DEX_GBI_2)
+            case (uint8_t)G_BG_1CYC:
+            case (uint8_t)G_BG_COPY:
+                gfx_sp_s2dex_bg_rect(opcode, seg_addr(cmd->words.w1));
+                break;
+#endif
             case (uint8_t)G_ENDDL:
                 return;
 #ifdef F3DEX_GBI_2

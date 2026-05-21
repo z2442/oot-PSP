@@ -170,6 +170,23 @@ int gfx_vram_space_available(void) {
     return (psp_tex_buffer_max - psp_tex_buffer) > (32 * 1024);
 }
 
+int texman_vram_space_available(unsigned int size) {
+    uintptr_t start = (uintptr_t)psp_tex_buffer;
+    uintptr_t end = (uintptr_t)psp_tex_buffer_max;
+    uintptr_t alignedEnd;
+
+    if ((psp_tex_buffer == NULL) || (psp_tex_buffer_max == NULL) || (start > end)) {
+        return 0;
+    }
+
+    if (size > (UINTPTR_MAX - start - (TEX_ALIGNMENT - 1))) {
+        return 0;
+    }
+
+    alignedEnd = (start + size + TEX_ALIGNMENT - 1) & ~(uintptr_t)(TEX_ALIGNMENT - 1);
+    return alignedEnd <= end;
+}
+
 int texman_texture_slot_available(void) {
     return (psp_tex_number + 1) < TEXMAN_MAX_TEXTURES;
 }
