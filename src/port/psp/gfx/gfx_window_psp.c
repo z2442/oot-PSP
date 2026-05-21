@@ -1,7 +1,6 @@
 #include "gfx_window_psp.h"
 
 #include <pspctrl.h>
-#include <pspdisplay.h>
 #include <pspkernel.h>
 #include <psppower.h>
 #include <psprtc.h>
@@ -88,7 +87,9 @@ static void gfx_window_psp_swap_buffers_begin(void) {
 }
 
 static void gfx_window_psp_swap_buffers_end(void) {
-    sceDisplayWaitVblankStart();
+    /*
+     * The SCE GU backend already waits for vblank and swaps buffers in
+     */
 }
 
 static double gfx_window_psp_get_time(void) {
