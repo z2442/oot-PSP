@@ -28,6 +28,10 @@
 #include "actor.h"
 #include "environment.h"
 #include "save.h"
+#if PLATFORM_PSP
+#include "oot_psp_asset_loader.h"
+#include "oot_psp_compat.h"
+#endif
 
 #include "assets/textures/nintendo_rogo_static/nintendo_rogo_static.h"
 
@@ -98,6 +102,107 @@ void ConsoleLogo_SetupView(ConsoleLogoState* this, f32 x, f32 y, f32 z) {
     View_Apply(view, VIEW_ALL);
 }
 
+#if PLATFORM_PSP
+typedef struct ConsoleLogoPspTexture {
+    /* 0x00 */ const u8* data;
+    /* 0x04 */ s32 byteSwap;
+} ConsoleLogoPspTexture;
+
+static ConsoleLogoPspTexture ConsoleLogo_GetPspTexture(void* texture) {
+    ConsoleLogoPspTexture source;
+    u32 loadedFlags;
+
+    source.data = texture;
+    source.byteSwap = false;
+
+    if (OotPsp_GetLoadedExternalAssetRangeFlags(source.data, 1, &loadedFlags)) {
+        source.byteSwap = (loadedFlags & OOT_PSP_EXTERNAL_ASSET_NATIVE) != 0;
+    } else if (!OotPsp_IsRuntimeByteRange(source.data, 1)) {
+        source.byteSwap = true;
+    }
+
+    return source;
+}
+
+static u8 ConsoleLogo_ReadPspTextureByte(ConsoleLogoPspTexture texture, size_t offset) {
+    const u8* source = texture.data + offset;
+
+    if (texture.byteSwap) {
+        source = (const u8*)((uintptr_t)source ^ 7U);
+    }
+
+    return *source;
+}
+
+static u8 ConsoleLogo_ReadI8Texel(ConsoleLogoPspTexture texture, s16 width, s16 height, s16 x, s16 y) {
+    x %= width;
+    y %= height;
+
+    if (x < 0) {
+        x += width;
+    }
+    if (y < 0) {
+        y += height;
+    }
+
+    return ConsoleLogo_ReadPspTextureByte(texture, y * width + x);
+}
+
+static void ConsoleLogo_BuildPspWordmarkTexture(ConsoleLogoState* this, u8* dst) {
+    ConsoleLogoPspTexture wordmarkTex = ConsoleLogo_GetPspTexture(nintendo_rogo_static_Tex_000000);
+    ConsoleLogoPspTexture effectTex = ConsoleLogo_GetPspTexture(nintendo_rogo_static_Tex_001800);
+    s16 scrollS = (this->uls >> G_TEXTURE_IMAGE_FRAC) & 0x1F;
+    s16 scrollT = (this->ult >> G_TEXTURE_IMAGE_FRAC) & 0x1F;
+    s16 x;
+    s16 y;
+
+    for (y = 0; y < nintendo_rogo_static_Tex_000000_HEIGHT; y++) {
+        for (x = 0; x < nintendo_rogo_static_Tex_000000_WIDTH; x++) {
+            u8 alpha = ConsoleLogo_ReadI8Texel(wordmarkTex, nintendo_rogo_static_Tex_000000_WIDTH,
+                                               nintendo_rogo_static_Tex_000000_HEIGHT, x, y);
+            u8 effect = ConsoleLogo_ReadI8Texel(effectTex, nintendo_rogo_static_Tex_001800_WIDTH,
+                                                nintendo_rogo_static_Tex_001800_HEIGHT, (x >> 2) + scrollS,
+                                                y + scrollT);
+
+            *dst++ = 128 + (effect >> 1);
+            *dst++ = alpha;
+        }
+    }
+}
+
+static void ConsoleLogo_DrawPspWordmark(ConsoleLogoState* this) {
+    Gfx* gfx = this->state.gfxCtx->polyOpa.p;
+    u8* texture = GRAPH_ALLOC(this->state.gfxCtx, nintendo_rogo_static_Tex_000000_WIDTH *
+                                                       nintendo_rogo_static_Tex_000000_HEIGHT * 2);
+    u8* textureSlice;
+    u16 idx;
+    u16 y;
+
+    if (texture == NULL) {
+        return;
+    }
+
+    ConsoleLogo_BuildPspWordmarkTexture(this, texture);
+
+    gDPPipeSync(gfx++);
+    gDPSetCycleType(gfx++, G_CYC_1CYCLE);
+    gDPSetRenderMode(gfx++, G_RM_CLD_SURF, G_RM_CLD_SURF2);
+    gDPSetCombineMode(gfx++, G_CC_MODULATEIA_PRIM, G_CC_MODULATEIA_PRIM);
+    gDPSetPrimColor(gfx++, 0, 0, 170, 255, 255, 255);
+
+    for (idx = 0, y = 94, textureSlice = texture; idx < 16;
+         idx++, y += 2, textureSlice += nintendo_rogo_static_Tex_000000_WIDTH * 2 * 2) {
+        gDPLoadTextureBlock(gfx++, textureSlice, G_IM_FMT_IA, G_IM_SIZ_16b, nintendo_rogo_static_Tex_000000_WIDTH, 2,
+                            0, G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMASK, G_TX_NOMASK,
+                            G_TX_NOLOD, G_TX_NOLOD);
+        gSPTextureRectangle(gfx++, 97 << 2, y << 2, 289 << 2, (y + 2) << 2, G_TX_RENDERTILE, 0, 0, 1 << 10,
+                            1 << 10);
+    }
+
+    this->state.gfxCtx->polyOpa.p = gfx;
+}
+#endif
+
 void ConsoleLogo_Draw(ConsoleLogoState* this) {
     static s16 sTitleRotY = 0;
     static Lights1 sTitleLights = gdSPDefLights1(100, 100, 100, 255, 255, 255, 69, 69, 69);
@@ -133,7 +238,20 @@ void ConsoleLogo_Draw(ConsoleLogoState* this) {
 
     MATRIX_FINALIZE_AND_LOAD(POLY_OPA_DISP++, this->state.gfxCtx, "../z_title.c", 424);
     gSPDisplayList(POLY_OPA_DISP++, gNintendo64LogoDL);
+#if PLATFORM_PSP
+    /*
+     * The PSP backend imports this boot logo's I8 texture with alpha, so a
+     * single pass reads too translucent. Layer it locally instead of changing
+     * global I8 alpha handling, which is shared by HUD and effect materials.
+     */
+    gSPDisplayList(POLY_OPA_DISP++, gNintendo64LogoDL);
+    gSPDisplayList(POLY_OPA_DISP++, gNintendo64LogoDL);
+    gSPDisplayList(POLY_OPA_DISP++, gNintendo64LogoDL);
+#endif
     Gfx_SetupDL_39Opa(this->state.gfxCtx);
+#if PLATFORM_PSP
+    ConsoleLogo_DrawPspWordmark(this);
+#else
     gDPPipeSync(POLY_OPA_DISP++);
     gDPSetCycleType(POLY_OPA_DISP++, G_CYC_2CYCLE);
     gDPSetRenderMode(POLY_OPA_DISP++, G_RM_PASS, G_RM_CLD_SURF2);
@@ -154,6 +272,7 @@ void ConsoleLogo_Draw(ConsoleLogoState* this) {
         gSPTextureRectangle(POLY_OPA_DISP++, 97 << 2, y << 2, 289 << 2, (y + 2) << 2, G_TX_RENDERTILE, 0, 0, 1 << 10,
                             1 << 10);
     }
+#endif
 
     Environment_FillScreen(this->state.gfxCtx, 0, 0, 0, (s16)this->coverAlpha, FILL_SCREEN_XLU);
 

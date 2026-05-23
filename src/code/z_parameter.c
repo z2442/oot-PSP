@@ -24,6 +24,10 @@
 #include "play_state.h"
 #include "player.h"
 #include "save.h"
+#if PLATFORM_PSP
+#include "oot_psp_asset_loader.h"
+#include "oot_psp_compat.h"
+#endif
 
 #include "assets/textures/parameter_static/parameter_static.h"
 #include "assets/textures/do_action_static/do_action_static.h"
@@ -1223,6 +1227,83 @@ Gfx* Gfx_TextureI8(Gfx* displayListHead, void* texture, s16 textureWidth, s16 te
 
     return displayListHead;
 }
+
+#if PLATFORM_PSP
+typedef struct InterfacePspTexture {
+    /* 0x00 */ const u8* data;
+    /* 0x04 */ s32 byteSwap;
+} InterfacePspTexture;
+
+static u8 sPspCounterDigitTextures[10][gCounterDigit0Tex_WIDTH * gCounterDigit0Tex_HEIGHT * 2] __attribute__((aligned(8)));
+static s32 sPspCounterDigitTexturesInitialized = false;
+
+static InterfacePspTexture Interface_GetPspTexture(void* texture) {
+    InterfacePspTexture source;
+    u32 loadedFlags;
+
+    source.data = texture;
+    source.byteSwap = false;
+
+    if (OotPsp_GetLoadedExternalAssetRangeFlags(source.data, 1, &loadedFlags)) {
+        source.byteSwap = (loadedFlags & OOT_PSP_EXTERNAL_ASSET_NATIVE) != 0;
+    } else if (!OotPsp_IsRuntimeByteRange(source.data, 1)) {
+        source.byteSwap = true;
+    }
+
+    return source;
+}
+
+static u8 Interface_ReadPspTextureByte(InterfacePspTexture texture, size_t offset) {
+    const u8* source = texture.data + offset;
+
+    if (texture.byteSwap) {
+        source = (const u8*)((uintptr_t)source ^ 7U);
+    }
+
+    return *source;
+}
+
+static void Interface_InitPspCounterDigitTextures(void) {
+    s32 digit;
+    s32 texel;
+
+    if (sPspCounterDigitTexturesInitialized) {
+        return;
+    }
+
+    for (digit = 0; digit < ARRAY_COUNT(sPspCounterDigitTextures); digit++) {
+        InterfacePspTexture source = Interface_GetPspTexture(COUNTER_DIGIT_TEXTURE(digit));
+        u8* dst = sPspCounterDigitTextures[digit];
+
+        for (texel = 0; texel < gCounterDigit0Tex_WIDTH * gCounterDigit0Tex_HEIGHT; texel++) {
+            *dst++ = 255;
+            *dst++ = Interface_ReadPspTextureByte(source, texel);
+        }
+    }
+
+    sPspCounterDigitTexturesInitialized = true;
+}
+
+static Gfx* Gfx_TextureCounterDigit(Gfx* displayListHead, s16 digit, s16 rectLeft, s16 rectTop, s16 rectWidth,
+                                    s16 rectHeight, u16 dsdx, u16 dtdy) {
+    Interface_InitPspCounterDigitTextures();
+
+    gDPLoadTextureBlock(displayListHead++, sPspCounterDigitTextures[digit], G_IM_FMT_IA, G_IM_SIZ_16b,
+                        gCounterDigit0Tex_WIDTH, gCounterDigit0Tex_HEIGHT, 0, G_TX_NOMIRROR | G_TX_WRAP,
+                        G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
+
+    gSPTextureRectangle(displayListHead++, rectLeft << 2, rectTop << 2, (rectLeft + rectWidth) << 2,
+                        (rectTop + rectHeight) << 2, G_TX_RENDERTILE, 0, 0, dsdx, dtdy);
+
+    return displayListHead;
+}
+#else
+static Gfx* Gfx_TextureCounterDigit(Gfx* displayListHead, s16 digit, s16 rectLeft, s16 rectTop, s16 rectWidth,
+                                    s16 rectHeight, u16 dsdx, u16 dtdy) {
+    return Gfx_TextureI8(displayListHead, COUNTER_DIGIT_TEXTURE(digit), gCounterDigit0Tex_WIDTH,
+                         gCounterDigit0Tex_HEIGHT, rectLeft, rectTop, rectWidth, rectHeight, dsdx, dtdy);
+}
+#endif
 
 void Inventory_SwapAgeEquipment(void) {
     s16 i;
@@ -3316,14 +3397,13 @@ void Interface_Draw(PlayState* play) {
                     svar3 = 42;
 
                     if (interfaceCtx->counterDigits[2] != 0) {
-                        OVERLAY_DISP = Gfx_TextureI8(
-                            OVERLAY_DISP, COUNTER_DIGIT_TEXTURE(interfaceCtx->counterDigits[2]), 8, 16, svar3, 190, 8,
-                            16, 1 << 10, 1 << 10);
+                        OVERLAY_DISP = Gfx_TextureCounterDigit(OVERLAY_DISP, interfaceCtx->counterDigits[2], svar3,
+                                                               190, 8, 16, 1 << 10, 1 << 10);
                         svar3 += 8;
                     }
 
-                    OVERLAY_DISP = Gfx_TextureI8(OVERLAY_DISP, COUNTER_DIGIT_TEXTURE(interfaceCtx->counterDigits[3]),
-                                                 8, 16, svar3, 190, 8, 16, 1 << 10, 1 << 10);
+                    OVERLAY_DISP = Gfx_TextureCounterDigit(OVERLAY_DISP, interfaceCtx->counterDigits[3], svar3, 190,
+                                                           8, 16, 1 << 10, 1 << 10);
                 }
                 break;
             default:
@@ -3365,8 +3445,8 @@ void Interface_Draw(PlayState* play) {
         svar4 = rupeeDigitsCount[CUR_UPG_VALUE(UPG_WALLET)];
 
         for (svar1 = 0, svar3 = 42; svar1 < svar4; svar1++, svar2++, svar3 += 8) {
-            OVERLAY_DISP = Gfx_TextureI8(OVERLAY_DISP, COUNTER_DIGIT_TEXTURE(interfaceCtx->counterDigits[svar2]), 8,
-                                         16, svar3, 206, 8, 16, 1 << 10, 1 << 10);
+            OVERLAY_DISP = Gfx_TextureCounterDigit(OVERLAY_DISP, interfaceCtx->counterDigits[svar2], svar3, 206, 8,
+                                                   16, 1 << 10, 1 << 10);
         }
 
         Magic_DrawMeter(play);
@@ -3585,9 +3665,9 @@ void Interface_Draw(PlayState* play) {
 
                 for (svar1 = svar2 = 0; svar1 < 4; svar1++) {
                     if (sHBAScoreDigits[svar1] != 0 || (svar2 != 0) || (svar1 >= 3)) {
-                        OVERLAY_DISP = Gfx_TextureI8(OVERLAY_DISP, COUNTER_DIGIT_TEXTURE(sHBAScoreDigits[svar1]), 8,
-                                                     16, svar5, (ZREG(15) - 2), sDigitWidths[0], VREG(42),
-                                                     VREG(43) << 1, VREG(43) << 1);
+                        OVERLAY_DISP =
+                            Gfx_TextureCounterDigit(OVERLAY_DISP, sHBAScoreDigits[svar1], svar5, (ZREG(15) - 2),
+                                                    sDigitWidths[0], VREG(42), VREG(43) << 1, VREG(43) << 1);
                         svar5 += 9;
                         svar2++;
                     }
@@ -4039,11 +4119,11 @@ void Interface_Draw(PlayState* play) {
                 }
 
                 for (svar1 = 0; svar1 < ARRAY_COUNT(sTimerDigits); svar1++) {
-                    OVERLAY_DISP =
-                        Gfx_TextureI8(OVERLAY_DISP, COUNTER_DIGIT_TEXTURE(sTimerDigits[svar1]), 8, 16,
-                                      ((void)0, gSaveContext.timerX[timerId]) + timerDigitLeftPos[svar1],
-                                      ((void)0, gSaveContext.timerY[timerId]), sDigitWidths[svar1], VREG(42),
-                                      VREG(43) << 1, VREG(43) << 1);
+                    OVERLAY_DISP = Gfx_TextureCounterDigit(
+                        OVERLAY_DISP, sTimerDigits[svar1],
+                        ((void)0, gSaveContext.timerX[timerId]) + timerDigitLeftPos[svar1],
+                        ((void)0, gSaveContext.timerY[timerId]), sDigitWidths[svar1], VREG(42), VREG(43) << 1,
+                        VREG(43) << 1);
                 }
             }
         }

@@ -1689,6 +1689,13 @@ static inline void gfx_mark_tri_pipeline_dirty(void) {
     rendering_state.tri_pipeline_dirty = true;
 }
 
+static inline bool gfx_blend_cycle_uses_framebuffer(uint32_t other_mode_l, uint32_t m2a_shift, uint32_t m2b_shift) {
+    uint32_t m2a = (other_mode_l >> m2a_shift) & 3;
+    uint32_t m2b = (other_mode_l >> m2b_shift) & 3;
+
+    return (m2a == G_BL_CLR_MEM) && ((m2b == G_BL_1MA) || (m2b == G_BL_1));
+}
+
 static void gfx_prepare_tri_pipeline_state(void) {
     if (!rendering_state.tri_pipeline_dirty) {
         return;
@@ -1731,15 +1738,14 @@ static void gfx_prepare_tri_pipeline_state(void) {
 
     uint32_t cc_id = rdp.combine_mode;
 
-    bool use_alpha = (rdp.other_mode_l & (G_BL_A_MEM << 18)) == 0;
+    uint32_t alpha_compare = rdp.other_mode_l & (3 << G_MDSFT_ALPHACOMPARE);
+    bool alpha_blend = (rdp.other_mode_l & FORCE_BL) &&
+                       (gfx_blend_cycle_uses_framebuffer(rdp.other_mode_l, 22, 18) ||
+                        gfx_blend_cycle_uses_framebuffer(rdp.other_mode_l, 20, 16));
     bool use_fog = (rdp.other_mode_l >> 30) == G_BL_CLR_FOG;
     bool texture_edge = (rdp.other_mode_l & CVG_X_ALPHA) == CVG_X_ALPHA;
-    bool use_noise = (rdp.other_mode_l & G_AC_DITHER) == G_AC_DITHER;
-    bool alpha_blend = use_alpha;
-
-    if (texture_edge) {
-        use_alpha = true;
-    }
+    bool use_noise = alpha_compare == G_AC_DITHER;
+    bool use_alpha = alpha_blend || texture_edge || (alpha_compare != G_AC_NONE);
 
     if (use_alpha) cc_id |= SHADER_OPT_ALPHA;
     if (use_fog) cc_id |= SHADER_OPT_FOG;
