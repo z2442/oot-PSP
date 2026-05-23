@@ -2666,7 +2666,12 @@ static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t t
     }
     
     if (tile == G_TX_LOADTILE) {
-        rdp.texture_to_load.tile_number = tmem / 256;
+        /*
+         * Two-texture display lists often place tile 1 at TMEM 0x80 for
+         * smaller tiles and 0x100 for larger blocks. The PSP backend only
+         * tracks two texture slots, so treat any non-zero TMEM base as slot 1.
+         */
+        rdp.texture_to_load.tile_number = tmem != 0;
     }
 }
 
