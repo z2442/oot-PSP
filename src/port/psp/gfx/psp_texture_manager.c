@@ -250,6 +250,11 @@ void texman_upload_swizzle(int width, int height, unsigned int type, const void 
         return;
     }
 
+    if ((getTexWidthBytes(width, type) < 16) || (height < 8)) {
+        texman_upload(width, height, type, buffer);
+        return;
+    }
+
     current = texman_reserve_memory(width, height, type);
     sceKernelDcacheWritebackRange(buffer, size);
     current->width = width;

@@ -2812,6 +2812,15 @@ static inline uint32_t color_comb(uint32_t a, uint32_t b, uint32_t c, uint32_t d
            (color_comb_component(d) << 9);
 }
 
+static bool gfx_cc_is_two_cycle_texture_tint(uint32_t a0, uint32_t b0, uint32_t c0, uint32_t d0, uint32_t a1,
+                                             uint32_t b1, uint32_t c1, uint32_t d1) {
+    return ((a0 == G_CCMUX_TEXEL0) || (a0 == G_CCMUX_TEXEL1)) &&
+           ((b0 == G_CCMUX_PRIMITIVE) || (b0 == G_CCMUX_TEXEL0)) &&
+           ((c0 == G_CCMUX_ENV_ALPHA) || (c0 == G_CCMUX_PRIM_LOD_FRAC)) && (d0 == G_CCMUX_TEXEL0) &&
+           (a1 == G_CCMUX_PRIMITIVE) && (b1 == G_CCMUX_ENVIRONMENT) && (c1 == G_CCMUX_COMBINED) &&
+           (d1 == G_CCMUX_ENVIRONMENT);
+}
+
 static void gfx_dp_set_combine_mode(uint32_t rgb, uint32_t alpha, bool color_mul_env, bool color_mul_prim) {
     rdp.combine_mode = rgb | (alpha << 12);
     rdp.combine_color_mul_env = color_mul_env;
@@ -3707,21 +3716,39 @@ static void gfx_run_dl(Gfx* cmd) {
                 break;
             case G_SETCOMBINE:
             {
+                uint32_t rgbA0 = C0(20, 4);
+                uint32_t rgbB0 = C1(28, 4);
+                uint32_t rgbC0 = C0(15, 5);
+                uint32_t rgbD0 = C1(15, 3);
+                uint32_t alphaA0 = C0(12, 3);
+                uint32_t alphaB0 = C1(12, 3);
+                uint32_t alphaC0 = C0(9, 3);
+                uint32_t alphaD0 = C1(9, 3);
+                uint32_t rgbA1 = C0(5, 4);
+                uint32_t rgbB1 = C1(24, 4);
+                uint32_t rgbC1 = C0(0, 5);
+                uint32_t rgbD1 = C1(6, 3);
                 bool colorMulTexelShade =
-                    (C0(20, 4) == G_CCMUX_TEXEL0) && (C1(28, 4) == (G_CCMUX_0 & 0xF)) &&
-                    (C0(15, 5) == G_CCMUX_SHADE) && (C1(15, 3) == (G_CCMUX_0 & 0x7));
+                    (rgbA0 == G_CCMUX_TEXEL0) && (rgbB0 == (G_CCMUX_0 & 0xF)) &&
+                    (rgbC0 == G_CCMUX_SHADE) && (rgbD0 == (G_CCMUX_0 & 0x7));
                 bool colorMulEnv =
                     colorMulTexelShade &&
-                    (C0(5, 4) == G_CCMUX_ENVIRONMENT) && (C1(24, 4) == (G_CCMUX_0 & 0xF)) &&
-                    (C0(0, 5) == G_CCMUX_COMBINED) && (C1(6, 3) == (G_CCMUX_0 & 0x7));
+                    (rgbA1 == G_CCMUX_ENVIRONMENT) && (rgbB1 == (G_CCMUX_0 & 0xF)) &&
+                    (rgbC1 == G_CCMUX_COMBINED) && (rgbD1 == (G_CCMUX_0 & 0x7));
                 bool colorMulPrim =
                     colorMulTexelShade &&
-                    (C0(5, 4) == G_CCMUX_COMBINED) && (C1(24, 4) == (G_CCMUX_0 & 0xF)) &&
-                    (C0(0, 5) == G_CCMUX_PRIMITIVE) && (C1(6, 3) == (G_CCMUX_0 & 0x7));
+                    (rgbA1 == G_CCMUX_COMBINED) && (rgbB1 == (G_CCMUX_0 & 0xF)) &&
+                    (rgbC1 == G_CCMUX_PRIMITIVE) && (rgbD1 == (G_CCMUX_0 & 0x7));
+                uint32_t rgbComb = color_comb(rgbA0, rgbB0, rgbC0, rgbD0);
+                uint32_t alphaComb = color_comb(alphaA0, alphaB0, alphaC0, alphaD0);
 
-                gfx_dp_set_combine_mode(color_comb(C0(20, 4), C1(28, 4), C0(15, 5), C1(15, 3)),
-                                        color_comb(C0(12, 3), C1(12, 3), C0(9, 3), C1(9, 3)),
-                                        colorMulEnv, colorMulPrim);
+#if defined(TARGET_PSP)
+                if (gfx_cc_is_two_cycle_texture_tint(rgbA0, rgbB0, rgbC0, rgbD0, rgbA1, rgbB1, rgbC1, rgbD1)) {
+                    rgbComb = color_comb(G_CCMUX_TEXEL0, G_CCMUX_0, G_CCMUX_PRIMITIVE, G_CCMUX_0);
+                }
+#endif
+
+                gfx_dp_set_combine_mode(rgbComb, alphaComb, colorMulEnv, colorMulPrim);
                     /*color_comb(C0(5, 4), C1(24, 4), C0(0, 5), C1(6, 3)),
                     color_comb(C1(21, 3), C1(3, 3), C1(18, 3), C1(0, 3)));*/
                 break;

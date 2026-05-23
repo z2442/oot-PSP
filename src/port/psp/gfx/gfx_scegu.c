@@ -783,7 +783,6 @@ void gfx_scegu_on_resize(void) {
 
 static void gfx_scegu_end_frame(void) {
     sceGuFinish();
-    sceGuSync(0, 0);
     sceDisplayWaitVblankStart();
     sceGuSwapBuffers();
 }
