@@ -2433,8 +2433,23 @@ static void gfx_sp_tri1_2d(uint8_t vtx1_idx, uint8_t vtx2_idx, UNUSED uint8_t vt
         tri_buf[tri_num_vert].z = 0;
         
         if (use_texture) {
-            short u = (v_arr[i]->u - rdp.texture_tile.uls * 8)/ 32;
-            short v = (v_arr[i]->v - rdp.texture_tile.ult * 8) / 32;
+            int32_t u = (v_arr[i]->u - rdp.texture_tile.uls * 8) / 32;
+            int32_t v = (v_arr[i]->v - rdp.texture_tile.ult * 8) / 32;
+#if defined(TARGET_PSP)
+            const int active_texture = comb->active_texture;
+            const struct TextureHashmapNode *texture_node =
+                active_texture >= 0 ? rendering_state.textures[active_texture] : NULL;
+
+            if (texture_node != NULL) {
+                if (texture_node->mirror_s) {
+                    u += texture_node->upload_width / 2;
+                }
+
+                if (texture_node->mirror_t) {
+                    v += texture_node->upload_height / 2;
+                }
+            }
+#endif
             /*
             if ((rdp.other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT) {
                 // Linear filter adds 0.5f to the coordinates
