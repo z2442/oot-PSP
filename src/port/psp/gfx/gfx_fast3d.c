@@ -634,8 +634,20 @@ static uint32_t gfx_next_power_of_two(uint32_t value) {
     return result;
 }
 
+static size_t gfx_gu_texture_bytes_per_pixel(unsigned int type) {
+    if (type == GU_PSM_T8) {
+        return 1;
+    }
+
+    if (type == GU_PSM_5551) {
+        return 2;
+    }
+
+    return 4;
+}
+
 static const uint8_t *gfx_prepare_psp_texture_for_upload(const uint8_t *src, uint32_t width, uint32_t height, unsigned int type, bool mirror_s, bool mirror_t, uint32_t *upload_width, uint32_t *upload_height, bool *applied_mirror_s, bool *applied_mirror_t) {
-    const size_t bytes_per_pixel = type == GU_PSM_5551 ? 2 : 4;
+    const size_t bytes_per_pixel = gfx_gu_texture_bytes_per_pixel(type);
     const uint32_t pot_width = gfx_next_power_of_two(width);
     const uint32_t pot_height = gfx_next_power_of_two(height);
     bool use_mirror_s = mirror_s;
@@ -1141,7 +1153,11 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
     size_t hash = (uintptr_t)orig_addr;
     struct TextureHashmapNode **node;
 #if defined(TARGET_PSP)
-    const uint32_t source_key = OotPsp_GetExternalAssetRangeSerial(orig_addr, gfx_texture_source_span_size(tile));
+    const uint32_t source_span_size = gfx_texture_source_span_size(tile);
+    const uint32_t source_key = OotPsp_GetExternalAssetRangeSerial(orig_addr, source_span_size);
+    const bool dynamic_source = (source_key == 0) && (orig_addr != sInvalidTextureBuf) &&
+                                (orig_addr != sInvalidPaletteBuf) &&
+                                OotPsp_IsRuntimeByteRange(orig_addr, source_span_size);
     const bool uses_palette = fmt == G_IM_FMT_CI;
     const uint32_t palette_size = siz == G_IM_SIZ_4b ? GFX_CI4_TLUT_SIZE_BYTES : GFX_TLUT_SIZE_BYTES;
     const uint8_t* palette_addr = uses_palette ? rdp.palette : NULL;
@@ -1153,6 +1169,8 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
     hash ^= (size_t)source_key * 2654435761U;
     hash ^= (size_t)palette_addr >> 4;
     hash ^= (size_t)palette_key * 2246822519U;
+#else
+    const bool dynamic_source = false;
 #endif
     hash = (hash >> 5) & 0x3ff;
     node = &gfx_texture_cache.hashmap[hash];
@@ -1173,7 +1191,7 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
             gfx_rapi->set_sampler_parameters(tile, (*node)->linear_filter, (*node)->cms, (*node)->cmt,
                                              (*node)->masks, (*node)->maskt);
             *n = *node;
-            return true;
+            return !dynamic_source;
         }
         node = &(*node)->next;
     }
@@ -1495,13 +1513,34 @@ static void import_texture_i4(int tile) {
 }
 
 static void import_texture_i8(int tile) {
+#if defined(TARGET_PSP)
+    uint8_t i8_buf[4096] __attribute__ ((aligned(4)));
+#else
     uint8_t rgba32_buf[16384];
+#endif
     uint32_t width = gfx_texture_width_from_tile();
     uint32_t height = gfx_texture_height_from_tile();
     uint32_t rowBytes = gfx_texture_row_bytes(width, G_IM_SIZ_8b);
     GfxTextureSwapMode swapMode =
         gfx_texture_source_swap_mode(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
 
+#if defined(TARGET_PSP)
+    if ((swapMode == GFX_TEXTURE_SWAP_NONE) &&
+        (rdp.loaded_texture[tile].row_stride_bytes == 0 || rdp.loaded_texture[tile].row_stride_bytes == rowBytes)) {
+        gfx_upload_texture(tile, rdp.loaded_texture[tile].addr, width, height, GU_PSM_T8);
+        return;
+    }
+
+    for (uint32_t y = 0; y < height; y++) {
+        const uint8_t* row = gfx_texture_row(tile, y, rowBytes);
+
+        for (uint32_t x = 0; x < width; x++) {
+            i8_buf[y * width + x] = gfx_read_texture_source_u8(row, x, swapMode);
+        }
+    }
+
+    gfx_upload_texture(tile, i8_buf, width, height, GU_PSM_T8);
+#else
     for (uint32_t y = 0; y < height; y++) {
         const uint8_t* row = gfx_texture_row(tile, y, rowBytes);
 
@@ -1519,6 +1558,7 @@ static void import_texture_i8(int tile) {
     }
 
     gfx_upload_texture(tile, rgba32_buf, width, height, GU_PSM_8888);
+#endif
 }
 
 

@@ -18,6 +18,7 @@
 #include "printf.h"
 #include "regs.h"
 #include "sfx.h"
+#include "segmented_address.h"
 #include "translation.h"
 #include "versions.h"
 #include "audio.h"
@@ -25,6 +26,9 @@
 #include "play_state.h"
 #include "save.h"
 #include "ss_sram.h"
+#if PLATFORM_PSP
+#include "oot_psp_asset_loader.h"
+#endif
 
 #include "assets/objects/object_mag/object_mag.h"
 
@@ -431,6 +435,140 @@ BAD_RETURN(s32) EnMag_DrawEffectTextures(Gfx** gfxP, void* maskTex, void* effect
     *gfxP = gfx;
 }
 
+#if PLATFORM_PSP
+#define TITLE_EFFECT_PSP_SAMPLE_SCALE 1
+
+typedef struct EnMagPspTexture {
+    /* 0x00 */ const u8* data;
+    /* 0x04 */ s32 byteSwap;
+} EnMagPspTexture;
+
+static u8* EnMag_GetObjectTexture(PlayState* play, EnMag* this, void* texture) {
+    uintptr_t addr = (uintptr_t)texture;
+
+    if (SEGMENT_NUMBER(addr) == 0x06) {
+        return (u8*)play->objectCtx.slots[this->actor.objectSlot].segment + SEGMENT_OFFSET(addr);
+    }
+
+    return (u8*)SEGMENTED_TO_VIRTUAL(texture);
+}
+
+static EnMagPspTexture EnMag_GetPspObjectTexture(PlayState* play, EnMag* this, void* texture) {
+    EnMagPspTexture source;
+    u32 loadedFlags;
+
+    source.data = EnMag_GetObjectTexture(play, this, texture);
+    source.byteSwap = false;
+
+    if (OotPsp_GetLoadedExternalAssetRangeFlags(source.data, 1, &loadedFlags)) {
+        source.byteSwap = (loadedFlags & OOT_PSP_EXTERNAL_ASSET_NATIVE) != 0;
+    } else if (!OotPsp_IsRuntimeByteRange(source.data, 1)) {
+        source.byteSwap = true;
+    }
+
+    return source;
+}
+
+static u8 EnMag_ReadPspTextureByte(EnMagPspTexture texture, size_t offset) {
+    const u8* source = texture.data + offset;
+
+    if (texture.byteSwap) {
+        source = (const u8*)((uintptr_t)source ^ 7U);
+    }
+
+    return *source;
+}
+
+static u8 EnMag_ReadI4Texel(EnMagPspTexture texture, s16 width, s16 x, s16 y) {
+    u8 byte = EnMag_ReadPspTextureByte(texture, (y * width + x) >> 1);
+
+    if (x & 1) {
+        return byte & 0xF;
+    }
+
+    return byte >> 4;
+}
+
+static u8 EnMag_ReadI8TexelLinearY(EnMagPspTexture texture, s16 width, s16 height, s16 x, s16 yQ2) {
+    s16 y0 = (yQ2 >> G_TEXTURE_IMAGE_FRAC) % height;
+    s16 y1 = (y0 + 1) % height;
+    s16 frac = yQ2 & ((1 << G_TEXTURE_IMAGE_FRAC) - 1);
+    u8 texel0 = EnMag_ReadPspTextureByte(texture, y0 * width + x);
+    u8 texel1 = EnMag_ReadPspTextureByte(texture, y1 * width + x);
+
+    return ((texel0 * ((1 << G_TEXTURE_IMAGE_FRAC) - frac)) + (texel1 * frac) + 2) >> G_TEXTURE_IMAGE_FRAC;
+}
+
+static u8 EnMag_ReadDownsampledMaskTexel(EnMagPspTexture texture, s16 width, s16 x, s16 y) {
+    s16 srcX = x * TITLE_EFFECT_PSP_SAMPLE_SCALE;
+    s16 srcY = y * TITLE_EFFECT_PSP_SAMPLE_SCALE;
+
+#if TITLE_EFFECT_PSP_SAMPLE_SCALE == 1
+    return EnMag_ReadI4Texel(texture, width, srcX, srcY);
+#else
+    u16 sum = EnMag_ReadI4Texel(texture, width, srcX, srcY) +
+              EnMag_ReadI4Texel(texture, width, srcX + 1, srcY) +
+              EnMag_ReadI4Texel(texture, width, srcX, srcY + 1) +
+              EnMag_ReadI4Texel(texture, width, srcX + 1, srcY + 1);
+
+    return (sum + 2) >> 2;
+#endif
+}
+
+static void EnMag_BuildPspEffectTexture(u8* dst, EnMagPspTexture maskTex, EnMagPspTexture effectTex, s16 maskWidth,
+                                        s16 maskHeight, s16 effectWidth, s16 effectHeight, s16 textureWidth,
+                                        s16 textureHeight, u16 shifts, u16 shiftt, EnMag* this) {
+    s16 x;
+    s16 y;
+    s16 scrollQ2 = this->effectScroll & 0x7F;
+
+    for (y = 0; y < textureHeight; y++) {
+        for (x = 0; x < textureWidth; x++) {
+            u8 mask = EnMag_ReadDownsampledMaskTexel(maskTex, maskWidth, x, y);
+            s16 srcX = (x * TITLE_EFFECT_PSP_SAMPLE_SCALE) + (TITLE_EFFECT_PSP_SAMPLE_SCALE >> 1);
+            s16 srcY = (y * TITLE_EFFECT_PSP_SAMPLE_SCALE) + (TITLE_EFFECT_PSP_SAMPLE_SCALE >> 1);
+            s16 effectX = shifts != 0 ? (srcX >> shifts) : srcX;
+            s16 effectYQ2 = shiftt != 0 ? ((srcY << G_TEXTURE_IMAGE_FRAC) >> shiftt) + scrollQ2
+                                        : ((srcY << G_TEXTURE_IMAGE_FRAC) + scrollQ2);
+            u8 flame = EnMag_ReadI8TexelLinearY(effectTex, effectWidth, effectHeight, effectX % effectWidth,
+                                                effectYQ2);
+
+            *dst++ = (flame * mask + 7) / 15;
+        }
+    }
+}
+
+static void EnMag_DrawPspEffectTextures(Gfx** gfxP, PlayState* play, void* maskTex, void* effectTex, s16 maskWidth,
+                                        s16 maskHeight, s16 effectWidth, s16 effectHeight, s16 rectLeft, s16 rectTop,
+                                        s16 rectWidth, s16 rectHeight, u16 dsdx, u16 dtdy, u16 shifts, u16 shiftt,
+                                        EnMag* this) {
+    Gfx* gfx = *gfxP;
+    s16 textureWidth = maskWidth / TITLE_EFFECT_PSP_SAMPLE_SCALE;
+    s16 textureHeight = maskHeight / TITLE_EFFECT_PSP_SAMPLE_SCALE;
+    u8* texture = GRAPH_ALLOC(play->state.gfxCtx, textureWidth * textureHeight);
+
+    if (texture == NULL) {
+        *gfxP = gfx;
+        return;
+    }
+
+    EnMag_BuildPspEffectTexture(texture, EnMag_GetPspObjectTexture(play, this, maskTex),
+                                EnMag_GetPspObjectTexture(play, this, effectTex), maskWidth, maskHeight, effectWidth,
+                                effectHeight, textureWidth, textureHeight, shifts, shiftt, this);
+
+    gDPLoadTextureBlock(gfx++, texture, G_IM_FMT_I, G_IM_SIZ_8b, textureWidth, textureHeight, 0,
+                        G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD,
+                        G_TX_NOLOD);
+
+    gSPTextureRectangle(gfx++, rectLeft << 2, rectTop << 2, (rectLeft + rectWidth) << 2,
+                        (rectTop + rectHeight) << 2, G_TX_RENDERTILE, 0, 0,
+                        (u16)(((u32)dsdx * textureWidth) / rectWidth),
+                        (u16)(((u32)dtdy * textureHeight) / rectHeight));
+
+    *gfxP = gfx;
+}
+#endif
+
 void EnMag_DrawImageRGBA32(Gfx** gfxP, s16 centerX, s16 centerY, u8* source, u32 width, u32 height) {
     Gfx* gfx = *gfxP;
     u8* curTexture;
@@ -599,11 +737,20 @@ void EnMag_DrawInner(Actor* thisx, PlayState* play, Gfx** gfxP) {
     gDPSetEnvColor(gfx++, (s16)this->effectEnvColor[0], (s16)this->effectEnvColor[1], (s16)this->effectEnvColor[2],
                    255);
 
+#if PLATFORM_PSP
+    gDPSetCombineMode(gfx++, G_CC_MODULATEIA_PRIM, G_CC_MODULATEIA_PRIM);
+#endif
+
     if ((s16)this->effectPrimLodFrac != 0) {
         for (k = 0, i = 0, rectTop = 0; i < 3; i++) {
             for (j = 0, rectLeft = 64 + LOGO_X_SHIFT; j < 3; j++, k++, rectLeft += 64) {
+#if PLATFORM_PSP
+                EnMag_DrawPspEffectTextures(&gfx, play, effectMaskTextures[k], gTitleFlameEffectTex, 64, 64, 32, 32,
+                                            rectLeft, rectTop, 64, 64, 1024, 1024, 1, 1, this);
+#else
                 EnMag_DrawEffectTextures(&gfx, effectMaskTextures[k], gTitleFlameEffectTex, 64, 64, 32, 32, rectLeft,
                                          rectTop, 64, 64, 1024, 1024, 1, 1, k, this);
+#endif
             }
             rectTop += 64;
         }
