@@ -250,9 +250,11 @@ class ElfObject:
 
 
 class NativeAssetContext:
-    def __init__(self, version: str, entries: list[dict[str, object]]) -> None:
+    def __init__(self, version: str, entries: list[dict[str, object]], build_root: Path | None = None) -> None:
         self.version = version
-        self.build_root = ROOT / "build" / "psp-port" / version
+        if build_root is None:
+            build_root = Path("build") / "psp-port" / version
+        self.build_root = build_root if build_root.is_absolute() else ROOT / build_root
         self.entries_by_name = {str(entry["name"]): entry for entry in entries}
         self.segment_ids: dict[str, int] = {}
         self.xml_symbol_offsets: dict[str, dict[str, int]] = {}
@@ -1252,9 +1254,9 @@ def emit_table(
     output.write_text("\n".join(lines))
 
 
-def emit(version: str, asm_output: Path, table_output: Path, data_dir: Path) -> None:
+def emit(version: str, asm_output: Path, table_output: Path, data_dir: Path, build_root: Path | None = None) -> None:
     entries = build_entries(version)
-    native_assets = NativeAssetContext(version, entries)
+    native_assets = NativeAssetContext(version, entries, build_root)
     annotate_asset_flags(entries, native_assets)
     message_entries = build_message_entries(version, entries)
     emit_asm(asm_output, entries, native_assets)
@@ -1268,8 +1270,9 @@ def main() -> None:
     parser.add_argument("asm_output", type=Path)
     parser.add_argument("table_output", type=Path)
     parser.add_argument("data_dir", type=Path)
+    parser.add_argument("--build-root", type=Path, default=None)
     args = parser.parse_args()
-    emit(args.version, args.asm_output, args.table_output, args.data_dir)
+    emit(args.version, args.asm_output, args.table_output, args.data_dir, args.build_root)
 
 
 if __name__ == "__main__":

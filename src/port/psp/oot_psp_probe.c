@@ -1,5 +1,7 @@
 #include <pspfpu.h>
 #include <pspkernel.h>
+#include <pspthreadman.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "attributes.h"
@@ -14,6 +16,9 @@
 #include "setup_state.h"
 #include "title_setup_state.h"
 
+#ifdef OOT_PSP_GPROF
+#include <pspprof.h>
+#endif
 
 PSP_MODULE_INFO("OOT PSP Port", 0, 1, 0);
 PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER | PSP_THREAD_ATTR_VFPU);
@@ -44,9 +49,72 @@ static size_t OotPspStateSize(GameStateFunc init) {
     return sizeof(GameState);
 }
 
+#ifdef OOT_PSP_GPROF
+static int sOotPspGprofRunning;
+static int sOotPspGprofDumped;
+static char sOotPspGprofOutputPath[384];
+
+__attribute__((__no_instrument_function__, __no_profile_instrument_function__))
+static void OotPspProfiler_UpdateOutputPath(void) {
+    strcpy(sOotPspGprofOutputPath, "gmon.out");
+}
+
+__attribute__((__no_instrument_function__, __no_profile_instrument_function__))
+static void OotPspProfiler_Start(void) {
+    OotPspProfiler_UpdateOutputPath();
+    gprof_stop(NULL, 0);
+    gprof_start();
+    sOotPspGprofRunning = true;
+    sOotPspGprofDumped = false;
+}
+
+__attribute__((__no_instrument_function__, __no_profile_instrument_function__))
+static void OotPspProfiler_Stop(int shouldDump) {
+    if (!sOotPspGprofRunning || sOotPspGprofDumped) {
+        return;
+    }
+
+    gprof_stop(shouldDump ? sOotPspGprofOutputPath : NULL, shouldDump != 0);
+    sOotPspGprofRunning = false;
+    sOotPspGprofDumped = true;
+}
+#else
+static void OotPspProfiler_Start(void) {
+}
+
+static void OotPspProfiler_Stop(UNUSED int shouldDump) {
+}
+#endif
+
+static int OotPspExitCallback(UNUSED int arg1, UNUSED int arg2, UNUSED void* common) {
+    OotPspProfiler_Stop(true);
+    sceKernelExitGame();
+    return 0;
+}
+
+static int OotPspCallbackThread(UNUSED SceSize args, UNUSED void* argp) {
+    int callbackId = sceKernelCreateCallback("OOT PSP Exit Callback", OotPspExitCallback, NULL);
+
+    if (callbackId >= 0) {
+        sceKernelRegisterExitCallback(callbackId);
+        sceKernelSleepThreadCB();
+    }
+
+    return 0;
+}
+
+static void OotPspSetupCallbacks(void) {
+    int threadId = sceKernelCreateThread("OOT PSP Callback Thread", OotPspCallbackThread, 0x11, 0x1000, 0, NULL);
+
+    if (threadId >= 0) {
+        sceKernelStartThread(threadId, 0, NULL);
+    }
+}
+
 int main(int argc, char** argv) {
 
     pspFpuSetEnable(0);
+    OotPspSetupCallbacks();
 
     GraphicsContext gfxCtx;
     GameState* gameState;
@@ -59,6 +127,7 @@ int main(int argc, char** argv) {
     OotPsp_AssetInit(((argc > 0) && (argv != NULL)) ? argv[0] : NULL);
     OotPspGame_Init();
     Graph_Init(&gfxCtx);
+    OotPspProfiler_Start();
 
     while (nextInit != NULL) {
         gameState = SYSTEM_ARENA_MALLOC(nextSize, __FILE__, __LINE__);
@@ -73,7 +142,7 @@ int main(int argc, char** argv) {
         while (GameState_IsRunning(gameState)) {
             Graph_Update(&gfxCtx, gameState);
 
-            if (CHECK_BTN_ALL(gameState->input[0].cur.button, BTN_START | BTN_Z)) {
+            if (CHECK_BTN_ALL(gameState->input[0].cur.button, BTN_START | BTN_L)) {
                 gameState->running = false;
                 nextInit = NULL;
                 break;
@@ -94,6 +163,7 @@ int main(int argc, char** argv) {
 
     }
 
+    OotPspProfiler_Stop(true);
     Graph_Destroy(&gfxCtx);
     sceKernelExitGame();
     return 0;
