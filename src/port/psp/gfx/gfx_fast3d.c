@@ -273,7 +273,7 @@ static inline bool gfx_addr_is_native(uintptr_t addr) {
     return (addr >= PSP_NATIVE_ADDR_START) && (addr < PSP_NATIVE_ADDR_END);
 }
 
-static bool gfx_native_range_contains(uintptr_t value, size_t size) {
+static inline bool gfx_native_range_contains(uintptr_t value, size_t size) {
     uintptr_t end;
 
     if (size == 0) {
@@ -288,25 +288,37 @@ static bool gfx_native_range_contains(uintptr_t value, size_t size) {
     return (value >= PSP_NATIVE_ADDR_START) && (end <= PSP_NATIVE_ADDR_END);
 }
 
-static uintptr_t gfx_bswap32(uintptr_t value) {
+static inline uintptr_t gfx_bswap32(uintptr_t value) {
     uint32_t v = (uint32_t)value;
 
     return ((v & 0x000000FFU) << 24) | ((v & 0x0000FF00U) << 8) | ((v & 0x00FF0000U) >> 8) |
            ((v & 0xFF000000U) >> 24);
 }
 
-static bool gfx_normalize_native_range(uintptr_t value, size_t size, uintptr_t* normalized) {
-    uintptr_t candidates[4];
-    bool allowByteswap = value >= 0x00010000U;
+static inline bool gfx_normalize_native_range(uintptr_t value, size_t size, uintptr_t* normalized) {
+    uintptr_t candidate;
 
-    candidates[0] = value;
-    candidates[1] = value & 0x0FFFFFFFU;
-    candidates[2] = allowByteswap ? gfx_bswap32(value) : 0;
-    candidates[3] = candidates[2] & 0x0FFFFFFFU;
+    if (gfx_native_range_contains(value, size)) {
+        *normalized = value;
+        return true;
+    }
 
-    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
-        if (gfx_native_range_contains(candidates[i], size)) {
-            *normalized = candidates[i];
+    candidate = value & 0x0FFFFFFFU;
+    if ((candidate != value) && gfx_native_range_contains(candidate, size)) {
+        *normalized = candidate;
+        return true;
+    }
+
+    if (value >= 0x00010000U) {
+        candidate = gfx_bswap32(value);
+        if (gfx_native_range_contains(candidate, size)) {
+            *normalized = candidate;
+            return true;
+        }
+
+        candidate &= 0x0FFFFFFFU;
+        if (gfx_native_range_contains(candidate, size)) {
+            *normalized = candidate;
             return true;
         }
     }
@@ -314,8 +326,35 @@ static bool gfx_normalize_native_range(uintptr_t value, size_t size, uintptr_t* 
     return false;
 }
 
-static bool gfx_normalize_native_addr(uintptr_t value, uintptr_t* normalized) {
-    return gfx_normalize_native_range(value, 1, normalized);
+static inline bool gfx_normalize_native_addr(uintptr_t value, uintptr_t* normalized) {
+    uintptr_t candidate;
+
+    if (gfx_addr_is_native(value)) {
+        *normalized = value;
+        return true;
+    }
+
+    candidate = value & 0x0FFFFFFFU;
+    if ((candidate != value) && gfx_addr_is_native(candidate)) {
+        *normalized = candidate;
+        return true;
+    }
+
+    if (value >= 0x00010000U) {
+        candidate = gfx_bswap32(value);
+        if (gfx_addr_is_native(candidate)) {
+            *normalized = candidate;
+            return true;
+        }
+
+        candidate &= 0x0FFFFFFFU;
+        if (gfx_addr_is_native(candidate)) {
+            *normalized = candidate;
+            return true;
+        }
+    }
+
+    return false;
 }
 
 static bool gfx_range_contains(uintptr_t value, size_t size, uintptr_t rangeStart, uintptr_t rangeEnd) {
@@ -571,7 +610,6 @@ static GfxTextureSwapMode gfx_texture_source_swap_mode(const uint8_t* addr, uint
 static uint8_t gfx_read_texture_source_u8(const uint8_t* addr, uint32_t offset, GfxTextureSwapMode swapMode) {
 #if defined(TARGET_PSP)
     uintptr_t source = (uintptr_t)addr + offset;
-    uintptr_t normalized;
 
     if (swapMode == GFX_TEXTURE_SWAP_MAPPED) {
         const void* mapped;
@@ -585,11 +623,7 @@ static uint8_t gfx_read_texture_source_u8(const uint8_t* addr, uint32_t offset, 
         source ^= 7U;
     }
 
-    if (!gfx_normalize_native_addr(source, &normalized)) {
-        return 0xff;
-    }
-
-    return *(const uint8_t*)normalized;
+    return *(const uint8_t*)source;
 #else
     _UNUSED(swapMode);
 
@@ -1137,6 +1171,9 @@ extern void texman_upload(int width, int height, unsigned int type, const void* 
 extern int texman_vram_space_available(unsigned int size);
 extern int texman_texture_slot_available(void);
 
+static uint32_t gfx_texture_import_width(int tile);
+static uint32_t gfx_texture_import_height(int tile);
+
 static void gfx_texture_cache_clear(void) {
     gfx_flush();
     texman_clear();
@@ -1174,8 +1211,8 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
 #endif
     hash = (hash >> 5) & 0x3ff;
     node = &gfx_texture_cache.hashmap[hash];
-    const uint16_t width = (rdp.texture_tile.lrs - rdp.texture_tile.uls + 4) >> G_TEXTURE_IMAGE_FRAC;
-    const uint16_t height = (rdp.texture_tile.lrt - rdp.texture_tile.ult + 4) >> G_TEXTURE_IMAGE_FRAC;
+    const uint16_t width = gfx_texture_import_width(tile);
+    const uint16_t height = gfx_texture_import_height(tile);
 
     while (*node != NULL && *node - gfx_texture_cache.pool < (int)gfx_texture_cache.pool_pos) {
         if ((*node)->texture_addr == orig_addr && (*node)->fmt == fmt && (*node)->siz == siz
@@ -1238,11 +1275,11 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
     return false;
 }
 
-static uint32_t gfx_texture_width_from_tile(void) {
+static uint32_t gfx_texture_tile_width(void) {
     return (rdp.texture_tile.lrs - rdp.texture_tile.uls + 4) >> G_TEXTURE_IMAGE_FRAC;
 }
 
-static uint32_t gfx_texture_height_from_tile(void) {
+static uint32_t gfx_texture_tile_height(void) {
     return (rdp.texture_tile.lrt - rdp.texture_tile.ult + 4) >> G_TEXTURE_IMAGE_FRAC;
 }
 
@@ -1304,9 +1341,115 @@ static uint32_t gfx_texture_import_max_texels(uint8_t fmt, uint8_t siz) {
     return 0;
 }
 
+static uint32_t gfx_texture_width_from_row_bytes(uint32_t rowBytes, uint32_t siz) {
+    switch (siz) {
+        case G_IM_SIZ_4b:
+            return rowBytes << 1;
+        case G_IM_SIZ_8b:
+            return rowBytes;
+        case G_IM_SIZ_16b:
+            return rowBytes >> 1;
+        case G_IM_SIZ_32b:
+            return rowBytes >> 2;
+        default:
+            return rowBytes;
+    }
+}
+
+static bool gfx_try_loaded_texture_dimensions(int tile, uint32_t* width, uint32_t* height) {
+    uint32_t rowBytes = rdp.texture_tile.line_size_bytes;
+    uint32_t rowTexels;
+    uint32_t sizeBytes = rdp.loaded_texture[tile].size_bytes;
+
+    if ((rowBytes == 0) || (sizeBytes < rowBytes)) {
+        return false;
+    }
+
+    rowTexels = gfx_texture_width_from_row_bytes(rowBytes, rdp.texture_tile.siz);
+    if (rowTexels <= rdp.loaded_texture[tile].source_nibble_offset) {
+        return false;
+    }
+
+    *width = rowTexels - rdp.loaded_texture[tile].source_nibble_offset;
+    *height = sizeBytes / rowBytes;
+    return *height != 0;
+}
+
+static bool gfx_texture_tile_dimensions_fit_import(uint32_t width, uint32_t height) {
+    uint32_t maxTexels = gfx_texture_import_max_texels(rdp.texture_tile.fmt, rdp.texture_tile.siz);
+
+    if ((width == 0) || (height == 0) || (maxTexels == 0) || (height > (UINT32_MAX / width))) {
+        return false;
+    }
+
+    return (width * height) <= maxTexels;
+}
+
+static bool gfx_texture_tile_dimensions_fit_source(int tile, uint32_t width, uint32_t height) {
+    uint32_t textureWidth = width + rdp.loaded_texture[tile].source_nibble_offset;
+    uint32_t rowBytes;
+    uint32_t spanBytes;
+
+    if ((width == 0) || (height == 0) || (textureWidth < width)) {
+        return false;
+    }
+
+    rowBytes = gfx_texture_row_bytes(textureWidth, rdp.texture_tile.siz);
+    if ((rowBytes == 0) || (height > (UINT32_MAX / rowBytes))) {
+        return false;
+    }
+
+    spanBytes = rowBytes * height;
+    return spanBytes <= gfx_loaded_texture_source_size(tile);
+}
+
+static void gfx_texture_import_dimensions(int tile, uint32_t* width, uint32_t* height) {
+    uint32_t tileWidth = gfx_texture_tile_width();
+    uint32_t tileHeight = gfx_texture_tile_height();
+
+    if (gfx_texture_tile_dimensions_fit_import(tileWidth, tileHeight) &&
+        gfx_texture_tile_dimensions_fit_source(tile, tileWidth, tileHeight)) {
+        *width = tileWidth;
+        *height = tileHeight;
+        return;
+    }
+
+    if (gfx_try_loaded_texture_dimensions(tile, width, height)) {
+        return;
+    }
+
+    *width = tileWidth;
+    *height = tileHeight;
+}
+#else
+static void gfx_texture_import_dimensions(int tile, uint32_t* width, uint32_t* height) {
+    _UNUSED(tile);
+
+    *width = gfx_texture_tile_width();
+    *height = gfx_texture_tile_height();
+}
+#endif
+
+static uint32_t gfx_texture_import_width(int tile) {
+    uint32_t width;
+    uint32_t height;
+
+    gfx_texture_import_dimensions(tile, &width, &height);
+    return width;
+}
+
+static uint32_t gfx_texture_import_height(int tile) {
+    uint32_t width;
+    uint32_t height;
+
+    gfx_texture_import_dimensions(tile, &width, &height);
+    return height;
+}
+
+#if defined(TARGET_PSP)
 static void gfx_validate_texture_tile_dimensions(int tile, const char* context) {
-    uint32_t width = gfx_texture_width_from_tile();
-    uint32_t height = gfx_texture_height_from_tile();
+    uint32_t width = gfx_texture_import_width(tile);
+    uint32_t height = gfx_texture_import_height(tile);
     uint32_t textureWidth = width + rdp.loaded_texture[tile].source_nibble_offset;
     bool widthOverflow = textureWidth < width;
     uint32_t rowBytes = widthOverflow ? UINT32_MAX : gfx_texture_row_bytes(textureWidth, rdp.texture_tile.siz);
@@ -1344,8 +1487,8 @@ static const uint8_t* gfx_texture_row(int tile, uint32_t y, uint32_t fallbackRow
 
 static void import_texture_rgba16(int tile) {
     uint16_t rgba16_buf[4096] __attribute__ ((aligned(4)));    
-    uint32_t width = gfx_texture_width_from_tile();
-    uint32_t height = gfx_texture_height_from_tile();
+    uint32_t width = gfx_texture_import_width(tile);
+    uint32_t height = gfx_texture_import_height(tile);
     uint32_t rowBytes = gfx_texture_row_bytes(width, G_IM_SIZ_16b);
     GfxTextureSwapMode swapMode =
         gfx_texture_source_swap_mode(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
@@ -1369,8 +1512,8 @@ static void import_texture_rgba16(int tile) {
 
 static void import_texture_rgba32(int tile) {
     uint8_t rgba32_buf[4096] __attribute__ ((aligned(4)));
-    uint32_t width = gfx_texture_width_from_tile();
-    uint32_t height = gfx_texture_height_from_tile();
+    uint32_t width = gfx_texture_import_width(tile);
+    uint32_t height = gfx_texture_import_height(tile);
     uint32_t rowBytes = gfx_texture_row_bytes(width, G_IM_SIZ_32b);
     GfxTextureSwapMode swapMode =
         gfx_texture_source_swap_mode(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
@@ -1401,8 +1544,8 @@ static uint8_t gfx_texture_read_4b(int tile, uint32_t x, const uint8_t* row, Gfx
 
 static void import_texture_ia4(int tile) {
     uint8_t rgba32_buf[32768] __attribute__ ((aligned(4)));
-    uint32_t width = gfx_texture_width_from_tile();
-    uint32_t height = gfx_texture_height_from_tile();
+    uint32_t width = gfx_texture_import_width(tile);
+    uint32_t height = gfx_texture_import_height(tile);
     uint32_t rowBytes = gfx_texture_row_bytes(width + rdp.loaded_texture[tile].source_nibble_offset, G_IM_SIZ_4b);
     GfxTextureSwapMode swapMode =
         gfx_texture_source_swap_mode(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
@@ -1430,8 +1573,8 @@ static void import_texture_ia4(int tile) {
 
 static void import_texture_ia8(int tile) {
     uint8_t rgba32_buf[16384]__attribute__ ((aligned(4)));
-    uint32_t width = gfx_texture_width_from_tile();
-    uint32_t height = gfx_texture_height_from_tile();
+    uint32_t width = gfx_texture_import_width(tile);
+    uint32_t height = gfx_texture_import_height(tile);
     uint32_t rowBytes = gfx_texture_row_bytes(width, G_IM_SIZ_8b);
     GfxTextureSwapMode swapMode =
         gfx_texture_source_swap_mode(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
@@ -1459,8 +1602,8 @@ static void import_texture_ia8(int tile) {
 
 static void import_texture_ia16(int tile) {
     uint8_t rgba32_buf[8192];
-    uint32_t width = gfx_texture_width_from_tile();
-    uint32_t height = gfx_texture_height_from_tile();
+    uint32_t width = gfx_texture_import_width(tile);
+    uint32_t height = gfx_texture_import_height(tile);
     uint32_t rowBytes = gfx_texture_row_bytes(width, G_IM_SIZ_16b);
     GfxTextureSwapMode swapMode =
         gfx_texture_source_swap_mode(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
@@ -1487,8 +1630,8 @@ static void import_texture_ia16(int tile) {
 
 static void import_texture_i4(int tile) {
     uint8_t rgba32_buf[32768];
-    uint32_t width = gfx_texture_width_from_tile();
-    uint32_t height = gfx_texture_height_from_tile();
+    uint32_t width = gfx_texture_import_width(tile);
+    uint32_t height = gfx_texture_import_height(tile);
     uint32_t rowBytes = gfx_texture_row_bytes(width + rdp.loaded_texture[tile].source_nibble_offset, G_IM_SIZ_4b);
     GfxTextureSwapMode swapMode =
         gfx_texture_source_swap_mode(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
@@ -1518,8 +1661,8 @@ static void import_texture_i8(int tile) {
 #else
     uint8_t rgba32_buf[16384];
 #endif
-    uint32_t width = gfx_texture_width_from_tile();
-    uint32_t height = gfx_texture_height_from_tile();
+    uint32_t width = gfx_texture_import_width(tile);
+    uint32_t height = gfx_texture_import_height(tile);
     uint32_t rowBytes = gfx_texture_row_bytes(width, G_IM_SIZ_8b);
     GfxTextureSwapMode swapMode =
         gfx_texture_source_swap_mode(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
@@ -1564,8 +1707,8 @@ static void import_texture_i8(int tile) {
 
 static void import_texture_ci4(int tile) {
     uint8_t rgba32_buf[32768];
-    uint32_t width = gfx_texture_width_from_tile();
-    uint32_t height = gfx_texture_height_from_tile();
+    uint32_t width = gfx_texture_import_width(tile);
+    uint32_t height = gfx_texture_import_height(tile);
     uint32_t rowBytes = gfx_texture_row_bytes(width + rdp.loaded_texture[tile].source_nibble_offset, G_IM_SIZ_4b);
     GfxTextureSwapMode swapMode =
         gfx_texture_source_swap_mode(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
@@ -1598,8 +1741,8 @@ static void import_texture_ci4(int tile) {
 
 static void import_texture_ci8(int tile) {
     uint8_t rgba32_buf[16384];
-    uint32_t width = gfx_texture_width_from_tile();
-    uint32_t height = gfx_texture_height_from_tile();
+    uint32_t width = gfx_texture_import_width(tile);
+    uint32_t height = gfx_texture_import_height(tile);
     uint32_t rowBytes = gfx_texture_row_bytes(width, G_IM_SIZ_8b);
     GfxTextureSwapMode swapMode =
         gfx_texture_source_swap_mode(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
@@ -3150,7 +3293,7 @@ static inline bool gfx_try_normalize_prx_relocated_segmented_addr(uintptr_t addr
     uintptr_t candidate;
     uint8_t segment;
 
-    if (OotPsp_IsRuntimeByteRange((void*)addr, 1)) {
+    if (gfx_addr_is_native(addr) && !gfx_is_static_prx_range(addr, 1) && OotPsp_IsRuntimeByteRange((void*)addr, 1)) {
         return false;
     }
 
@@ -3295,7 +3438,8 @@ static inline void *seg_addr(uintptr_t w1) {
             void* translated;
 
 #if defined(TARGET_PSP)
-            if (gfx_addr_looks_segmented(baseValue) && gfx_addr_looks_segmented(translatedValue) &&
+            if (!gfx_addr_is_native(baseValue) && gfx_addr_looks_segmented(baseValue) &&
+                gfx_addr_looks_segmented(translatedValue) &&
                 (translatedValue != w1)) {
                 translated = seg_addr(translatedValue);
                 if (translated != (void*)translatedValue) {
@@ -3447,6 +3591,11 @@ static bool gfx_s2dex_bg_prepare_texture(const uint8_t* source, uint32_t width, 
         return false;
     }
 
+    if (!gfx_normalize_texture_source(&source, sourceSpan)) {
+        gfx_log_bad_texture_source(tile, "s2dex-bg-source", source, sourceSpan);
+        return false;
+    }
+
     gfx_s2dex_bg_compute_upload_size(width, height, contentWidth, contentHeight, &uploadWidth, &uploadHeight);
 
     if ((size_t)uploadWidth * uploadHeight * sizeof(uint16_t) > sizeof(psp_texture_stage_buf)) {
@@ -3542,6 +3691,11 @@ static void gfx_sp_s2dex_bg_rect(uint32_t opcode, const void* bgAddr) {
         return;
     }
 
+    if (((uintptr_t)normalizedBg & (sizeof(uint32_t) - 1)) != 0) {
+        gfx_log_bad_data_source("s2dex-bg-align", bgAddr, sizeof(uObjBg));
+        return;
+    }
+
     bg = (const uObjBg*)normalizedBg;
     imageWidth = bg->b.imageW >> 2;
     imageHeight = bg->b.imageH >> 2;
@@ -3589,10 +3743,17 @@ static void gfx_sp_s2dex_bg_rect(uint32_t opcode, const void* bgAddr) {
 
 static bool gfx_translate_dl_cursor(Gfx** cmdP) {
     uintptr_t raw = (uintptr_t)*cmdP;
+    uintptr_t normalized;
     uintptr_t normalizedSegmented;
 
     if (gfx_try_normalize_prx_relocated_segmented_addr(raw, &normalizedSegmented)) {
         raw = normalizedSegmented;
+    }
+
+    if (gfx_normalize_native_range(raw, sizeof(Gfx), &normalized) &&
+        gfx_is_valid_native_dl_range(normalized, sizeof(Gfx))) {
+        *cmdP = (Gfx*)normalized;
+        return true;
     }
 
     if (gfx_addr_looks_segmented(raw)) {
@@ -3605,8 +3766,6 @@ static bool gfx_translate_dl_cursor(Gfx** cmdP) {
 
         *cmdP = (Gfx*)translated;
     } else {
-        uintptr_t normalized;
-
         if (gfx_normalize_native_range(raw, sizeof(Gfx), &normalized)) {
             *cmdP = (Gfx*)normalized;
         }

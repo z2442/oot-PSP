@@ -22,6 +22,10 @@
 #include <string.h>
 
 #include "psp_texture_manager.h"
+
+#ifndef OOT_PSP_WAIT_VBLANK
+#define OOT_PSP_WAIT_VBLANK 1
+#endif
 #include "oot_port_macros.h"
 
 #define BUF_WIDTH (512)
@@ -783,7 +787,9 @@ void gfx_scegu_on_resize(void) {
 
 static void gfx_scegu_end_frame(void) {
     sceGuFinish();
+#if OOT_PSP_WAIT_VBLANK
     sceDisplayWaitVblankStart();
+#endif
     sceGuSwapBuffers();
 }
 

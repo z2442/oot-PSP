@@ -74,21 +74,12 @@ static bool gfx_window_psp_start_frame(void) {
 }
 
 static void gfx_window_psp_swap_buffers_begin(void) {
-    static const unsigned int kFrameTimeUsec = 33333;
-    unsigned int now = sceKernelGetSystemTimeLow();
-    unsigned int elapsed = now - sLastSwapBeginUsec;
-
-    if (elapsed < kFrameTimeUsec) {
-        sceKernelDelayThread(kFrameTimeUsec - elapsed);
-        now = sceKernelGetSystemTimeLow();
-    }
-
-    sLastSwapBeginUsec = now;
+    sLastSwapBeginUsec = sceKernelGetSystemTimeLow();
 }
 
 static void gfx_window_psp_swap_buffers_end(void) {
     /*
-     * The SCE GU backend already waits for vblank and swaps buffers in
+     * Presentation is handled by the SCE GU backend's end_frame hook.
      */
 }
 

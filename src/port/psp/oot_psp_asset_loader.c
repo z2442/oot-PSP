@@ -20,6 +20,7 @@
 #define OOT_PSP_HOT_READ_PROMOTE_COUNT      4
 #define OOT_PSP_HOT_READ_MAX_SIZE           OOT_PSP_ASSET_CACHE_SIZE
 #define OOT_PSP_NATIVE_TEXTURE_RANGE_CACHE_COUNT 8
+#define OOT_PSP_ASSET_RANGE_SERIAL_CACHE_COUNT 128
 #define OOT_PSP_KANJI_ASSET_PATH            "data/segments/kanji.bin"
 #define OOT_PSP_LINK_ANIMATION_ASSET_PATH   "data/segments/link_animetion.bin"
 #define OOT_PSP_ASSET_READ_ZERO_RETRY_COUNT 16
@@ -32,6 +33,13 @@ typedef struct OotPspLoadedAssetRange {
     u32 flags;
     u32 serial;
 } OotPspLoadedAssetRange;
+
+typedef struct OotPspAssetRangeSerialCacheEntry {
+    uintptr_t ramStart;
+    uintptr_t ramEnd;
+    u32 serial;
+    s32 valid;
+} OotPspAssetRangeSerialCacheEntry;
 
 typedef struct OotPspAssetCache {
     const char* path;
@@ -55,6 +63,8 @@ static uintptr_t sOotPspPrxRelocationBias = OOT_PSP_DEFAULT_PRX_RELOCATION_BIAS;
 static s32 sOotPspPrxRelocationBiasInitialized = false;
 static OotPspLoadedAssetRange sOotPspLoadedAssetRanges[OOT_PSP_LOADED_ASSET_RANGE_COUNT];
 static const OotPspLoadedAssetRange* sOotPspNativeTextureRangeCache[OOT_PSP_NATIVE_TEXTURE_RANGE_CACHE_COUNT];
+static OotPspAssetRangeSerialCacheEntry
+    sOotPspAssetRangeSerialCache[OOT_PSP_ASSET_RANGE_SERIAL_CACHE_COUNT];
 static size_t sOotPspNativeTextureRangeCacheNext;
 static size_t sOotPspLoadedAssetRangeNext;
 static u32 sOotPspLoadedAssetSerial = 1;
@@ -70,6 +80,38 @@ static OotPspHotReadTracker sOotPspHotReadTrackers[OOT_PSP_HOT_READ_TRACKER_COUN
 
 static void OotPsp_PreloadPersistentAssets(void);
 static void OotPsp_ForgetNativeTextureRangeCache(const OotPspLoadedAssetRange* range);
+
+static size_t OotPsp_AssetRangeSerialCacheIndex(uintptr_t ramStart, uintptr_t ramEnd) {
+    uintptr_t key = (ramStart >> 4) ^ (ramEnd >> 4) ^ (ramStart >> 12) ^ (ramEnd << 5);
+
+    return (size_t)(key & (OOT_PSP_ASSET_RANGE_SERIAL_CACHE_COUNT - 1));
+}
+
+static void OotPsp_ClearAssetRangeSerialCache(void) {
+    memset(sOotPspAssetRangeSerialCache, 0, sizeof(sOotPspAssetRangeSerialCache));
+}
+
+static s32 OotPsp_GetCachedAssetRangeSerial(uintptr_t ramStart, uintptr_t ramEnd, u32* serial) {
+    const OotPspAssetRangeSerialCacheEntry* entry =
+        &sOotPspAssetRangeSerialCache[OotPsp_AssetRangeSerialCacheIndex(ramStart, ramEnd)];
+
+    if (entry->valid && (entry->ramStart == ramStart) && (entry->ramEnd == ramEnd)) {
+        *serial = entry->serial;
+        return true;
+    }
+
+    return false;
+}
+
+static void OotPsp_RememberAssetRangeSerial(uintptr_t ramStart, uintptr_t ramEnd, u32 serial) {
+    OotPspAssetRangeSerialCacheEntry* entry =
+        &sOotPspAssetRangeSerialCache[OotPsp_AssetRangeSerialCacheIndex(ramStart, ramEnd)];
+
+    entry->ramStart = ramStart;
+    entry->ramEnd = ramEnd;
+    entry->serial = serial;
+    entry->valid = true;
+}
 
 void OotPsp_AssetInit(const char* executablePath) {
     const char* slash;
@@ -495,6 +537,7 @@ static void OotPsp_ClearLoadedAssetRange(void* ram, size_t size) {
     uintptr_t ramStart;
     uintptr_t ramEnd;
     size_t i;
+    s32 cleared = false;
 
     if (!OotPsp_RamRangeFromPtr(ram, size, &ramStart, &ramEnd)) {
         return;
@@ -510,7 +553,12 @@ static void OotPsp_ClearLoadedAssetRange(void* ram, size_t size) {
             range->assetOffsetStart = 0;
             range->flags = 0;
             range->serial = 0;
+            cleared = true;
         }
+    }
+
+    if (cleared) {
+        OotPsp_ClearAssetRangeSerialCache();
     }
 }
 
@@ -544,6 +592,7 @@ static void OotPsp_StoreLoadedAssetRange(void* ram, size_t size, uintptr_t asset
     range->assetOffsetStart = assetOffsetStart;
     range->flags = flags;
     range->serial = serial;
+    OotPsp_ClearAssetRangeSerialCache();
 }
 
 static void OotPsp_ForgetNativeTextureRangeCache(const OotPspLoadedAssetRange* range) {
@@ -998,15 +1047,21 @@ u32 OotPsp_GetExternalAssetRangeSerial(const void* ptr, size_t size) {
     uintptr_t ramStart;
     uintptr_t ramEnd;
     size_t i;
+    u32 serial;
 
     if (!OotPsp_RamRangeFromPtr(ptr, size, &ramStart, &ramEnd)) {
         return 0;
+    }
+
+    if (OotPsp_GetCachedAssetRangeSerial(ramStart, ramEnd, &serial)) {
+        return serial;
     }
 
     for (i = 0; i < OOT_PSP_LOADED_ASSET_RANGE_COUNT; i++) {
         const OotPspLoadedAssetRange* range = &sOotPspLoadedAssetRanges[i];
 
         if ((range->serial != 0) && OotPsp_RangeContains(range->ramStart, range->ramEnd, ramStart, ramEnd)) {
+            OotPsp_RememberAssetRangeSerial(ramStart, ramEnd, range->serial);
             return range->serial;
         }
     }
@@ -1015,10 +1070,12 @@ u32 OotPsp_GetExternalAssetRangeSerial(const void* ptr, size_t size) {
         const OotPspLoadedAssetRange* range = &sOotPspLoadedAssetRanges[i];
 
         if ((range->serial != 0) && (ramStart >= range->ramStart) && (ramStart < range->ramEnd)) {
+            OotPsp_RememberAssetRangeSerial(ramStart, ramEnd, range->serial);
             return range->serial;
         }
     }
 
+    OotPsp_RememberAssetRangeSerial(ramStart, ramEnd, 0);
     return 0;
 }
 
