@@ -334,6 +334,23 @@ static inline int texenv_set_texture_texture(UNUSED struct ShaderProgram *prg) {
     return GU_TFX_DECAL;
 }
 
+static bool gfx_scegu_shader_uses_texture_alpha(const struct ShaderProgram *prg) {
+    if (!prg->cc.opt_alpha) {
+        return false;
+    }
+
+    for (int i = 0; i < 4; i++) {
+        switch (prg->cc.c[1][i]) {
+            case SHADER_TEXEL0:
+            case SHADER_TEXEL0A:
+            case SHADER_TEXEL1:
+                return true;
+        }
+    }
+
+    return false;
+}
+
 static void gfx_scegu_apply_shader(struct ShaderProgram *prg) {
     int mode;
     const bool use_texture = prg != NULL && (prg->texture_used[0] || prg->texture_used[1]);
@@ -399,7 +416,7 @@ static void gfx_scegu_apply_shader(struct ShaderProgram *prg) {
         if (prg->shader_id == 0x01A00045) {
             mode = GU_TFX_REPLACE;
         }
-        sceGuTexFunc(mode, GU_TCC_RGBA);
+        sceGuTexFunc(mode, gfx_scegu_shader_uses_texture_alpha(prg) ? GU_TCC_RGBA : GU_TCC_RGB);
     }
 
     prg->enabled = true;
