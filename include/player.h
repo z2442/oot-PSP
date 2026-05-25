@@ -1042,6 +1042,8 @@ void Player_PostLimbDrawGameplay(struct PlayState* play, s32 limbIndex, Gfx** dL
 u32 Player_InitPauseDrawData(struct PlayState* play, u8* segment, SkelAnime* skelAnime);
 void Player_DrawPause(struct PlayState* play, u8* segment, SkelAnime* skelAnime, Vec3f* pos, Vec3s* rot, f32 scale,
                       s32 sword, s32 tunic, s32 shield, s32 boots);
+void Player_DrawPauseOnPage(struct PlayState* play, u8* segment, SkelAnime* skelAnime, Vec3f* pos, Vec3s* rot,
+                            f32 scale, s32 sword, s32 tunic, s32 shield, s32 boots);
 
 // z_player_lib.c
 extern FlexSkeletonHeader* gPlayerSkelHeaders[2];

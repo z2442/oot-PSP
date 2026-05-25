@@ -7,6 +7,8 @@
 #include "gfx/gfx_window_psp.h"
 
 extern struct GfxRenderingAPI gfx_scegu_api;
+extern void gfx_scegu_request_pause_background(void);
+extern void gfx_scegu_set_pause_background_active(bool active);
 
 static bool sInitialized;
 
@@ -35,4 +37,12 @@ void OotPspRenderer_RenderTask(const OSTask* task) {
 
     dl = (Gfx*)task->t.data_ptr;
     OotPspRenderer_RenderDisplayList(dl);
+}
+
+void OotPspRenderer_RequestPauseBackground(void) {
+    gfx_scegu_request_pause_background();
+}
+
+void OotPspRenderer_SetPauseBackgroundActive(bool active) {
+    gfx_scegu_set_pause_background_active(active);
 }

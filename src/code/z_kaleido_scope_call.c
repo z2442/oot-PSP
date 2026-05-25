@@ -9,6 +9,9 @@
 #include "terminal.h"
 #include "translation.h"
 #include "play_state.h"
+#if PLATFORM_PSP
+#include "oot_psp_renderer.h"
+#endif
 
 void (*sKaleidoScopeUpdateFunc)(PlayState* play);
 void (*sKaleidoScopeDrawFunc)(PlayState* play);
@@ -18,6 +21,16 @@ PauseMapMarksData* gLoadedPauseMarkDataTable;
 
 extern void KaleidoScope_Update(PlayState* play);
 extern void KaleidoScope_Draw(PlayState* play);
+
+static void KaleidoScopeCall_RequestPauseBg(void) {
+#if PLATFORM_PSP
+    OotPspRenderer_SetPauseBackgroundActive(true);
+    OotPspRenderer_RequestPauseBackground();
+    R_PAUSE_BG_PRERENDER_STATE = PAUSE_BG_PRERENDER_READY;
+#else
+    R_PAUSE_BG_PRERENDER_STATE = PAUSE_BG_PRERENDER_SETUP;
+#endif
+}
 
 void KaleidoScopeCall_LoadPlayer(void) {
     KaleidoMgrOverlay* playerActorOvl = &gKaleidoMgrOverlayTable[KALEIDO_OVL_PLAYER_ACTOR];
@@ -71,7 +84,7 @@ void KaleidoScopeCall_Update(PlayState* play) {
                 R_UCODE_DISAS_LOG_MODE = 3;
 #endif
 
-                R_PAUSE_BG_PRERENDER_STATE = PAUSE_BG_PRERENDER_SETUP;
+                KaleidoScopeCall_RequestPauseBg();
                 pauseCtx->mainState = PAUSE_MAIN_STATE_IDLE;
                 pauseCtx->savePromptState = PAUSE_SAVE_PROMPT_STATE_APPEARING;
                 pauseCtx->state = (pauseCtx->state & 0xFFFF) + 1; // PAUSE_STATE_WAIT_BG_PRERENDER
@@ -82,7 +95,7 @@ void KaleidoScopeCall_Update(PlayState* play) {
             R_UCODE_DISAS_LOG_MODE = 3;
 #endif
 
-            R_PAUSE_BG_PRERENDER_STATE = PAUSE_BG_PRERENDER_SETUP;
+            KaleidoScopeCall_RequestPauseBg();
             pauseCtx->mainState = PAUSE_MAIN_STATE_IDLE;
             pauseCtx->savePromptState = PAUSE_SAVE_PROMPT_STATE_APPEARING; // copied from pause menu, not needed here
             pauseCtx->state = (pauseCtx->state & 0xFFFF) + 1;              // PAUSE_STATE_GAME_OVER_WAIT_BG_PRERENDER

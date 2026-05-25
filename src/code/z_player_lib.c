@@ -2076,17 +2076,10 @@ void Player_DrawPauseImpl(PlayState* play, void* gameplayKeep, void* linkObject,
     CLOSE_DISPS(play->state.gfxCtx, "../z_player_lib.c", 3288);
 }
 
-void Player_DrawPause(PlayState* play, u8* segment, SkelAnime* skelAnime, Vec3f* pos, Vec3s* rot, f32 scale, s32 sword,
-                      s32 tunic, s32 shield, s32 boots) {
-    static Vec3f eye = { 0.0f, 0.0f, -400.0f };
-    static Vec3f at = { 0.0f, 0.0f, 0.0f };
+static void Player_SetPauseJointTable(SkelAnime* skelAnime, s32 sword, s32 shield) {
     Vec3s* destTable;
     Vec3s* srcTable;
     s32 i;
-
-    gSegments[4] = OS_K0_TO_PHYSICAL(segment + PAUSE_EQUIP_BUFFER_SIZE);
-    gSegments[6] =
-        OS_K0_TO_PHYSICAL(segment + PAUSE_EQUIP_BUFFER_SIZE + PAUSE_PLAYER_SEGMENT_GAMEPLAY_KEEP_BUFFER_SIZE);
 
     if (!LINK_IS_ADULT) {
         if (shield == PLAYER_SHIELD_DEKU) {
@@ -2109,6 +2102,77 @@ void Player_DrawPause(PlayState* play, u8* segment, SkelAnime* skelAnime, Vec3f*
     for (i = 0; i < skelAnime->limbCount; i++) {
         *destTable++ = *srcTable++;
     }
+}
+
+#if PLATFORM_PSP
+void Player_DrawPauseOnPage(PlayState* play, u8* segment, SkelAnime* skelAnime, Vec3f* pos, Vec3s* rot, f32 scale,
+                            s32 sword, s32 tunic, s32 shield, s32 boots) {
+    static Lights1 lights1 = gdSPDefLights1(80, 80, 80, 255, 255, 255, 84, 84, -84);
+    static Vec3f lightDir = { 89.8f, 0.0f, 89.8f };
+    u8 playerSwordAndShield[2];
+
+    gSegments[4] = OS_K0_TO_PHYSICAL(segment + PAUSE_EQUIP_BUFFER_SIZE);
+    gSegments[6] =
+        OS_K0_TO_PHYSICAL(segment + PAUSE_EQUIP_BUFFER_SIZE + PAUSE_PLAYER_SEGMENT_GAMEPLAY_KEEP_BUFFER_SIZE);
+
+    Player_SetPauseJointTable(skelAnime, sword, shield);
+
+    playerSwordAndShield[0] = sword;
+    playerSwordAndShield[1] = shield;
+
+    OPEN_DISPS(play->state.gfxCtx, "../z_player_lib.c", 3299);
+
+    gSPSegment(POLY_OPA_DISP++, 0x00, NULL);
+    gSPSegment(POLY_OPA_DISP++, 0x04, segment + PAUSE_EQUIP_BUFFER_SIZE);
+    gSPSegment(POLY_OPA_DISP++, 0x06,
+               segment + PAUSE_EQUIP_BUFFER_SIZE + PAUSE_PLAYER_SEGMENT_GAMEPLAY_KEEP_BUFFER_SIZE);
+
+    gDPPipeSync(POLY_OPA_DISP++);
+    gSPLoadGeometryMode(POLY_OPA_DISP++, G_ZBUFFER | G_SHADE | G_CULL_BACK | G_LIGHTING | G_SHADING_SMOOTH);
+    gSPTexture(POLY_OPA_DISP++, 0xFFFF, 0xFFFF, 0, G_TX_RENDERTILE, G_OFF);
+    gDPSetCombineMode(POLY_OPA_DISP++, G_CC_SHADE, G_CC_SHADE);
+    gDPSetRenderMode(POLY_OPA_DISP++, G_RM_AA_ZB_OPA_SURF, G_RM_AA_ZB_OPA_SURF2);
+    gSPSetLights1(POLY_OPA_DISP++, lights1);
+
+    func_80093C80(play);
+
+    POLY_OPA_DISP = Gfx_SetFog2(POLY_OPA_DISP++, 0, 0, 0, 0, 997, 1000);
+
+    func_8002EABC(pos, &play->view.eye, &lightDir, play->state.gfxCtx);
+
+    gSPSegment(POLY_OPA_DISP++, 0x0C, gCullBackDList);
+
+    Matrix_Push();
+    Matrix_Translate(pos->x, pos->y, pos->z, MTXMODE_APPLY);
+    Matrix_RotateY(BINANG_TO_RAD(rot->y), MTXMODE_APPLY);
+    Matrix_RotateX(BINANG_TO_RAD(rot->x), MTXMODE_APPLY);
+    Matrix_RotateZ(BINANG_TO_RAD(rot->z), MTXMODE_APPLY);
+    Matrix_Scale(scale, scale, scale, MTXMODE_APPLY);
+
+    Player_DrawImpl(play, skelAnime->skeleton, skelAnime->jointTable, skelAnime->dListCount, 0, tunic, boots,
+                    PLAYER_FACE_NEUTRAL, Player_OverrideLimbDrawPause, NULL, &playerSwordAndShield);
+
+    Matrix_Pop();
+    MATRIX_FINALIZE_AND_LOAD(POLY_OPA_DISP++, play->state.gfxCtx, "../z_player_lib.c", 3347);
+
+    CLOSE_DISPS(play->state.gfxCtx, "../z_player_lib.c", 3349);
+}
+#else
+void Player_DrawPauseOnPage(PlayState* play, u8* segment, SkelAnime* skelAnime, Vec3f* pos, Vec3s* rot, f32 scale,
+                            s32 sword, s32 tunic, s32 shield, s32 boots) {
+}
+#endif
+
+void Player_DrawPause(PlayState* play, u8* segment, SkelAnime* skelAnime, Vec3f* pos, Vec3s* rot, f32 scale, s32 sword,
+                      s32 tunic, s32 shield, s32 boots) {
+    static Vec3f eye = { 0.0f, 0.0f, -400.0f };
+    static Vec3f at = { 0.0f, 0.0f, 0.0f };
+
+    gSegments[4] = OS_K0_TO_PHYSICAL(segment + PAUSE_EQUIP_BUFFER_SIZE);
+    gSegments[6] =
+        OS_K0_TO_PHYSICAL(segment + PAUSE_EQUIP_BUFFER_SIZE + PAUSE_PLAYER_SEGMENT_GAMEPLAY_KEEP_BUFFER_SIZE);
+
+    Player_SetPauseJointTable(skelAnime, sword, shield);
 
     Player_DrawPauseImpl(play, segment + PAUSE_EQUIP_BUFFER_SIZE,
                          segment + PAUSE_EQUIP_BUFFER_SIZE + PAUSE_PLAYER_SEGMENT_GAMEPLAY_KEEP_BUFFER_SIZE, skelAnime,

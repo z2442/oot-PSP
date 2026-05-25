@@ -1380,6 +1380,11 @@ void Play_Draw(PlayState* this) {
             R_PAUSE_BG_PRERENDER_STATE = PAUSE_BG_PRERENDER_OFF;
         }
 
+#if PLATFORM_PSP
+        if (R_PAUSE_BG_PRERENDER_STATE == PAUSE_BG_PRERENDER_READY) {
+            goto Play_Draw_DrawOverlayElements;
+        }
+#else
         if (R_PAUSE_BG_PRERENDER_STATE == PAUSE_BG_PRERENDER_READY) {
             Gfx* gfxP = POLY_OPA_DISP;
 
@@ -1388,6 +1393,7 @@ void Play_Draw(PlayState* this) {
 
             goto Play_Draw_DrawOverlayElements;
         }
+#endif
 
         if (!DEBUG_FEATURES || (R_HREG_MODE != HREG_MODE_PLAY) || R_PLAY_DRAW_SKYBOX) {
             if (this->skyboxId && (this->skyboxId != SKYBOX_UNSET_1D) && !this->envCtx.skyboxDisabled) {

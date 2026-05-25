@@ -1513,7 +1513,11 @@ void Gfx_SetupFrame(GraphicsContext* gfxCtx, u8 r, u8 g, u8 b) {
     gDPSetDepthImage(POLY_XLU_DISP++, gZBuffer);
     gDPSetDepthImage(OVERLAY_DISP++, gZBuffer);
 
+#if PLATFORM_PSP
     if ((R_PAUSE_BG_PRERENDER_STATE <= PAUSE_BG_PRERENDER_SETUP) && (gTransitionTileState <= TRANS_TILE_SETUP)) {
+#else
+    if ((R_PAUSE_BG_PRERENDER_STATE <= PAUSE_BG_PRERENDER_SETUP) && (gTransitionTileState <= TRANS_TILE_SETUP)) {
+#endif
         s32 letterboxSize = Letterbox_GetSize();
 
 #if DEBUG_FEATURES

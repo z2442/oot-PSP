@@ -27,6 +27,9 @@
 #include "play_state.h"
 #include "player.h"
 #include "save.h"
+#if PLATFORM_PSP
+#include "oot_psp_renderer.h"
+#endif
 
 #include "assets/textures/icon_item_static/icon_item_static.h"
 #include "assets/textures/icon_item_24_static/icon_item_24_static.h"
@@ -937,6 +940,9 @@ static PreRender sPlayerPreRender;
 void* sPreRenderCvg;
 
 void KaleidoScope_SetupPlayerPreRender(PlayState* play) {
+#if PLATFORM_PSP
+    return;
+#else
     Gfx* gfx;
     Gfx* gfxRef;
     void* fbuf;
@@ -960,12 +966,15 @@ void KaleidoScope_SetupPlayerPreRender(PlayState* play) {
     R_GRAPH_TASKSET00_FLAGS |= 1;
 
     CLOSE_DISPS(play->state.gfxCtx, "../z_kaleido_scope_PAL.c", 509);
+#endif
 }
 
 void KaleidoScope_ProcessPlayerPreRender(void) {
+#if !PLATFORM_PSP
     Sleep_Msec(50);
     PreRender_ApplyFilters(&sPlayerPreRender);
     PreRender_Destroy(&sPlayerPreRender);
+#endif
 }
 
 Gfx* KaleidoScope_QuadTextureIA4(Gfx* gfx, void* texture, s16 width, s16 height, u16 point) {
@@ -4643,6 +4652,9 @@ void KaleidoScope_Update(PlayState* play) {
                     pauseCtx->state = PAUSE_STATE_OFF;
                     R_UPDATE_RATE = 3;
                     R_PAUSE_BG_PRERENDER_STATE = PAUSE_BG_PRERENDER_OFF;
+#if PLATFORM_PSP
+                    OotPspRenderer_SetPauseBackgroundActive(false);
+#endif
                     func_800981B8(&play->objectCtx);
                     func_800418D0(&play->colCtx, play);
                     if (pauseCtx->promptChoice == 0) {
@@ -4703,6 +4715,9 @@ void KaleidoScope_Update(PlayState* play) {
             pauseCtx->state = PAUSE_STATE_OFF;
             R_UPDATE_RATE = 3;
             R_PAUSE_BG_PRERENDER_STATE = PAUSE_BG_PRERENDER_OFF;
+#if PLATFORM_PSP
+            OotPspRenderer_SetPauseBackgroundActive(false);
+#endif
 
             func_800981B8(&play->objectCtx);
             func_800418D0(&play->colCtx, play);

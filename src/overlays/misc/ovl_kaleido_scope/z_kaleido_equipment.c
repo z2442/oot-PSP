@@ -71,6 +71,9 @@ static u8 sEquipmentItemOffsets[] = {
 };
 
 void KaleidoScope_DrawEquipmentImage(PlayState* play, void* source, u32 width, u32 height) {
+#if PLATFORM_PSP
+    return;
+#else
     PauseContext* pauseCtx = &play->pauseCtx;
     u8* curTexture;
     s32 vtxIndex;
@@ -134,9 +137,46 @@ void KaleidoScope_DrawEquipmentImage(PlayState* play, void* source, u32 width, u
     }
 
     CLOSE_DISPS(play->state.gfxCtx, "../z_kaleido_equipment.c", 122);
+#endif
 }
 
 void KaleidoScope_DrawPlayerWork(PlayState* play) {
+#if PLATFORM_PSP
+    PauseContext* pauseCtx = &play->pauseCtx;
+    Vec3f pos;
+    Vec3s rot;
+    f32 scale;
+
+    if (pauseCtx->state < PAUSE_STATE_OPENING_1) {
+        return;
+    }
+
+    if (LINK_AGE_IN_YEARS == YEARS_CHILD) {
+        pos.x = -31.0f;
+        pos.y = -48.0f;
+        pos.z = 4.0f;
+        scale = 0.016f;
+    } else if (CUR_EQUIP_VALUE(EQUIP_TYPE_SWORD) != EQUIP_VALUE_SWORD_MASTER) {
+        pos.x = -30.0f;
+        pos.y = -58.0f;
+        pos.z = 5.0f;
+        scale = 0.019f;
+    } else {
+        pos.x = -30.0f;
+        pos.y = -54.0f;
+        pos.z = 5.0f;
+        scale = 0.017f;
+    }
+
+    rot.y = -468;
+    rot.x = rot.z = 0;
+    Player_DrawPauseOnPage(play, pauseCtx->playerSegment, &pauseCtx->playerSkelAnime, &pos, &rot, scale,
+                           SWORD_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_SWORD)),
+                           TUNIC_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_TUNIC)),
+                           SHIELD_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_SHIELD)),
+                           BOOTS_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_BOOTS)));
+    return;
+#else
     PauseContext* pauseCtx = &play->pauseCtx;
     Vec3f pos;
     Vec3s rot;
@@ -166,6 +206,7 @@ void KaleidoScope_DrawPlayerWork(PlayState* play) {
                      TUNIC_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_TUNIC)),
                      SHIELD_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_SHIELD)),
                      BOOTS_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_BOOTS)));
+#endif
 }
 
 #ifndef AVOID_UB

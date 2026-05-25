@@ -31,6 +31,8 @@
 #define BUF_WIDTH (512)
 #define SCR_WIDTH (480)
 #define SCR_HEIGHT (272)
+#define FRAMEBUFFER_SIZE (BUF_WIDTH * SCR_HEIGHT * sizeof(uint16_t))
+#define VRAM_SIZE (2 * 1024 * 1024)
 
 float identity_matrix[4][4] __attribute__((aligned(16))) = { { 1, 0, 0, 0 }, { 0, 1, 0, 0 }, { 0, 0, 1, 0 }, { 0, 0, 0, 1 } };
 
@@ -209,6 +211,14 @@ void *getStaticVramBufferBytes(size_t bytes) {
     return (void *) (((unsigned int) result) + ((unsigned int) sceGeEdramGetAddr()));
 }
 
+static size_t getStaticVramBytesRemaining(void) {
+    if (staticOffset >= VRAM_SIZE) {
+        return 0;
+    }
+
+    return VRAM_SIZE - staticOffset;
+}
+
 #include "gfx_cc.h"
 #include "gfx_rendering_api.h"
 #include "oot_port_macros.h"
@@ -258,6 +268,24 @@ static struct ShaderProgram *cur_shader = NULL;
 static struct SamplerState tmu_state[2];
 static int active_texture_tile = -1;
 static bool gl_blend = false;
+static void *sDrawBuffer;
+static void *sDisplayBuffer;
+static bool sPauseBgActive;
+static bool sPauseBgCaptureRequested;
+static bool sPauseBgCaptured;
+static void *sPauseBgBuffer;
+
+static void *gfx_scegu_vram_cpu_addr(const void *vramBuffer) {
+    return (void *)(((uintptr_t)sceGeEdramGetAddr() | 0x40000000U) + ((uintptr_t)vramBuffer & 0x00FFFFFFU));
+}
+
+static void gfx_scegu_copy_framebuffer_cpu(void *dst, const void *src) {
+    void *dstAddr = gfx_scegu_vram_cpu_addr(dst);
+    const void *srcAddr = gfx_scegu_vram_cpu_addr(src);
+
+    memcpy(dstAddr, srcAddr, FRAMEBUFFER_SIZE);
+    sceKernelDcacheWritebackRange(dstAddr, FRAMEBUFFER_SIZE);
+}
 
 static inline uint32_t get_shader_index(uint32_t id) {
     size_t i;
@@ -719,6 +747,11 @@ static void gfx_scegu_init(void) {
     void *fbp0 = getStaticVramBuffer(BUF_WIDTH, SCR_HEIGHT, GU_PSM_5650);
     void *fbp1 = getStaticVramBuffer(BUF_WIDTH, SCR_HEIGHT, GU_PSM_5650);
     void *zbp = getStaticVramBuffer(BUF_WIDTH, SCR_HEIGHT, GU_PSM_4444);
+    size_t texmanSize;
+
+    sDrawBuffer = fbp0;
+    sDisplayBuffer = fbp1;
+    sPauseBgBuffer = getStaticVramBuffer(BUF_WIDTH, SCR_HEIGHT, GU_PSM_5650);
 
     sceGuStart(GU_DIRECT, list);
     sceGuDrawBuffer(GU_PSM_5650, fbp0, BUF_WIDTH);
@@ -750,9 +783,14 @@ static void gfx_scegu_init(void) {
     sceDisplayWaitVblankStart();
     sceGuDisplay(GU_TRUE);
 
-    void *texman_buffer = getStaticVramBufferBytes(TEXMAN_BUFFER_SIZE);
+    texmanSize = getStaticVramBytesRemaining();
+    if (texmanSize > TEXMAN_BUFFER_SIZE) {
+        texmanSize = TEXMAN_BUFFER_SIZE;
+    }
+
+    void *texman_buffer = getStaticVramBufferBytes(texmanSize);
     void *texman_aligned = (void *) ((((unsigned int) texman_buffer + TEX_ALIGNMENT - 1) / TEX_ALIGNMENT) * TEX_ALIGNMENT);
-    texman_reset(texman_aligned, TEXMAN_BUFFER_SIZE);
+    texman_reset(texman_aligned, texmanSize);
     if (!texman_buffer) {
         char msg[32];
         sprintf(msg, "OUT OF MEMORY!\n");
@@ -763,12 +801,28 @@ static void gfx_scegu_init(void) {
 }
 
 static void gfx_scegu_start_frame(void) {
+    if (sPauseBgCaptureRequested) {
+        gfx_scegu_copy_framebuffer_cpu(sPauseBgBuffer, sDisplayBuffer);
+        sPauseBgCaptureRequested = false;
+        sPauseBgCaptured = true;
+    }
+
+    if (sPauseBgActive && sPauseBgCaptured) {
+        gfx_scegu_copy_framebuffer_cpu(sDrawBuffer, sPauseBgBuffer);
+    }
+
     sceGuStart(GU_DIRECT, list);
     sceGuDisable(GU_SCISSOR_TEST);
     sceGuDepthMask(GU_TRUE); // Must be set to clear Z-buffer
-    sceGuClearColor(0xFF000000);
     sceGuClearDepth(0);
-    sceGuClear(GU_COLOR_BUFFER_BIT | GU_DEPTH_BUFFER_BIT);
+
+    if (sPauseBgActive && sPauseBgCaptured) {
+        sceGuClear(GU_DEPTH_BUFFER_BIT);
+    } else {
+        sceGuClearColor(0xFF000000);
+        sceGuClear(GU_COLOR_BUFFER_BIT | GU_DEPTH_BUFFER_BIT);
+    }
+
     sceGuEnable(GU_SCISSOR_TEST);
     sceGuDepthMask(GU_FALSE);
 
@@ -803,11 +857,14 @@ void gfx_scegu_on_resize(void) {
 }
 
 static void gfx_scegu_end_frame(void) {
+    void *previousDrawBuffer = sDrawBuffer;
+
     sceGuFinish();
 #if OOT_PSP_WAIT_VBLANK
     sceDisplayWaitVblankStart();
 #endif
-    sceGuSwapBuffers();
+    sDrawBuffer = sceGuSwapBuffers();
+    sDisplayBuffer = previousDrawBuffer;
 }
 
 static void gfx_scegu_finish_render(void) {
@@ -839,5 +896,18 @@ struct GfxRenderingAPI gfx_scegu_api = {
     gfx_scegu_end_frame,
     gfx_scegu_finish_render
 };
+
+void gfx_scegu_request_pause_background(void) {
+    sPauseBgCaptureRequested = true;
+}
+
+void gfx_scegu_set_pause_background_active(bool active) {
+    sPauseBgActive = active;
+
+    if (!active) {
+        sPauseBgCaptureRequested = false;
+        sPauseBgCaptured = false;
+    }
+}
 
 #endif // TARGET_SCEGU
