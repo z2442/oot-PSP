@@ -1204,8 +1204,25 @@ PSP_PORT_EXTRACTED_TEXTURE_SOURCES := $(sort $(filter-out %.inc.c,$(wildcard ext
 PSP_PORT_EXTRACTED_MISC_SOURCES := $(sort $(filter-out %.inc.c,$(wildcard extracted/$(VERSION)/assets/misc/*/*.c)))
 
 PSP_PORT_RUNTIME_SOURCES := \
+	src/buffers/audio_heap.c \
 	src/buffers/gfxbuffers.c \
 	src/buffers/zbuffer.c \
+	src/audio/game/data.c \
+	src/audio/game/general.c \
+	src/audio/game/sequence.c \
+	src/audio/game/session_config.c \
+	src/audio/game/session_init.c \
+	src/audio/game/sfx.c \
+	src/audio/game/sfx_params.c \
+	src/audio/internal/data.c \
+	src/audio/internal/effects.c \
+	src/audio/internal/heap.c \
+	src/audio/internal/load.c \
+	src/audio/internal/os.c \
+	src/audio/internal/playback.c \
+	src/audio/internal/seqplayer.c \
+	src/audio/internal/synthesis.c \
+	src/audio/internal/thread.c \
 	src/code/TwoHeadArena.c \
 	src/code/TwoHeadGfxArena.c \
 	src/code/game.c \
@@ -1349,8 +1366,10 @@ PSP_PORT_RUNTIME_SOURCES := \
 	src/port/psp/gfx/gfx_window_psp.c \
 	src/port/psp/gfx/psp_texture_manager.c \
 	src/port/psp/oot_psp_asset_loader.c \
-	src/port/psp/oot_psp_audio.c \
+	src/port/psp/oot_psp_audio_backend.c \
+	src/port/psp/oot_psp_audiomgr.c \
 	src/port/psp/oot_psp_game.c \
+	src/port/psp/oot_psp_mixer.c \
 	src/port/psp/oot_psp_renderer.c \
 	src/port/psp/sys_ucode_psp.c \
 	src/port/psp/libultra_psp.c \
@@ -1379,6 +1398,8 @@ PSP_PORT_ROMINFO_SOURCE := $(PSP_PORT_BUILD_DIR)/oot_psp_rominfo.c
 PSP_PORT_ROMINFO_OBJECT := $(PSP_PORT_BUILD_DIR)/oot_psp_rominfo.o
 PSP_PORT_ASSET_TABLE_SOURCE := $(PSP_PORT_BUILD_DIR)/oot_psp_asset_tables.c
 PSP_PORT_ASSET_TABLE_OBJECT := $(PSP_PORT_BUILD_DIR)/oot_psp_asset_tables.o
+PSP_PORT_AUDIO_TABLE_SOURCE := $(PSP_PORT_BUILD_DIR)/oot_psp_audio_tables.c
+PSP_PORT_AUDIO_TABLE_OBJECT := $(PSP_PORT_BUILD_DIR)/oot_psp_audio_tables.o
 PSP_PORT_ASSET_SEGMENT_SOURCE := $(PSP_PORT_BUILD_DIR)/oot_psp_asset_segments.S
 PSP_PORT_ASSET_SEGMENT_TABLE_SOURCE := $(PSP_PORT_BUILD_DIR)/oot_psp_asset_segments.c
 PSP_PORT_ASSET_SEGMENT_STAMP := $(PSP_PORT_BUILD_DIR)/oot_psp_asset_segments.stamp
@@ -1399,6 +1420,7 @@ PSP_PORT_PBP := $(PSP_PORT_BUILD_DIR)/EBOOT.PBP
 PSP_PORT_DEP_FILES := $(PSP_PORT_RUNTIME_OBJECTS:.o=.d) $(PSP_PORT_RUNTIME_ASM_OBJECTS:.o=.d) \
 	$(PSP_PORT_ASSET_OBJECTS:.o=.d) $(PSP_PORT_NATIVE_SEGMENT_OBJECTS:.o=.d) \
 	$(PSP_PORT_ROMINFO_OBJECT:.o=.d) $(PSP_PORT_ASSET_TABLE_OBJECT:.o=.d) \
+	$(PSP_PORT_AUDIO_TABLE_OBJECT:.o=.d) \
 	$(PSP_PORT_ASSET_SEGMENT_OBJECT:.o=.d) $(PSP_PORT_ASSET_SEGMENT_TABLE_OBJECT:.o=.d) \
 	$(PSP_PORT_PROBE_OBJECT:.o=.d)
 
@@ -1510,7 +1532,7 @@ PSP_PORT_CFLAGS += -pg -g -fno-omit-frame-pointer -fno-optimize-sibling-calls
 endif
 
 PSP_PORT_LIBS := -L$(PSP_PORT_PSPSDK)/lib -L$(PSP_PORT_PREFIX)/lib -lpspgu -lpspgum -lpspjpeg \
-	-lpspdisplay -lpspge -lpspfpu -lpspctrl -lpsppower -lpspdebug
+	-lpspdisplay -lpspge -lpspfpu -lpspctrl -lpsppower -lpspaudio -lpspdebug
 
 ifneq ($(PSP_PORT_GPROF_ENABLED),)
 PSP_PORT_LINKER_DEPS := $(PSP_PORT_GPROF_LINKER_SCRIPT)
@@ -1567,6 +1589,13 @@ $(PSP_PORT_ASSET_TABLE_OBJECT): $(PSP_PORT_ASSET_TABLE_SOURCE)
 	@mkdir -p $(dir $@)
 	$(PSP_PORT_CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $(PSP_PORT_CFLAGS) -o $@ $<
 
+$(PSP_PORT_AUDIO_TABLE_SOURCE): $(PSP_PORT_SETUP_STAMP) tools/psp_port_audio_tables.py baseroms/$(VERSION)/config.yml $(EXTRACTED_DIR)/baserom/code
+	$(PYTHON) tools/psp_port_audio_tables.py $(VERSION) $@
+
+$(PSP_PORT_AUDIO_TABLE_OBJECT): $(PSP_PORT_AUDIO_TABLE_SOURCE)
+	@mkdir -p $(dir $@)
+	$(PSP_PORT_CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $(PSP_PORT_CFLAGS) -o $@ $<
+
 $(PSP_PORT_ASSET_SEGMENT_STAMP): $(PSP_PORT_SETUP_STAMP) tools/psp_port_asset_segments.py include/segment_symbols.h $(PSP_PORT_NATIVE_SEGMENT_OBJECTS)
 	$(PYTHON) tools/psp_port_asset_segments.py $(VERSION) $(PSP_PORT_ASSET_SEGMENT_SOURCE) $(PSP_PORT_ASSET_SEGMENT_TABLE_SOURCE) $(PSP_PORT_ASSET_SEGMENT_DATA_DIR) --build-root $(PSP_PORT_BUILD_DIR)
 	@touch $@
@@ -1618,9 +1647,12 @@ $(PSP_PORT_NATIVE_GENERATED_ASSET_STAMP): $(PSP_PORT_SETUP_STAMP)
 
 $(PSP_PORT_RUNTIME_OBJECTS): $(PSP_PORT_SETUP_STAMP) $(PSP_PORT_RUNTIME_GENERATED_ASSET_STAMP)
 
+$(PSP_PORT_BUILD_DIR)/src/audio/game/session_init.o: $(BUILD_DIR)/assets/audio/sequence_sizes.h
+$(PSP_PORT_BUILD_DIR)/src/audio/internal/seqplayer.o: PSP_PORT_CFLAGS += -DMML_VERSION=MML_VERSION_OOT
+
 $(PSP_PORT_NATIVE_SEGMENT_OBJECTS): $(PSP_PORT_SETUP_STAMP) $(PSP_PORT_EXTRACTED_ASSET_FILES) $(PSP_PORT_NATIVE_GENERATED_ASSET_STAMP)
 
-$(PSP_PORT_LIBRARY): $(PSP_PORT_RUNTIME_OBJECTS) $(PSP_PORT_RUNTIME_ASM_OBJECTS) $(PSP_PORT_ASSET_OBJECTS) $(PSP_PORT_ROMINFO_OBJECT) $(PSP_PORT_ASSET_TABLE_OBJECT) $(PSP_PORT_ASSET_SEGMENT_OBJECT) $(PSP_PORT_ASSET_SEGMENT_TABLE_OBJECT)
+$(PSP_PORT_LIBRARY): $(PSP_PORT_RUNTIME_OBJECTS) $(PSP_PORT_RUNTIME_ASM_OBJECTS) $(PSP_PORT_ASSET_OBJECTS) $(PSP_PORT_ROMINFO_OBJECT) $(PSP_PORT_ASSET_TABLE_OBJECT) $(PSP_PORT_AUDIO_TABLE_OBJECT) $(PSP_PORT_ASSET_SEGMENT_OBJECT) $(PSP_PORT_ASSET_SEGMENT_TABLE_OBJECT)
 	@mkdir -p $(dir $@)
 	$(file >$@.rsp,$^)
 	$(RM) $@

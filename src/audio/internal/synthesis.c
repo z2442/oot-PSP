@@ -4,6 +4,10 @@
 #include "alignment.h"
 #include "ultra64.h"
 #include "audio.h"
+#if defined(TARGET_PSP)
+#define OOT_PSP_MIXER_INLINE
+#include "oot_psp_mixer.h"
+#endif
 
 // DMEM Addresses for the RSP
 #define DMEM_TEMP 0x3C0
@@ -39,6 +43,19 @@ Acmd* AudioSynth_FinalResample(Acmd* cmd, NoteSynthesisState* synthState, s32 si
                                s32 resampleFlags);
 
 u32 sEnvMixerOp = _SHIFTL(A_ENVMIXER, 24, 8);
+
+#if defined(TARGET_PSP)
+#define OOT_PSP_AUDIO_NATIVE_PTR_START 0x08000000U
+#define OOT_PSP_AUDIO_NATIVE_PTR_END   0x0C000000U
+
+static u8 sOotPspAudioSynthBadSampleLogged;
+
+static s32 OotPspAudioSynth_IsAlignedNativePtr(const void* ptr) {
+    u32 addr = (u32)ptr;
+
+    return (addr >= OOT_PSP_AUDIO_NATIVE_PTR_START) && (addr < OOT_PSP_AUDIO_NATIVE_PTR_END) && ((addr & 3) == 0);
+}
+#endif
 
 // Store the left dry channel in a temp space to be delayed to produce the haas effect
 u32 sEnvMixerLeftHaasDmemDests =
@@ -228,6 +245,24 @@ void func_800DB2C0(s32 updateIndex, s32 noteIndex) {
         }
     }
 }
+
+#if defined(TARGET_PSP)
+static Acmd* OotPspAudioSynth_DropBadNote(Acmd* cmd, s32 updateIndex, s32 noteIndex, NoteSubEu* noteSubEu, Note* note,
+                                          const char* reason, TunedSample* tunedSample, Sample* sample) {
+    if (!sOotPspAudioSynthBadSampleLogged) {
+        sOotPspAudioSynthBadSampleLogged = true;
+        osSyncPrintf("oot-psp audio dropped bad synth note reason=%s note=%d tuned=%p sample=%p\n", reason, noteIndex,
+                     tunedSample, sample);
+    }
+
+    noteSubEu->bitField0.enabled = false;
+    noteSubEu->bitField0.finished = true;
+    note->noteSubEu.bitField0.enabled = false;
+    note->noteSubEu.bitField0.finished = true;
+    func_800DB2C0(updateIndex, noteIndex);
+    return cmd;
+}
+#endif
 
 /**
  * original name: Nas_LoadAux2nd
@@ -419,8 +454,13 @@ void AudioSynth_Stub_800DBC5C(void) {
 
 // possible fake match?
 void AudioSynth_DMemMove(Acmd* cmd, s32 dmemIn, s32 dmemOut, u32 size) {
+#if defined(TARGET_PSP)
+    OOT_PSP_MIXER_EVAL(cmd);
+    OotPspMixer_DMEMMove(dmemIn, dmemOut, size);
+#else
     cmd->words.w0 = _SHIFTL(A_DMEMMOVE, 24, 8) | _SHIFTL(dmemIn, 0, 24);
     cmd->words.w1 = _SHIFTL(dmemOut, 16, 16) | _SHIFTL(size, 0, 16);
+#endif
 }
 
 void AudioSynth_Stub_800DBC90(void) {
@@ -436,8 +476,13 @@ void AudioSynth_Stub_800DBCA8(void) {
 }
 
 void AudioSynth_InterL(Acmd* cmd, s32 dmemIn, s32 dmemOut, s32 numSamples) {
+#if defined(TARGET_PSP)
+    OOT_PSP_MIXER_EVAL(cmd);
+    OotPspMixer_Interl(dmemIn, dmemOut, numSamples);
+#else
     cmd->words.w0 = _SHIFTL(A_INTERL, 24, 8) | _SHIFTL(numSamples, 0, 16);
     cmd->words.w1 = _SHIFTL(dmemIn, 16, 16) | _SHIFTL(dmemOut, 0, 16);
+#endif
 }
 
 void AudioSynth_EnvSetup1(Acmd* cmd, s32 arg1, s32 arg2, s32 arg3, s32 arg4) {
@@ -456,8 +501,13 @@ void AudioSynth_SaveBuffer(Acmd* cmd, s32 dmemSrc, s32 size, void* addrDest) {
 }
 
 void AudioSynth_EnvSetup2(Acmd* cmd, s32 volLeft, s32 volRight) {
+#if defined(TARGET_PSP)
+    OOT_PSP_MIXER_EVAL(cmd);
+    OotPspMixer_EnvSetup2(volLeft, volRight);
+#else
     cmd->words.w0 = _SHIFTL(A_ENVSETUP2, 24, 8);
     cmd->words.w1 = _SHIFTL(volLeft, 16, 16) | _SHIFTL(volRight, 0, 16);
+#endif
 }
 
 void AudioSynth_Stub_800DBD7C(void) {
@@ -474,13 +524,23 @@ void AudioSynth_S8Dec(Acmd* cmd, s32 flags, s16* state) {
 }
 
 void AudioSynth_HiLoGain(Acmd* cmd, s32 gain, s32 dmemIn, s32 dmemOut, s32 size) {
+#if defined(TARGET_PSP)
+    OOT_PSP_MIXER_EVAL(cmd);
+    OotPspMixer_HiLoGain(gain, dmemIn, dmemOut, size);
+#else
     cmd->words.w0 = _SHIFTL(A_HILOGAIN, 24, 8) | _SHIFTL(gain, 16, 8) | _SHIFTL(size, 0, 16);
     cmd->words.w1 = _SHIFTL(dmemIn, 16, 16) | _SHIFTL(dmemOut, 0, 16);
+#endif
 }
 
 void AudioSynth_UnkCmd19(Acmd* cmd, s32 arg1, s32 arg2, s32 size, s32 arg4) {
+#if defined(TARGET_PSP)
+    OOT_PSP_MIXER_EVAL(cmd);
+    OotPspMixer_UnkCmd19(arg1, arg2, size, arg4);
+#else
     cmd->words.w0 = _SHIFTL(A_UNK19, 24, 8) | _SHIFTL(arg4, 16, 8) | _SHIFTL(size, 0, 16);
     cmd->words.w1 = _SHIFTL(arg1, 16, 16) | _SHIFTL(arg2, 0, 16);
+#endif
 }
 
 void AudioSynth_Stub_800DBE18(void) {
@@ -496,8 +556,13 @@ void AudioSynth_Stub_800DBE30(void) {
 }
 
 void AudioSynth_UnkCmd3(Acmd* cmd, s32 arg1, s32 arg2, s32 size) {
+#if defined(TARGET_PSP)
+    OOT_PSP_MIXER_EVAL(cmd);
+    OotPspMixer_UnkCmd3(arg1, arg2, size);
+#else
     cmd->words.w0 = _SHIFTL(A_UNK3, 24, 8) | _SHIFTL(size, 0, 16);
     cmd->words.w1 = _SHIFTL(arg1, 16, 16) | _SHIFTL(arg2, 0, 16);
+#endif
 }
 
 void AudioSynth_Stub_800DBE5C(void) {
@@ -781,6 +846,7 @@ Acmd* AudioSynth_ProcessNote(s32 noteIndex, NoteSubEu* noteSubEu, NoteSynthesisS
                              s32 aiBufLen, Acmd* cmd, s32 updateIndex) {
     s32 pad1[3];
     Sample* sample;
+    TunedSample* tunedSample;
     AdpcmLoop* loopInfo;
     s32 nSamplesUntilLoopEnd;
     s32 nSamplesInThisIteration;
@@ -856,7 +922,11 @@ Acmd* AudioSynth_ProcessNote(s32 noteIndex, NoteSubEu* noteSubEu, NoteSynthesisS
     samplesLenFixedPoint = (resamplingRateFixedPoint * aiBufLen * 2) + synthState->samplePosFrac;
     numSamplesToLoad = samplesLenFixedPoint >> 16;
 
-#if !(OOT_VERSION < NTSC_1_1 || !PLATFORM_N64)
+#if defined(TARGET_PSP)
+    if (numSamplesToLoad == 0) {
+        skipBytes = 0;
+    }
+#elif !(OOT_VERSION < NTSC_1_1 || !PLATFORM_N64)
     if (numSamplesToLoad == 0) {
         skipBytes = false;
     }
@@ -878,8 +948,27 @@ Acmd* AudioSynth_ProcessNote(s32 noteIndex, NoteSubEu* noteSubEu, NoteSynthesisS
         sampleDmemBeforeResampling = DMEM_UNCOMPRESSED_NOTE + (synthState->samplePosInt * (s32)SAMPLE_SIZE);
         synthState->samplePosInt += numSamplesToLoad;
     } else {
-        sample = noteSubEu->tunedSample->sample;
+        tunedSample = noteSubEu->tunedSample;
+#if defined(TARGET_PSP)
+        if ((tunedSample == NULL) || !OotPspAudioSynth_IsAlignedNativePtr(tunedSample)) {
+            return OotPspAudioSynth_DropBadNote(cmd, updateIndex, noteIndex, noteSubEu, note, "tuned", tunedSample,
+                                                NULL);
+        }
+        if ((tunedSample->sample == NULL) || !OotPspAudioSynth_IsAlignedNativePtr(tunedSample->sample)) {
+            return OotPspAudioSynth_DropBadNote(cmd, updateIndex, noteIndex, noteSubEu, note, "sample", tunedSample,
+                                                tunedSample->sample);
+        }
+#endif
+        sample = tunedSample->sample;
         loopInfo = sample->loop;
+#if defined(TARGET_PSP)
+        if (!OotPspAudioSynth_IsAlignedNativePtr(loopInfo) || (sample->codec > CODEC_S16) ||
+            (((sample->codec == CODEC_ADPCM) || (sample->codec == CODEC_SMALL_ADPCM)) &&
+             !OotPspAudioSynth_IsAlignedNativePtr(sample->book))) {
+            return OotPspAudioSynth_DropBadNote(cmd, updateIndex, noteIndex, noteSubEu, note, "fields", tunedSample,
+                                                sample);
+        }
+#endif
         loopEndPos = loopInfo->header.end;
         sampleAddr = (u32)sample->sampleAddr;
         resampledTempLen = 0;

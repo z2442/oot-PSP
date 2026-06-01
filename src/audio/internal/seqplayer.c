@@ -20,6 +20,9 @@
 #include "attributes.h"
 #include "ultra64.h"
 #include "audio.h"
+#if defined(TARGET_PSP)
+#include <string.h>
+#endif
 
 static_assert(MML_VERSION == MML_VERSION_OOT, "This file implements the OoT version of the MML");
 
@@ -27,6 +30,176 @@ static_assert(MML_VERSION == MML_VERSION_OOT, "This file implements the OoT vers
 #define PORTAMENTO_MODE(x) ((x).mode & ~0x80)
 
 #define PROCESS_SCRIPT_END -1
+
+#if defined(TARGET_PSP)
+#define OOT_PSP_AUDIO_NATIVE_PTR_START 0x08000000U
+#define OOT_PSP_AUDIO_NATIVE_PTR_END   0x0C000000U
+
+static u8 sOotPspAudioSeqBadSampleLogged;
+static u8 sOotPspAudioListBadLogged;
+static u8 sOotPspAudioSeqBadChannelLogCount;
+static u8 sOotPspAudioSeqBadPtrLogCount;
+static SequenceChannel sOotPspAudioSequenceChannels[4][SEQ_NUM_CHANNELS] __attribute__((aligned(16)));
+
+static s32 OotPspAudio_IsAlignedNativePtr(const void* ptr) {
+    u32 addr = (u32)ptr;
+
+    return (addr >= OOT_PSP_AUDIO_NATIVE_PTR_START) && (addr < OOT_PSP_AUDIO_NATIVE_PTR_END) && ((addr & 3) == 0);
+}
+
+static void OotPspAudio_LogBadChannel(const char* op, SequencePlayer* seqPlayer, s32 channelIndex,
+                                      SequenceChannel* channel) {
+    if (sOotPspAudioSeqBadChannelLogCount < 8) {
+        s32 seqPlayerIsValid = OotPspAudio_IsAlignedNativePtr(seqPlayer);
+
+        sOotPspAudioSeqBadChannelLogCount++;
+        osSyncPrintf("oot-psp audio skipped bad channel op=%s seq=%p seqId=%u index=%d channel=%p\n", op, seqPlayer,
+                     seqPlayerIsValid ? seqPlayer->seqId : 0xFF, channelIndex, channel);
+    }
+}
+
+static s32 OotPspAudio_IsNoneSequenceChannel(SequenceChannel* channel) {
+    return channel == &gAudioCtx.sequenceChannelNone;
+}
+
+static s32 OotPspAudio_IsSafeSequenceChannel(SequenceChannel* channel) {
+    return (channel != NULL) && !OotPspAudio_IsNoneSequenceChannel(channel) && OotPspAudio_IsAlignedNativePtr(channel) &&
+           IS_SEQUENCE_CHANNEL_VALID(channel);
+}
+
+static s32 OotPspAudio_IsOwnedSequenceChannel(SequencePlayer* seqPlayer, SequenceChannel* channel) {
+    return OotPspAudio_IsSafeSequenceChannel(channel) && (channel->seqPlayer == seqPlayer);
+}
+
+static SequenceChannel* OotPspAudio_GetSafeSequenceChannel(SequencePlayer* seqPlayer, s32 channelIndex,
+                                                           const char* op) {
+    SequenceChannel* channel;
+
+    if (!OotPspAudio_IsAlignedNativePtr(seqPlayer) || (channelIndex < 0) || (channelIndex >= SEQ_NUM_CHANNELS)) {
+        OotPspAudio_LogBadChannel(op, seqPlayer, channelIndex, NULL);
+        return NULL;
+    }
+
+    channel = seqPlayer->channels[channelIndex];
+    if (OotPspAudio_IsNoneSequenceChannel(channel)) {
+        return NULL;
+    }
+
+    if (!OotPspAudio_IsOwnedSequenceChannel(seqPlayer, channel)) {
+        OotPspAudio_LogBadChannel(op, seqPlayer, channelIndex, channel);
+        seqPlayer->channels[channelIndex] = &gAudioCtx.sequenceChannelNone;
+        return NULL;
+    }
+
+    return channel;
+}
+
+static void OotPspAudio_LogBadList(const char* op, AudioListItem* list, AudioListItem* item) {
+    if (!sOotPspAudioListBadLogged) {
+        s32 listIsValid = OotPspAudio_IsAlignedNativePtr(list);
+
+        sOotPspAudioListBadLogged = true;
+        osSyncPrintf("oot-psp audio repaired bad %s list=%p prev=%p next=%p item=%p itemPrev=%p itemNext=%p\n", op,
+                     list, listIsValid ? list->prev : NULL, listIsValid ? list->next : NULL, item,
+                     OotPspAudio_IsAlignedNativePtr(item) ? item->prev : NULL,
+                     OotPspAudio_IsAlignedNativePtr(item) ? item->next : NULL);
+    }
+}
+
+static s32 OotPspAudio_RebuildAudioList(AudioListItem* list) {
+    AudioListItem* prev = list;
+    AudioListItem* cur;
+    s32 count = 0;
+
+    if (!OotPspAudio_IsAlignedNativePtr(list)) {
+        return false;
+    }
+
+    if (!OotPspAudio_IsAlignedNativePtr(list->next)) {
+        list->prev = list;
+        list->next = list;
+        list->u.count = 0;
+        return false;
+    }
+
+    cur = list->next;
+    while (cur != list) {
+        if (!OotPspAudio_IsAlignedNativePtr(cur) || (cur->prev != prev) || (count >= 256)) {
+            prev->next = list;
+            list->prev = prev;
+            list->u.count = count;
+            return false;
+        }
+
+        prev = cur;
+        cur = cur->next;
+        count++;
+    }
+
+    list->prev = prev;
+    list->u.count = count;
+    return true;
+}
+
+static s32 OotPspAudio_PrepareAudioListTail(const char* op, AudioListItem* list) {
+    AudioListItem* item;
+
+    if (!OotPspAudio_IsAlignedNativePtr(list)) {
+        OotPspAudio_LogBadList(op, list, NULL);
+        return false;
+    }
+
+    item = list->prev;
+    if ((item == NULL) || !OotPspAudio_IsAlignedNativePtr(item) ||
+        ((item != list) && (!OotPspAudio_IsAlignedNativePtr(item->prev) || (item->next != list)))) {
+        OotPspAudio_LogBadList(op, list, item);
+        OotPspAudio_RebuildAudioList(list);
+    }
+
+    item = list->prev;
+    return (item != NULL) && OotPspAudio_IsAlignedNativePtr(item) &&
+           ((item == list) || (OotPspAudio_IsAlignedNativePtr(item->prev) && (item->next == list)));
+}
+
+static s32 OotPspAudio_IsSafeTunedSample(TunedSample* tunedSample) {
+    Sample* sample;
+
+    if (tunedSample == NULL) {
+        return true;
+    }
+
+    if (!OotPspAudio_IsAlignedNativePtr(tunedSample)) {
+        return false;
+    }
+
+    sample = tunedSample->sample;
+    if (!OotPspAudio_IsAlignedNativePtr(sample) || !OotPspAudio_IsAlignedNativePtr(sample->loop) ||
+        (sample->codec > CODEC_S16) || (sample->medium > MEDIUM_DISK_DRIVE)) {
+        return false;
+    }
+
+    if (((sample->codec == CODEC_ADPCM) || (sample->codec == CODEC_SMALL_ADPCM)) &&
+        !OotPspAudio_IsAlignedNativePtr(sample->book)) {
+        return false;
+    }
+
+    return true;
+}
+
+static void OotPspAudio_DropBadSeqSample(SequenceLayer* layer, s32 instOrWave, u8 semitone) {
+    TunedSample* tunedSample = layer->tunedSample;
+
+    if (!sOotPspAudioSeqBadSampleLogged) {
+        sOotPspAudioSeqBadSampleLogged = true;
+        osSyncPrintf("oot-psp audio dropped bad seq sample font=%u inst=%d semitone=%u tuned=%p\n",
+                     layer->channel != NULL ? layer->channel->fontId : 0xFF, instOrWave, semitone, tunedSample);
+    }
+
+    layer->muted = true;
+    layer->tunedSample = NULL;
+    layer->delay2 = layer->delay;
+}
+#endif
 
 typedef enum PortamentoMode {
     /* 0 */ PORTAMENTO_MODE_OFF,
@@ -48,6 +221,193 @@ s32 AudioSeq_SeqLayerProcessScriptStep4(SequenceLayer* layer, s32 cmd);
 s32 AudioSeq_SeqLayerProcessScriptStep5(SequenceLayer* layer, s32 sameTunedSample);
 
 u8 AudioSeq_GetInstrument(SequenceChannel* channel, u8 instId, Instrument** instOut, AdsrSettings* adsr);
+
+static u16 AudioSeq_ReadU16(const u8* ptr) {
+    return ((u16)ptr[0] << 8) | ptr[1];
+}
+
+static s32 AudioSeq_CanIndexWithTR(s8 value) {
+    return value != SEQ_IO_VAL_NONE;
+}
+
+#if defined(TARGET_PSP)
+static u32 OotPspAudio_GetRealSequenceId(u32 seqId) {
+    AudioTable* table = gAudioCtx.sequenceTable;
+
+    if (!OotPspAudio_IsAlignedNativePtr(table) || (seqId >= (u32)table->header.numEntries)) {
+        return seqId;
+    }
+
+    if (table->entries[seqId].size == 0) {
+        seqId = table->entries[seqId].romAddr;
+    }
+
+    return seqId;
+}
+
+static s32 OotPspAudio_GetSequenceSpan(SequencePlayer* seqPlayer, u8** baseOut, u32* lenOut) {
+    AudioTable* table = gAudioCtx.sequenceTable;
+    void* cachedSeq;
+    u32 seqId;
+    u32 len;
+
+    if (!OotPspAudio_IsAlignedNativePtr(seqPlayer) || !OotPspAudio_IsAlignedNativePtr(table) ||
+        (seqPlayer->seqData == NULL)) {
+        return false;
+    }
+
+    seqId = OotPspAudio_GetRealSequenceId(seqPlayer->seqId);
+    if (seqId >= (u32)table->header.numEntries) {
+        return false;
+    }
+
+    len = table->entries[seqId].size;
+    if (len == 0) {
+        return false;
+    }
+
+    cachedSeq = AudioHeap_SearchCaches(SEQUENCE_TABLE, CACHE_EITHER, seqId);
+    if (cachedSeq != seqPlayer->seqData) {
+        return false;
+    }
+
+    *baseOut = seqPlayer->seqData;
+    *lenOut = len;
+    return true;
+}
+
+static void OotPspAudio_LogBadSeqPtr(const char* op, SequencePlayer* seqPlayer, const void* ptr, u32 size) {
+    u8* base = NULL;
+    u32 len = 0;
+    s32 seqPlayerIsValid = OotPspAudio_IsAlignedNativePtr(seqPlayer);
+
+    if (sOotPspAudioSeqBadPtrLogCount >= 12) {
+        return;
+    }
+
+    if (seqPlayerIsValid) {
+        OotPspAudio_GetSequenceSpan(seqPlayer, &base, &len);
+    }
+
+    sOotPspAudioSeqBadPtrLogCount++;
+    osSyncPrintf("oot-psp audio stopped bad seq ptr op=%s seq=%p seqId=%u ptr=%p size=%u base=%p len=%u\n", op,
+                 seqPlayer, seqPlayerIsValid ? seqPlayer->seqId : 0xFF, ptr, size, base, len);
+}
+
+static s32 OotPspAudio_IsSeqRange(SequencePlayer* seqPlayer, const void* ptr, u32 size) {
+    u8* base;
+    u32 len;
+    u32 addr;
+    u32 baseAddr;
+
+    if ((ptr == NULL) || !OotPspAudio_GetSequenceSpan(seqPlayer, &base, &len) || (size > len)) {
+        return false;
+    }
+
+    addr = (u32)ptr;
+    baseAddr = (u32)base;
+    return (addr >= baseAddr) && (addr <= (baseAddr + len - size));
+}
+
+static u8* OotPspAudio_GetSeqPtr(SequencePlayer* seqPlayer, u32 offset, u32 size, const char* op) {
+    u8* base;
+    u32 len;
+
+    if (!OotPspAudio_GetSequenceSpan(seqPlayer, &base, &len) || (size > len) || (offset > (len - size))) {
+        OotPspAudio_LogBadSeqPtr(
+            op, seqPlayer,
+            OotPspAudio_IsAlignedNativePtr(seqPlayer) ? (void*)((u32)seqPlayer->seqData + offset) : NULL, size);
+        return NULL;
+    }
+
+    return base + offset;
+}
+
+static s32 OotPspAudio_ValidateSeqPtr(SequencePlayer* seqPlayer, const void* ptr, u32 size, const char* op) {
+    if (!OotPspAudio_IsSeqRange(seqPlayer, ptr, size)) {
+        OotPspAudio_LogBadSeqPtr(op, seqPlayer, ptr, size);
+        return false;
+    }
+
+    return true;
+}
+
+static s32 OotPspAudio_ValidateSeqCompressedU16(SequencePlayer* seqPlayer, SeqScriptState* state, const char* op) {
+    if (!OotPspAudio_ValidateSeqPtr(seqPlayer, state->pc, 1, op)) {
+        return false;
+    }
+
+    if (((*state->pc & 0x80) != 0) && !OotPspAudio_ValidateSeqPtr(seqPlayer, state->pc, 2, op)) {
+        return false;
+    }
+
+    return true;
+}
+
+static s32 OotPspAudio_ReadSeqU16(SequencePlayer* seqPlayer, u32 offset, const char* op, u16* value) {
+    u8* data = OotPspAudio_GetSeqPtr(seqPlayer, offset, 2, op);
+
+    if (data == NULL) {
+        return false;
+    }
+
+    *value = AudioSeq_ReadU16(data);
+    return true;
+}
+
+static s32 OotPspAudio_SetChannelDynTable(SequencePlayer* seqPlayer, SequenceChannel* channel, u32 offset,
+                                          const char* op) {
+    u8* data = OotPspAudio_GetSeqPtr(seqPlayer, offset, 1, op);
+
+    if (data == NULL) {
+        channel->dynTable = NULL;
+        return false;
+    }
+
+    channel->dynTable = (void*)data;
+    return true;
+}
+
+static s32 OotPspAudio_ReadDynTableU16(SequencePlayer* seqPlayer, SequenceChannel* channel, s8 index, const char* op,
+                                       u16* value) {
+    u8* data;
+    s32 offset;
+
+    if (channel->dynTable == NULL) {
+        OotPspAudio_LogBadSeqPtr(op, seqPlayer, NULL, 2);
+        return false;
+    }
+
+    offset = index * 2;
+    data = (u8*)((u32)channel->dynTable + offset);
+    if (!OotPspAudio_ValidateSeqPtr(seqPlayer, data, 2, op)) {
+        channel->dynTable = NULL;
+        return false;
+    }
+
+    *value = AudioSeq_ReadU16(data);
+    return true;
+}
+
+static s32 OotPspAudio_ReadDynTableU8(SequencePlayer* seqPlayer, SequenceChannel* channel, s8 index, const char* op,
+                                      u8* value) {
+    u8* data;
+
+    if (channel->dynTable == NULL) {
+        OotPspAudio_LogBadSeqPtr(op, seqPlayer, NULL, 1);
+        return false;
+    }
+
+    data = (u8*)((u32)channel->dynTable + index);
+    if (!OotPspAudio_ValidateSeqPtr(seqPlayer, data, 1, op)) {
+        channel->dynTable = NULL;
+        return false;
+    }
+
+    *value = *data;
+    return true;
+}
+#endif
 
 /**
  * sSeqInstructionArgsTable is a table for each sequence instruction
@@ -160,6 +520,25 @@ u8 sSeqInstructionArgsTable[] = {
     CMD_ARGS_0(),    // ASEQ_OP_END
 };
 
+#if defined(TARGET_PSP)
+static u32 OotPspAudio_GetControlFlowArgSize(u8 cmd) {
+    u8 highBits = sSeqInstructionArgsTable[cmd - 0xB0];
+
+    if ((highBits & 3) == 0) {
+        return 0;
+    }
+
+    return (highBits & 0x80) ? 2 : 1;
+}
+
+static s32 OotPspAudio_ValidateControlFlowArg(SequencePlayer* seqPlayer, SeqScriptState* state, u8 cmd,
+                                              const char* op) {
+    u32 size = OotPspAudio_GetControlFlowArgSize(cmd);
+
+    return (size == 0) || OotPspAudio_ValidateSeqPtr(seqPlayer, state->pc, size, op);
+}
+#endif
+
 /**
  * Read and return the argument from the sequence script for a control flow instruction.
  * Control flow instructions (>= ASEQ_OP_CONTROL_FLOW_FIRST) can only have 0 or 1 args.
@@ -191,31 +570,69 @@ u16 AudioSeq_GetScriptControlFlowArgument(SeqScriptState* state, u8 cmd) {
  * original name: Common_Com
  */
 s32 AudioSeq_HandleScriptFlowControl(SequencePlayer* seqPlayer, SeqScriptState* state, s32 cmd, s32 cmdArg) {
+#if defined(TARGET_PSP)
+    u8* data;
+#endif
+
     switch (cmd) {
         case ASEQ_OP_END:
             if (state->depth == 0) {
                 return PROCESS_SCRIPT_END;
             }
+#if defined(TARGET_PSP)
+            if ((state->depth > ARRAY_COUNT(state->stack)) ||
+                !OotPspAudio_ValidateSeqPtr(seqPlayer, state->stack[state->depth - 1], 1, "flow-end")) {
+                return PROCESS_SCRIPT_END;
+            }
+#endif
             state->pc = state->stack[--state->depth];
             break;
 
         case ASEQ_OP_DELAY:
+#if defined(TARGET_PSP)
+            if (!OotPspAudio_ValidateSeqCompressedU16(seqPlayer, state, "flow-delay")) {
+                return PROCESS_SCRIPT_END;
+            }
+#endif
             return AudioSeq_ScriptReadCompressedU16(state);
 
         case ASEQ_OP_DELAY1:
             return 1;
 
         case ASEQ_OP_CALL:
+#if defined(TARGET_PSP)
+            if (state->depth >= ARRAY_COUNT(state->stack)) {
+                return PROCESS_SCRIPT_END;
+            }
+            data = OotPspAudio_GetSeqPtr(seqPlayer, (u16)cmdArg, 1, "flow-call");
+            if (data == NULL) {
+                return PROCESS_SCRIPT_END;
+            }
+            state->stack[state->depth++] = state->pc;
+            state->pc = data;
+#else
             state->stack[state->depth++] = state->pc;
             state->pc = seqPlayer->seqData + (u16)cmdArg;
+#endif
             break;
 
         case ASEQ_OP_LOOP:
+#if defined(TARGET_PSP)
+            if (state->depth >= ARRAY_COUNT(state->stack)) {
+                return PROCESS_SCRIPT_END;
+            }
+#endif
             state->remLoopIters[state->depth] = cmdArg;
             state->stack[state->depth++] = state->pc;
             break;
 
         case ASEQ_OP_LOOPEND:
+#if defined(TARGET_PSP)
+            if ((state->depth == 0) || (state->depth > ARRAY_COUNT(state->stack)) ||
+                !OotPspAudio_ValidateSeqPtr(seqPlayer, state->stack[state->depth - 1], 1, "flow-loopend")) {
+                return PROCESS_SCRIPT_END;
+            }
+#endif
             state->remLoopIters[state->depth - 1]--;
             if (state->remLoopIters[state->depth - 1] != 0) {
                 state->pc = state->stack[state->depth - 1];
@@ -225,6 +642,11 @@ s32 AudioSeq_HandleScriptFlowControl(SequencePlayer* seqPlayer, SeqScriptState* 
             break;
 
         case ASEQ_OP_BREAK:
+#if defined(TARGET_PSP)
+            if (state->depth == 0) {
+                return PROCESS_SCRIPT_END;
+            }
+#endif
             state->depth--;
             break;
 
@@ -241,7 +663,15 @@ s32 AudioSeq_HandleScriptFlowControl(SequencePlayer* seqPlayer, SeqScriptState* 
             if (cmd == ASEQ_OP_BGEZ && state->value < 0) {
                 break;
             }
+#if defined(TARGET_PSP)
+            data = OotPspAudio_GetSeqPtr(seqPlayer, (u16)cmdArg, 1, "flow-jump");
+            if (data == NULL) {
+                return PROCESS_SCRIPT_END;
+            }
+            state->pc = data;
+#else
             state->pc = seqPlayer->seqData + (u16)cmdArg;
+#endif
             break;
 
         case ASEQ_OP_RBLTZ:
@@ -253,7 +683,15 @@ s32 AudioSeq_HandleScriptFlowControl(SequencePlayer* seqPlayer, SeqScriptState* 
             if (cmd == ASEQ_OP_RBLTZ && state->value >= 0) {
                 break;
             }
+#if defined(TARGET_PSP)
+            data = state->pc + (s8)(cmdArg & 0xFF);
+            if (!OotPspAudio_ValidateSeqPtr(seqPlayer, data, 1, "flow-rjump")) {
+                return PROCESS_SCRIPT_END;
+            }
+            state->pc = data;
+#else
             state->pc += (s8)(cmdArg & 0xFF);
+#endif
             break;
     }
 
@@ -265,6 +703,13 @@ s32 AudioSeq_HandleScriptFlowControl(SequencePlayer* seqPlayer, SeqScriptState* 
  */
 void AudioSeq_InitSequenceChannel(SequenceChannel* channel) {
     s32 i;
+
+#if defined(TARGET_PSP)
+    if (!OotPspAudio_IsAlignedNativePtr(channel)) {
+        OotPspAudio_LogBadChannel("init-channel", NULL, -1, channel);
+        return;
+    }
+#endif
 
     if (channel == &gAudioCtx.sequenceChannelNone) {
         return;
@@ -282,6 +727,10 @@ void AudioSeq_InitSequenceChannel(SequenceChannel* channel) {
     channel->stereo.asByte = 0;
     channel->changes.asByte = 0xFF;
     channel->scriptState.depth = 0;
+    channel->scriptState.value = 0;
+    channel->scriptState.pc = NULL;
+    channel->dynTable = NULL;
+    channel->unk_22 = 0;
     channel->newPan = 0x40;
     channel->panChannelWeight = 0x80;
     channel->velocityRandomVariance = 0;
@@ -324,6 +773,14 @@ void AudioSeq_InitSequenceChannel(SequenceChannel* channel) {
 s32 AudioSeq_SeqChannelSetLayer(SequenceChannel* channel, s32 layerIndex) {
     SequenceLayer* layer;
     s32 pad;
+
+#if defined(TARGET_PSP)
+    if (!OotPspAudio_IsSafeSequenceChannel(channel) || (layerIndex < 0) ||
+        (layerIndex >= (s32)ARRAY_COUNT(channel->layers))) {
+        OotPspAudio_LogBadChannel("set-layer", NULL, layerIndex, channel);
+        return -1;
+    }
+#endif
 
     if (channel->layers[layerIndex] == NULL) {
         layer = AudioSeq_AudioListPopBack(&gAudioCtx.layerFreeList);
@@ -372,6 +829,19 @@ s32 AudioSeq_SeqChannelSetLayer(SequenceChannel* channel, s32 layerIndex) {
  * original name: Nas_ReleaseNoteTrack
  */
 void AudioSeq_SeqLayerDisable(SequenceLayer* layer) {
+#if defined(TARGET_PSP)
+    if ((layer != NULL) && !OotPspAudio_IsAlignedNativePtr(layer)) {
+        OotPspAudio_LogBadChannel("layer-disable", NULL, -1, NULL);
+        return;
+    }
+
+    if ((layer != NULL) && (layer->channel != &gAudioCtx.sequenceChannelNone) &&
+        !OotPspAudio_IsSafeSequenceChannel(layer->channel)) {
+        OotPspAudio_LogBadChannel("layer-channel", NULL, -1, layer->channel);
+        layer->channel = &gAudioCtx.sequenceChannelNone;
+    }
+#endif
+
     if (layer != NULL) {
         if (layer->channel != &gAudioCtx.sequenceChannelNone && layer->channel->seqPlayer->finished == 1) {
             Audio_SeqLayerNoteRelease(layer);
@@ -387,7 +857,16 @@ void AudioSeq_SeqLayerDisable(SequenceLayer* layer) {
  * original name: Nas_CloseNoteTrack
  */
 void AudioSeq_SeqLayerFree(SequenceChannel* channel, s32 layerIndex) {
-    SequenceLayer* layer = channel->layers[layerIndex];
+    SequenceLayer* layer;
+
+#if defined(TARGET_PSP)
+    if (!OotPspAudio_IsSafeSequenceChannel(channel) || (layerIndex < 0) ||
+        (layerIndex >= (s32)ARRAY_COUNT(channel->layers))) {
+        OotPspAudio_LogBadChannel("layer-free", NULL, layerIndex, channel);
+        return;
+    }
+#endif
+    layer = channel->layers[layerIndex];
 
     if (layer != NULL) {
         AudioSeq_AudioListPushBack(&gAudioCtx.layerFreeList, &layer->listItem);
@@ -401,6 +880,13 @@ void AudioSeq_SeqLayerFree(SequenceChannel* channel, s32 layerIndex) {
  */
 void AudioSeq_SequenceChannelDisable(SequenceChannel* channel) {
     s32 i;
+
+#if defined(TARGET_PSP)
+    if (!OotPspAudio_IsSafeSequenceChannel(channel)) {
+        OotPspAudio_LogBadChannel("disable", NULL, -1, channel);
+        return;
+    }
+#endif
 
     for (i = 0; i < 4; i++) {
         AudioSeq_SeqLayerFree(channel, i);
@@ -420,10 +906,19 @@ void AudioSeq_SequencePlayerSetupChannels(SequencePlayer* seqPlayer, u16 channel
 
     for (i = 0; i < SEQ_NUM_CHANNELS; i++) {
         if (channelBits & 1) {
+#if defined(TARGET_PSP)
+            channel = OotPspAudio_GetSafeSequenceChannel(seqPlayer, i, "setup-channel");
+            if (channel != NULL) {
+                channel->fontId = seqPlayer->defaultFont;
+                channel->muteBehavior = seqPlayer->muteBehavior;
+                channel->noteAllocPolicy = seqPlayer->noteAllocPolicy;
+            }
+#else
             channel = seqPlayer->channels[i];
             channel->fontId = seqPlayer->defaultFont;
             channel->muteBehavior = seqPlayer->muteBehavior;
             channel->noteAllocPolicy = seqPlayer->noteAllocPolicy;
+#endif
         }
         channelBits = channelBits >> 1;
     }
@@ -437,10 +932,17 @@ void AudioSeq_SequencePlayerDisableChannels(SequencePlayer* seqPlayer, u16 chann
     s32 i;
 
     for (i = 0; i < SEQ_NUM_CHANNELS; i++) {
+#if defined(TARGET_PSP)
+        channel = OotPspAudio_GetSafeSequenceChannel(seqPlayer, i, "disable-channel");
+        if (channel != NULL) {
+            AudioSeq_SequenceChannelDisable(channel);
+        }
+#else
         channel = seqPlayer->channels[i];
         if (IS_SEQUENCE_CHANNEL_VALID(channel) == 1) {
             AudioSeq_SequenceChannelDisable(channel);
         }
+#endif
     }
 }
 
@@ -448,13 +950,26 @@ void AudioSeq_SequencePlayerDisableChannels(SequencePlayer* seqPlayer, u16 chann
  * original name: Nas_OpenSub
  */
 void AudioSeq_SequenceChannelEnable(SequencePlayer* seqPlayer, u8 channelIndex, void* script) {
+#if defined(TARGET_PSP)
+    SequenceChannel* channel = OotPspAudio_GetSafeSequenceChannel(seqPlayer, channelIndex, "enable");
+#else
     SequenceChannel* channel = seqPlayer->channels[channelIndex];
+#endif
     s32 i;
+
+#if defined(TARGET_PSP)
+    if (channel == NULL) {
+        return;
+    }
+#endif
 
     channel->enabled = true;
     channel->finished = false;
     channel->scriptState.depth = 0;
+    channel->scriptState.value = 0;
     channel->scriptState.pc = script;
+    channel->dynTable = NULL;
+    channel->unk_22 = 0;
     channel->delay = 0;
 
     for (i = 0; i < ARRAY_COUNT(channel->layers); i++) {
@@ -517,7 +1032,19 @@ void AudioSeq_SequencePlayerDisable(SequencePlayer* seqPlayer) {
  * original name: Nas_AddList
  */
 void AudioSeq_AudioListPushBack(AudioListItem* list, AudioListItem* item) {
+#if defined(TARGET_PSP)
+    if (!OotPspAudio_IsAlignedNativePtr(item)) {
+        OotPspAudio_LogBadList("push-item", list, item);
+        return;
+    }
+#endif
+
     if (item->prev == NULL) {
+#if defined(TARGET_PSP)
+        if (!OotPspAudio_PrepareAudioListTail("push", list)) {
+            return;
+        }
+#endif
         list->prev->next = item;
         item->prev = list->prev;
         item->next = list;
@@ -531,7 +1058,14 @@ void AudioSeq_AudioListPushBack(AudioListItem* list, AudioListItem* item) {
  * original name: Nas_GetList
  */
 void* AudioSeq_AudioListPopBack(AudioListItem* list) {
-    AudioListItem* item = list->prev;
+    AudioListItem* item;
+
+#if defined(TARGET_PSP)
+    if (!OotPspAudio_PrepareAudioListTail("pop", list)) {
+        return NULL;
+    }
+#endif
+    item = list->prev;
 
     if (item == list) {
         return NULL;
@@ -574,9 +1108,9 @@ u8 AudioSeq_ScriptReadU8(SeqScriptState* state) {
  * original name: Nas_ReadWordData
  */
 s16 AudioSeq_ScriptReadS16(SeqScriptState* state) {
-    s16 ret = *(state->pc++) << 8;
+    s16 ret = AudioSeq_ReadU16(state->pc);
 
-    ret = *(state->pc++) | ret;
+    state->pc += 2;
     return ret;
 }
 
@@ -599,9 +1133,24 @@ u16 AudioSeq_ScriptReadCompressedU16(SeqScriptState* state) {
 void AudioSeq_SeqLayerProcessScript(SequenceLayer* layer) {
     s32 cmd;
 
+#if defined(TARGET_PSP)
+    if (!OotPspAudio_IsAlignedNativePtr(layer)) {
+        OotPspAudio_LogBadChannel("layer-script", NULL, -1, NULL);
+        return;
+    }
+#endif
+
     if (!layer->enabled) {
         return;
     }
+
+#if defined(TARGET_PSP)
+    if (!OotPspAudio_IsSafeSequenceChannel(layer->channel) ||
+        !OotPspAudio_ValidateSeqPtr(layer->channel->seqPlayer, layer->scriptState.pc, 1, "layer-start")) {
+        AudioSeq_SeqLayerDisable(layer);
+        return;
+    }
+#endif
 
     if (layer->delay > 1) {
         layer->delay--;
@@ -660,6 +1209,13 @@ void AudioSeq_SeqLayerProcessScriptStep1(SequenceLayer* layer) {
 s32 AudioSeq_SeqLayerProcessScriptStep5(SequenceLayer* layer, s32 sameTunedSample) {
     Note* note;
 
+#if defined(TARGET_PSP)
+    if (!OotPspAudio_IsSafeTunedSample(layer->tunedSample)) {
+        OotPspAudio_DropBadSeqSample(layer, -1, layer->semitone);
+        return PROCESS_SCRIPT_END;
+    }
+#endif
+
     if (!layer->muted && (layer->tunedSample != NULL) && (layer->tunedSample->sample->codec == CODEC_S16_INMEMORY) &&
         (layer->tunedSample->sample->medium != MEDIUM_RAM)) {
         layer->muted = true;
@@ -708,6 +1264,12 @@ s32 AudioSeq_SeqLayerProcessScriptStep2(SequenceLayer* layer) {
     u16 velocity;
 
     while (true) {
+#if defined(TARGET_PSP)
+        if (!OotPspAudio_ValidateSeqPtr(seqPlayer, state->pc, 1, "layer-cmd")) {
+            AudioSeq_SeqLayerDisable(layer);
+            return PROCESS_SCRIPT_END;
+        }
+#endif
         cmd = AudioSeq_ScriptReadU8(state);
 
         // To be processed in AudioSeq_SeqLayerProcessScriptStep3
@@ -717,9 +1279,21 @@ s32 AudioSeq_SeqLayerProcessScriptStep2(SequenceLayer* layer) {
 
         // Control Flow Commands
         if (cmd >= ASEQ_OP_CONTROL_FLOW_FIRST) {
+#if defined(TARGET_PSP)
+            if (!OotPspAudio_ValidateControlFlowArg(seqPlayer, state, cmd, "layer-flow-arg")) {
+                AudioSeq_SeqLayerDisable(layer);
+                return PROCESS_SCRIPT_END;
+            }
+#endif
             cmdArg16 = AudioSeq_GetScriptControlFlowArgument(state, cmd);
 
             if (AudioSeq_HandleScriptFlowControl(seqPlayer, state, cmd, cmdArg16) == 0) {
+#if defined(TARGET_PSP)
+                if (!OotPspAudio_ValidateSeqPtr(seqPlayer, state->pc, 1, "layer-flow-target")) {
+                    AudioSeq_SeqLayerDisable(layer);
+                    return PROCESS_SCRIPT_END;
+                }
+#endif
                 continue;
             }
             AudioSeq_SeqLayerDisable(layer);
@@ -729,6 +1303,12 @@ s32 AudioSeq_SeqLayerProcessScriptStep2(SequenceLayer* layer) {
         switch (cmd) {
             case ASEQ_OP_LAYER_SHORTVEL: // layer_setshortnotevelocity
             case ASEQ_OP_LAYER_NOTEPAN:  // layer_setpan
+#if defined(TARGET_PSP)
+                if (!OotPspAudio_ValidateSeqPtr(seqPlayer, state->pc, 1, "layer-u8")) {
+                    AudioSeq_SeqLayerDisable(layer);
+                    return PROCESS_SCRIPT_END;
+                }
+#endif
                 cmdArg8 = *(state->pc++);
                 if (cmd == ASEQ_OP_LAYER_SHORTVEL) {
                     layer->velocitySquare = SQ(cmdArg8) / SQ(127.0f);
@@ -739,6 +1319,12 @@ s32 AudioSeq_SeqLayerProcessScriptStep2(SequenceLayer* layer) {
 
             case ASEQ_OP_LAYER_SHORTGATE: // layer_setshortnotegatetime
             case ASEQ_OP_LAYER_TRANSPOSE: // layer_transpose; set transposition in semitones
+#if defined(TARGET_PSP)
+                if (!OotPspAudio_ValidateSeqPtr(seqPlayer, state->pc, 1, "layer-u8")) {
+                    AudioSeq_SeqLayerDisable(layer);
+                    return PROCESS_SCRIPT_END;
+                }
+#endif
                 cmdArg8 = *(state->pc++);
                 if (cmd == ASEQ_OP_LAYER_SHORTGATE) {
                     layer->gateTime = cmdArg8;
@@ -759,11 +1345,23 @@ s32 AudioSeq_SeqLayerProcessScriptStep2(SequenceLayer* layer) {
                 break;
 
             case ASEQ_OP_LAYER_SHORTDELAY: // layer_setshortnotedefaultdelay
+#if defined(TARGET_PSP)
+                if (!OotPspAudio_ValidateSeqCompressedU16(seqPlayer, state, "layer-shortdelay")) {
+                    AudioSeq_SeqLayerDisable(layer);
+                    return PROCESS_SCRIPT_END;
+                }
+#endif
                 cmdArg16 = AudioSeq_ScriptReadCompressedU16(state);
                 layer->shortNoteDefaultDelay = cmdArg16;
                 break;
 
             case ASEQ_OP_LAYER_INSTR: // layer_setinstr
+#if defined(TARGET_PSP)
+                if (!OotPspAudio_ValidateSeqPtr(seqPlayer, state->pc, 1, "layer-instr")) {
+                    AudioSeq_SeqLayerDisable(layer);
+                    return PROCESS_SCRIPT_END;
+                }
+#endif
                 cmd = AudioSeq_ScriptReadU8(state);
                 if (cmd >= 0x7E) {
                     if (cmd == 0x7E) {
@@ -791,6 +1389,12 @@ s32 AudioSeq_SeqLayerProcessScriptStep2(SequenceLayer* layer) {
                 break;
 
             case ASEQ_OP_LAYER_PORTAMENTO: // layer_portamento
+#if defined(TARGET_PSP)
+                if (!OotPspAudio_ValidateSeqPtr(seqPlayer, state->pc, 2, "layer-portamento")) {
+                    AudioSeq_SeqLayerDisable(layer);
+                    return PROCESS_SCRIPT_END;
+                }
+#endif
                 layer->portamento.mode = AudioSeq_ScriptReadU8(state);
 
                 cmd = AudioSeq_ScriptReadU8(state);
@@ -806,10 +1410,22 @@ s32 AudioSeq_SeqLayerProcessScriptStep2(SequenceLayer* layer) {
 
                 // If special, the next param is u8 instead of var
                 if (PORTAMENTO_IS_SPECIAL(layer->portamento)) {
+#if defined(TARGET_PSP)
+                    if (!OotPspAudio_ValidateSeqPtr(seqPlayer, state->pc, 1, "layer-portamento-time")) {
+                        AudioSeq_SeqLayerDisable(layer);
+                        return PROCESS_SCRIPT_END;
+                    }
+#endif
                     layer->portamentoTime = *(state->pc++);
                     break;
                 }
 
+#if defined(TARGET_PSP)
+                if (!OotPspAudio_ValidateSeqCompressedU16(seqPlayer, state, "layer-portamento-time")) {
+                    AudioSeq_SeqLayerDisable(layer);
+                    return PROCESS_SCRIPT_END;
+                }
+#endif
                 cmdArg16 = AudioSeq_ScriptReadCompressedU16(state);
                 layer->portamentoTime = cmdArg16;
                 break;
@@ -819,10 +1435,29 @@ s32 AudioSeq_SeqLayerProcessScriptStep2(SequenceLayer* layer) {
                 break;
 
             case ASEQ_OP_LAYER_ENV:
+#if defined(TARGET_PSP)
+                if (!OotPspAudio_ValidateSeqPtr(seqPlayer, state->pc, 3, "layer-env")) {
+                    AudioSeq_SeqLayerDisable(layer);
+                    return PROCESS_SCRIPT_END;
+                }
+#endif
                 cmdArg16 = AudioSeq_ScriptReadS16(state);
+#if defined(TARGET_PSP)
+                if (!OotPspAudio_ValidateSeqPtr(seqPlayer, seqPlayer->seqData + cmdArg16, 1, "layer-env-target")) {
+                    AudioSeq_SeqLayerDisable(layer);
+                    return PROCESS_SCRIPT_END;
+                }
+#endif
                 layer->adsr.envelope = (EnvelopePoint*)(seqPlayer->seqData + cmdArg16);
                 FALLTHROUGH;
             case ASEQ_OP_LAYER_RELEASERATE:
+#if defined(TARGET_PSP)
+                if ((cmd == ASEQ_OP_LAYER_RELEASERATE) &&
+                    !OotPspAudio_ValidateSeqPtr(seqPlayer, state->pc, 1, "layer-releaserate")) {
+                    AudioSeq_SeqLayerDisable(layer);
+                    return PROCESS_SCRIPT_END;
+                }
+#endif
                 layer->adsr.decayIndex = AudioSeq_ScriptReadU8(state);
                 break;
 
@@ -831,10 +1466,22 @@ s32 AudioSeq_SeqLayerProcessScriptStep2(SequenceLayer* layer) {
                 break;
 
             case ASEQ_OP_LAYER_STEREO:
+#if defined(TARGET_PSP)
+                if (!OotPspAudio_ValidateSeqPtr(seqPlayer, state->pc, 1, "layer-stereo")) {
+                    AudioSeq_SeqLayerDisable(layer);
+                    return PROCESS_SCRIPT_END;
+                }
+#endif
                 layer->stereo.asByte = AudioSeq_ScriptReadU8(state);
                 break;
 
             case ASEQ_OP_LAYER_BENDFINE:
+#if defined(TARGET_PSP)
+                if (!OotPspAudio_ValidateSeqPtr(seqPlayer, state->pc, 1, "layer-bendfine")) {
+                    AudioSeq_SeqLayerDisable(layer);
+                    return PROCESS_SCRIPT_END;
+                }
+#endif
                 cmdArg8 = AudioSeq_ScriptReadU8(state);
                 layer->bend = gBendPitchTwoSemitonesFrequencies[(u8)(cmdArg8 + 0x80)];
                 break;
@@ -1028,6 +1675,13 @@ s32 AudioSeq_SeqLayerProcessScriptStep4(SequenceLayer* layer, s32 cmd) {
             break;
     }
 
+#if defined(TARGET_PSP)
+    if (!OotPspAudio_IsSafeTunedSample(layer->tunedSample)) {
+        OotPspAudio_DropBadSeqSample(layer, instOrWave, semitone);
+        return PROCESS_SCRIPT_END;
+    }
+#endif
+
     layer->delay2 = layer->delay;
     layer->freqScale *= layer->bend;
 
@@ -1078,6 +1732,12 @@ s32 AudioSeq_SeqLayerProcessScriptStep3(SequenceLayer* layer, s32 cmd) {
     f32 floatDelta;
 
     if (cmd == ASEQ_OP_LAYER_LDELAY) {
+#if defined(TARGET_PSP)
+        if (!OotPspAudio_ValidateSeqCompressedU16(seqPlayer, state, "layer-ldelay")) {
+            AudioSeq_SeqLayerDisable(layer);
+            return PROCESS_SCRIPT_END;
+        }
+#endif
         layer->delay = AudioSeq_ScriptReadCompressedU16(state);
         layer->muted = true;
         layer->bit1 = false;
@@ -1089,14 +1749,38 @@ s32 AudioSeq_SeqLayerProcessScriptStep3(SequenceLayer* layer, s32 cmd) {
     if (channel->largeNotes == true) {
         switch (cmd & 0xC0) {
             case ASEQ_OP_LAYER_NOTEDVG:
+#if defined(TARGET_PSP)
+                if (!OotPspAudio_ValidateSeqCompressedU16(seqPlayer, state, "layer-notedvg-delay")) {
+                    AudioSeq_SeqLayerDisable(layer);
+                    return PROCESS_SCRIPT_END;
+                }
+#endif
                 delay = AudioSeq_ScriptReadCompressedU16(state);
+#if defined(TARGET_PSP)
+                if (!OotPspAudio_ValidateSeqPtr(seqPlayer, state->pc, 2, "layer-notedvg-args")) {
+                    AudioSeq_SeqLayerDisable(layer);
+                    return PROCESS_SCRIPT_END;
+                }
+#endif
                 velocity = *(state->pc++);
                 layer->gateTime = *(state->pc++);
                 layer->lastDelay = delay;
                 break;
 
             case ASEQ_OP_LAYER_NOTEDV:
+#if defined(TARGET_PSP)
+                if (!OotPspAudio_ValidateSeqCompressedU16(seqPlayer, state, "layer-notedv-delay")) {
+                    AudioSeq_SeqLayerDisable(layer);
+                    return PROCESS_SCRIPT_END;
+                }
+#endif
                 delay = AudioSeq_ScriptReadCompressedU16(state);
+#if defined(TARGET_PSP)
+                if (!OotPspAudio_ValidateSeqPtr(seqPlayer, state->pc, 1, "layer-notedv-velocity")) {
+                    AudioSeq_SeqLayerDisable(layer);
+                    return PROCESS_SCRIPT_END;
+                }
+#endif
                 velocity = *(state->pc++);
                 layer->gateTime = 0;
                 layer->lastDelay = delay;
@@ -1104,6 +1788,12 @@ s32 AudioSeq_SeqLayerProcessScriptStep3(SequenceLayer* layer, s32 cmd) {
 
             case ASEQ_OP_LAYER_NOTEVG:
                 delay = layer->lastDelay;
+#if defined(TARGET_PSP)
+                if (!OotPspAudio_ValidateSeqPtr(seqPlayer, state->pc, 2, "layer-notevg-args")) {
+                    AudioSeq_SeqLayerDisable(layer);
+                    return PROCESS_SCRIPT_END;
+                }
+#endif
                 velocity = *(state->pc++);
                 layer->gateTime = *(state->pc++);
                 break;
@@ -1117,6 +1807,12 @@ s32 AudioSeq_SeqLayerProcessScriptStep3(SequenceLayer* layer, s32 cmd) {
     } else {
         switch (cmd & 0xC0) {
             case ASEQ_OP_LAYER_NOTEDVG:
+#if defined(TARGET_PSP)
+                if (!OotPspAudio_ValidateSeqCompressedU16(seqPlayer, state, "layer-short-notedvg-delay")) {
+                    AudioSeq_SeqLayerDisable(layer);
+                    return PROCESS_SCRIPT_END;
+                }
+#endif
                 delay = AudioSeq_ScriptReadCompressedU16(state);
                 layer->lastDelay = delay;
                 break;
@@ -1261,11 +1957,25 @@ void AudioSeq_SequenceChannelProcessScript(SequenceChannel* channel) {
     u8* seqData;
     SequencePlayer* seqPlayer;
 
+#if defined(TARGET_PSP)
+    if (!OotPspAudio_IsSafeSequenceChannel(channel)) {
+        OotPspAudio_LogBadChannel("chan-script", NULL, -1, channel);
+        return;
+    }
+#endif
+
     if (channel->stopScript) {
         goto exit_loop;
     }
 
     seqPlayer = channel->seqPlayer;
+#if defined(TARGET_PSP)
+    if (!OotPspAudio_IsAlignedNativePtr(seqPlayer)) {
+        OotPspAudio_LogBadChannel("chan-seqplayer", seqPlayer, -1, channel);
+        AudioSeq_SequenceChannelDisable(channel);
+        return;
+    }
+#endif
     if (seqPlayer->muted && (channel->muteBehavior & MUTE_BEHAVIOR_STOP_SCRIPT)) {
         return;
     }
@@ -1282,18 +1992,37 @@ void AudioSeq_SequenceChannelProcessScript(SequenceChannel* channel) {
         u16 cmdArgU16;
         u32 cmdArgs[3];
         s8 cmdArgS8;
-        u8 cmd = AudioSeq_ScriptReadU8(scriptState);
+        u8 cmd;
         u8 lowBits;
         u8 highBits;
         s32 delay;
         s32 temp2;
+#if defined(TARGET_PSP)
+        SequenceChannel* targetChannel;
+        u8 dynValue;
+        s32 ptrOffset;
+#endif
 
+#if defined(TARGET_PSP)
+        if (!OotPspAudio_ValidateSeqPtr(seqPlayer, scriptState->pc, 1, "chan-cmd")) {
+            AudioSeq_SequenceChannelDisable(channel);
+            return;
+        }
+#endif
+        cmd = AudioSeq_ScriptReadU8(scriptState);
         if (cmd >= 0xB0) {
             highBits = sSeqInstructionArgsTable[cmd - 0xB0];
             lowBits = highBits & 3;
 
             // read in arguments for the instruction
             for (i = 0; i < lowBits; i++, highBits <<= 1) {
+#if defined(TARGET_PSP)
+                if (!OotPspAudio_ValidateSeqPtr(seqPlayer, scriptState->pc, (highBits & 0x80) ? 2 : 1,
+                                                "chan-arg")) {
+                    AudioSeq_SequenceChannelDisable(channel);
+                    return;
+                }
+#endif
                 if (!(highBits & 0x80)) {
                     cmdArgs[i] = AudioSeq_ScriptReadU8(scriptState);
                 } else {
@@ -1313,6 +2042,12 @@ void AudioSeq_SequenceChannelProcessScript(SequenceChannel* channel) {
                     }
                     break;
                 }
+#if defined(TARGET_PSP)
+                if (!OotPspAudio_ValidateSeqPtr(seqPlayer, scriptState->pc, 1, "chan-flow-target")) {
+                    AudioSeq_SequenceChannelDisable(channel);
+                    return;
+                }
+#endif
                 continue;
             }
 
@@ -1333,15 +2068,31 @@ void AudioSeq_SequenceChannelProcessScript(SequenceChannel* channel) {
 
                 case ASEQ_OP_CHAN_DYNTBL:
                     cmdArgU16 = (u16)cmdArgs[0];
+#if defined(TARGET_PSP)
+                    if (!OotPspAudio_SetChannelDynTable(seqPlayer, channel, cmdArgU16, "dyntbl")) {
+                        channel->stopScript = true;
+                        goto exit_loop;
+                    }
+#else
                     channel->dynTable = (void*)&seqPlayer->seqData[cmdArgU16];
+#endif
                     break;
 
                 case ASEQ_OP_CHAN_DYNTBLLOOKUP:
-                    if (scriptState->value != -1) {
+                    if (AudioSeq_CanIndexWithTR(scriptState->value)) {
+#if defined(TARGET_PSP)
+                        if (!OotPspAudio_ReadDynTableU16(seqPlayer, channel, scriptState->value, "dyntbllookup",
+                                                         &cmdArgU16) ||
+                            !OotPspAudio_SetChannelDynTable(seqPlayer, channel, cmdArgU16, "dyntbllookup-target")) {
+                            channel->stopScript = true;
+                            goto exit_loop;
+                        }
+#else
                         data = (*channel->dynTable)[scriptState->value];
-                        cmdArgU16 = (u16)((data[0] << 8) + data[1]);
+                        cmdArgU16 = AudioSeq_ReadU16(data);
 
                         channel->dynTable = (void*)&seqPlayer->seqData[cmdArgU16];
+#endif
                     }
                     break;
 
@@ -1511,7 +2262,14 @@ void AudioSeq_SequenceChannelProcessScript(SequenceChannel* channel) {
 
                 case ASEQ_OP_CHAN_STOPCHAN:
                     cmd = (u8)cmdArgs[0];
+#if defined(TARGET_PSP)
+                    targetChannel = OotPspAudio_GetSafeSequenceChannel(seqPlayer, cmd, "chan-stop");
+                    if (targetChannel != NULL) {
+                        AudioSeq_SequenceChannelDisable(targetChannel);
+                    }
+#else
                     AudioSeq_SequenceChannelDisable(seqPlayer->channels[cmd]);
+#endif
                     break;
 
                 case ASEQ_OP_CHAN_MUTEBHV:
@@ -1563,12 +2321,27 @@ void AudioSeq_SequenceChannelProcessScript(SequenceChannel* channel) {
                     break;
 
                 case ASEQ_OP_CHAN_DYNCALL:
-                    if (scriptState->value != -1) {
-                        data = (*channel->dynTable)[scriptState->value];
-                        //! @bug: Missing a stack depth check here
+                    if (AudioSeq_CanIndexWithTR(scriptState->value) &&
+                        (scriptState->depth < ARRAY_COUNT(scriptState->stack))) {
+#if defined(TARGET_PSP)
+                        if (!OotPspAudio_ReadDynTableU16(seqPlayer, channel, scriptState->value, "dyncall",
+                                                         &cmdArgU16)) {
+                            channel->stopScript = true;
+                            goto exit_loop;
+                        }
+                        data = OotPspAudio_GetSeqPtr(seqPlayer, cmdArgU16, 1, "dyncall-target");
+                        if (data == NULL) {
+                            channel->stopScript = true;
+                            goto exit_loop;
+                        }
                         scriptState->stack[scriptState->depth++] = scriptState->pc;
-                        cmdArgU16 = (u16)((data[0] << 8) + data[1]);
+                        scriptState->pc = data;
+#else
+                        data = (*channel->dynTable)[scriptState->value];
+                        scriptState->stack[scriptState->depth++] = scriptState->pc;
+                        cmdArgU16 = AudioSeq_ReadU16(data);
                         scriptState->pc = seqPlayer->seqData + cmdArgU16;
+#endif
                     }
                     break;
 
@@ -1655,19 +2428,59 @@ void AudioSeq_SequenceChannelProcessScript(SequenceChannel* channel) {
 
                 case ASEQ_OP_CHAN_LDSEQTOPTR:
                     cmdArgU16 = (u16)cmdArgs[0];
-                    channel->unk_22 = *(u16*)(seqPlayer->seqData + (u32)(cmdArgU16 + scriptState->value * 2));
+                    if (AudioSeq_CanIndexWithTR(scriptState->value)) {
+#if defined(TARGET_PSP)
+                        ptrOffset = cmdArgU16 + (scriptState->value * 2);
+                        if ((ptrOffset < 0) ||
+                            !OotPspAudio_ReadSeqU16(seqPlayer, (u32)ptrOffset, "ldseqtoptr", &channel->unk_22)) {
+                            channel->stopScript = true;
+                            goto exit_loop;
+                        }
+#else
+                        channel->unk_22 =
+                            AudioSeq_ReadU16(seqPlayer->seqData + (u32)(cmdArgU16 + (scriptState->value * 2)));
+#endif
+                    }
                     break;
 
                 case ASEQ_OP_CHAN_PTRTODYNTBL:
+#if defined(TARGET_PSP)
+                    if (!OotPspAudio_SetChannelDynTable(seqPlayer, channel, channel->unk_22, "ptrtodyntbl")) {
+                        channel->stopScript = true;
+                        goto exit_loop;
+                    }
+#else
                     channel->dynTable = (void*)&seqPlayer->seqData[channel->unk_22];
+#endif
                     break;
 
                 case ASEQ_OP_CHAN_DYNTBLTOPTR:
-                    channel->unk_22 = ((u16*)(channel->dynTable))[scriptState->value];
+                    if (AudioSeq_CanIndexWithTR(scriptState->value)) {
+#if defined(TARGET_PSP)
+                        if (!OotPspAudio_ReadDynTableU16(seqPlayer, channel, scriptState->value, "dyntbltoptr",
+                                                         &channel->unk_22)) {
+                            channel->stopScript = true;
+                            goto exit_loop;
+                        }
+#else
+                        channel->unk_22 = AudioSeq_ReadU16((u8*)channel->dynTable + (scriptState->value * 2));
+#endif
+                    }
                     break;
 
                 case ASEQ_OP_CHAN_DYNTBLV:
-                    scriptState->value = (*channel->dynTable)[0][scriptState->value];
+                    if (AudioSeq_CanIndexWithTR(scriptState->value)) {
+#if defined(TARGET_PSP)
+                        if (!OotPspAudio_ReadDynTableU8(seqPlayer, channel, scriptState->value, "dyntblv",
+                                                        &dynValue)) {
+                            channel->stopScript = true;
+                            goto exit_loop;
+                        }
+                        scriptState->value = dynValue;
+#else
+                        scriptState->value = (*channel->dynTable)[0][scriptState->value];
+#endif
+                    }
                     break;
 
                 case ASEQ_OP_CHAN_RANDTOPTR:
@@ -1726,10 +2539,27 @@ void AudioSeq_SequenceChannelProcessScript(SequenceChannel* channel) {
                     break;
 
                 case ASEQ_OP_CHAN_LDLAYER:
+#if defined(TARGET_PSP)
+                    if (!OotPspAudio_ValidateSeqPtr(seqPlayer, scriptState->pc, 2, "ldlayer-arg")) {
+                        AudioSeq_SequenceChannelDisable(channel);
+                        return;
+                    }
+#endif
                     cmdArgU16 = AudioSeq_ScriptReadS16(scriptState);
+#if defined(TARGET_PSP)
+                    data = OotPspAudio_GetSeqPtr(seqPlayer, cmdArgU16, 1, "ldlayer");
+                    if (data == NULL) {
+                        channel->stopScript = true;
+                        goto exit_loop;
+                    }
+                    if (!AudioSeq_SeqChannelSetLayer(channel, lowBits)) {
+                        channel->layers[lowBits]->scriptState.pc = data;
+                    }
+#else
                     if (!AudioSeq_SeqChannelSetLayer(channel, lowBits)) {
                         channel->layers[lowBits]->scriptState.pc = &seqPlayer->seqData[cmdArgU16];
                     }
+#endif
                     break;
 
                 case ASEQ_OP_CHAN_DELLAYER:
@@ -1737,10 +2567,28 @@ void AudioSeq_SequenceChannelProcessScript(SequenceChannel* channel) {
                     break;
 
                 case ASEQ_OP_CHAN_DYNLDLAYER:
-                    if (scriptState->value != -1 && AudioSeq_SeqChannelSetLayer(channel, lowBits) != -1) {
-                        data = (*channel->dynTable)[scriptState->value];
-                        cmdArgU16 = (data[0] << 8) + data[1];
-                        channel->layers[lowBits]->scriptState.pc = &seqPlayer->seqData[cmdArgU16];
+                    if (AudioSeq_CanIndexWithTR(scriptState->value)) {
+#if defined(TARGET_PSP)
+                        if (!OotPspAudio_ReadDynTableU16(seqPlayer, channel, scriptState->value, "dynldlayer",
+                                                         &cmdArgU16)) {
+                            channel->stopScript = true;
+                            goto exit_loop;
+                        }
+                        data = OotPspAudio_GetSeqPtr(seqPlayer, cmdArgU16, 1, "dynldlayer-target");
+                        if (data == NULL) {
+                            channel->stopScript = true;
+                            goto exit_loop;
+                        }
+                        if (AudioSeq_SeqChannelSetLayer(channel, lowBits) != -1) {
+                            channel->layers[lowBits]->scriptState.pc = data;
+                        }
+#else
+                        if (AudioSeq_SeqChannelSetLayer(channel, lowBits) != -1) {
+                            data = (*channel->dynTable)[scriptState->value];
+                            cmdArgU16 = AudioSeq_ReadU16(data);
+                            channel->layers[lowBits]->scriptState.pc = &seqPlayer->seqData[cmdArgU16];
+                        }
+#endif
                     }
                     break;
 
@@ -1749,10 +2597,27 @@ void AudioSeq_SequenceChannelProcessScript(SequenceChannel* channel) {
                     break;
 
                 case ASEQ_OP_CHAN_RLDLAYER:
+#if defined(TARGET_PSP)
+                    if (!OotPspAudio_ValidateSeqPtr(seqPlayer, scriptState->pc, 2, "rldlayer-arg")) {
+                        AudioSeq_SequenceChannelDisable(channel);
+                        return;
+                    }
+#endif
                     temp1 = AudioSeq_ScriptReadS16(scriptState);
+#if defined(TARGET_PSP)
+                    data = &scriptState->pc[temp1];
+                    if (!OotPspAudio_ValidateSeqPtr(seqPlayer, data, 1, "rldlayer")) {
+                        channel->stopScript = true;
+                        goto exit_loop;
+                    }
+                    if (!AudioSeq_SeqChannelSetLayer(channel, lowBits)) {
+                        channel->layers[lowBits]->scriptState.pc = data;
+                    }
+#else
                     if (!AudioSeq_SeqChannelSetLayer(channel, lowBits)) {
                         channel->layers[lowBits]->scriptState.pc = &scriptState->pc[temp1];
                     }
+#endif
                     break;
             }
             continue;
@@ -1790,18 +2655,61 @@ void AudioSeq_SequenceChannelProcessScript(SequenceChannel* channel) {
                 break;
 
             case ASEQ_OP_CHAN_LDCHAN:
+#if defined(TARGET_PSP)
+                if (!OotPspAudio_ValidateSeqPtr(seqPlayer, scriptState->pc, 2, "chan-ldchan-arg")) {
+                    AudioSeq_SequenceChannelDisable(channel);
+                    return;
+                }
+#endif
                 cmdArgU16 = AudioSeq_ScriptReadS16(scriptState);
+#if defined(TARGET_PSP)
+                data = OotPspAudio_GetSeqPtr(seqPlayer, cmdArgU16, 1, "chan-ldchan");
+                if (data == NULL) {
+                    channel->stopScript = true;
+                    goto exit_loop;
+                }
+                AudioSeq_SequenceChannelEnable(seqPlayer, lowBits, data);
+#else
                 AudioSeq_SequenceChannelEnable(seqPlayer, lowBits, &seqPlayer->seqData[cmdArgU16]);
+#endif
                 break;
 
             case ASEQ_OP_CHAN_STCIO:
+#if defined(TARGET_PSP)
+                if (!OotPspAudio_ValidateSeqPtr(seqPlayer, scriptState->pc, 1, "chan-stcio-arg")) {
+                    AudioSeq_SequenceChannelDisable(channel);
+                    return;
+                }
+#endif
                 cmd = AudioSeq_ScriptReadU8(scriptState);
+#if defined(TARGET_PSP)
+                targetChannel = OotPspAudio_GetSafeSequenceChannel(seqPlayer, lowBits, "chan-stcio");
+                if ((targetChannel != NULL) && (cmd < ARRAY_COUNT(targetChannel->seqScriptIO))) {
+                    targetChannel->seqScriptIO[cmd] = scriptState->value;
+                }
+#else
                 seqPlayer->channels[lowBits]->seqScriptIO[cmd] = scriptState->value;
+#endif
                 break;
 
             case ASEQ_OP_CHAN_LDCIO:
+#if defined(TARGET_PSP)
+                if (!OotPspAudio_ValidateSeqPtr(seqPlayer, scriptState->pc, 1, "chan-ldcio-arg")) {
+                    AudioSeq_SequenceChannelDisable(channel);
+                    return;
+                }
+#endif
                 cmd = AudioSeq_ScriptReadU8(scriptState);
+#if defined(TARGET_PSP)
+                targetChannel = OotPspAudio_GetSafeSequenceChannel(seqPlayer, lowBits, "chan-ldcio");
+                if ((targetChannel != NULL) && (cmd < ARRAY_COUNT(targetChannel->seqScriptIO))) {
+                    scriptState->value = targetChannel->seqScriptIO[cmd];
+                } else {
+                    scriptState->value = SEQ_IO_VAL_NONE;
+                }
+#else
                 scriptState->value = seqPlayer->channels[lowBits]->seqScriptIO[cmd];
+#endif
                 break;
         }
     }
@@ -1831,6 +2739,17 @@ void AudioSeq_SequencePlayerProcessSequence(SequencePlayer* seqPlayer) {
     s32 pad;
     s32 dummy;
     s32 delay;
+#if defined(TARGET_PSP)
+    SequenceChannel* targetChannel;
+    s32 dynOffset;
+#endif
+
+#if defined(TARGET_PSP)
+    if (!OotPspAudio_IsAlignedNativePtr(seqPlayer)) {
+        OotPspAudio_LogBadChannel("seq-script", seqPlayer, -1, NULL);
+        return;
+    }
+#endif
 
     if (!seqPlayer->enabled) {
         return;
@@ -1872,10 +2791,22 @@ void AudioSeq_SequencePlayerProcessSequence(SequencePlayer* seqPlayer) {
         seqPlayer->recalculateVolume = true;
 
         while (true) {
+#if defined(TARGET_PSP)
+            if (!OotPspAudio_ValidateSeqPtr(seqPlayer, seqScript->pc, 1, "seq-cmd")) {
+                AudioSeq_SequencePlayerDisable(seqPlayer);
+                return;
+            }
+#endif
             cmd = AudioSeq_ScriptReadU8(seqScript);
 
             // 0xF2 and above are "flow control" commands, including termination.
             if (cmd >= ASEQ_OP_CONTROL_FLOW_FIRST) {
+#if defined(TARGET_PSP)
+                if (!OotPspAudio_ValidateControlFlowArg(seqPlayer, seqScript, cmd, "seq-flow-arg")) {
+                    AudioSeq_SequencePlayerDisable(seqPlayer);
+                    return;
+                }
+#endif
                 delay = AudioSeq_HandleScriptFlowControl(
                     seqPlayer, seqScript, cmd, AudioSeq_GetScriptControlFlowArgument(&seqPlayer->scriptState, cmd));
 
@@ -1887,6 +2818,12 @@ void AudioSeq_SequencePlayerProcessSequence(SequencePlayer* seqPlayer) {
                     }
                     break;
                 }
+#if defined(TARGET_PSP)
+                if (!OotPspAudio_ValidateSeqPtr(seqPlayer, seqScript->pc, 1, "seq-flow-target")) {
+                    AudioSeq_SequencePlayerDisable(seqPlayer);
+                    return;
+                }
+#endif
                 continue;
             }
 
@@ -2004,7 +2941,15 @@ void AudioSeq_SequencePlayerProcessSequence(SequencePlayer* seqPlayer) {
                     case ASEQ_OP_SEQ_LDSHORTGATEARR:
                     case ASEQ_OP_SEQ_LDSHORTVELARR:
                         temp = AudioSeq_ScriptReadS16(seqScript);
+#if defined(TARGET_PSP)
+                        data3 = OotPspAudio_GetSeqPtr(seqPlayer, temp, 16, "seq-shorttbl");
+                        if (data3 == NULL) {
+                            AudioSeq_SequencePlayerDisable(seqPlayer);
+                            return;
+                        }
+#else
                         data3 = &seqPlayer->seqData[temp];
+#endif
                         if (cmd == ASEQ_OP_SEQ_LDSHORTVELARR) {
                             seqPlayer->shortNoteVelocityTable = data3;
                         } else {
@@ -2026,14 +2971,38 @@ void AudioSeq_SequencePlayerProcessSequence(SequencePlayer* seqPlayer) {
                         break;
 
                     case ASEQ_OP_SEQ_DYNCALL:
+#if defined(TARGET_PSP)
+                        if (!OotPspAudio_ValidateSeqPtr(seqPlayer, seqScript->pc, 2, "seq-dyncall-arg")) {
+                            AudioSeq_SequencePlayerDisable(seqPlayer);
+                            return;
+                        }
+#endif
                         temp = AudioSeq_ScriptReadS16(seqScript);
-                        if ((seqScript->value != -1) && (seqScript->depth != 3)) {
+                        if (AudioSeq_CanIndexWithTR(seqScript->value) &&
+                            (seqScript->depth < ARRAY_COUNT(seqScript->stack))) {
+#if defined(TARGET_PSP)
+                            dynOffset = temp + (seqScript->value << 1);
+                            if ((dynOffset < 0) ||
+                                !OotPspAudio_ReadSeqU16(seqPlayer, (u32)dynOffset, "seq-dyncall", &temp)) {
+                                AudioSeq_SequencePlayerDisable(seqPlayer);
+                                return;
+                            }
+                            data = OotPspAudio_GetSeqPtr(seqPlayer, temp, 1, "seq-dyncall-target");
+                            if (data == NULL) {
+                                AudioSeq_SequencePlayerDisable(seqPlayer);
+                                return;
+                            }
+                            seqScript->stack[seqScript->depth] = seqScript->pc;
+                            seqScript->depth++;
+                            seqScript->pc = data;
+#else
                             data = seqPlayer->seqData + (u32)(temp + (seqScript->value << 1));
                             seqScript->stack[seqScript->depth] = seqScript->pc;
                             seqScript->depth++;
 
-                            temp = (data[0] << 8) + data[1];
+                            temp = AudioSeq_ReadU16(data);
                             seqScript->pc = &seqPlayer->seqData[temp];
+#endif
                         }
                         break;
 
@@ -2052,7 +3021,15 @@ void AudioSeq_SequencePlayerProcessSequence(SequencePlayer* seqPlayer) {
                     case ASEQ_OP_SEQ_STSEQ:
                         cmd = AudioSeq_ScriptReadU8(seqScript);
                         temp = AudioSeq_ScriptReadS16(seqScript);
+#if defined(TARGET_PSP)
+                        data2 = OotPspAudio_GetSeqPtr(seqPlayer, temp, 1, "seq-stseq");
+                        if (data2 == NULL) {
+                            AudioSeq_SequencePlayerDisable(seqPlayer);
+                            return;
+                        }
+#else
                         data2 = &seqPlayer->seqData[temp];
+#endif
                         *data2 = (u8)seqScript->value + cmd;
                         break;
 
@@ -2088,7 +3065,12 @@ void AudioSeq_SequencePlayerProcessSequence(SequencePlayer* seqPlayer) {
 
             switch (cmd & 0xF0) {
                 case ASEQ_OP_SEQ_TESTCHAN:
+#if defined(TARGET_PSP)
+                    targetChannel = OotPspAudio_GetSafeSequenceChannel(seqPlayer, cmdLowBits, "seq-testchan");
+                    seqScript->value = (targetChannel != NULL) ? (targetChannel->enabled ^ 1) : 1;
+#else
                     seqScript->value = seqPlayer->channels[cmdLowBits]->enabled ^ 1;
+#endif
                     break;
 
                 case ASEQ_OP_SEQ_SUBIO:
@@ -2107,23 +3089,68 @@ void AudioSeq_SequencePlayerProcessSequence(SequencePlayer* seqPlayer) {
                     break;
 
                 case ASEQ_OP_SEQ_STOPCHAN:
+#if defined(TARGET_PSP)
+                    targetChannel = OotPspAudio_GetSafeSequenceChannel(seqPlayer, cmdLowBits, "seq-stopchan");
+                    if (targetChannel != NULL) {
+                        AudioSeq_SequenceChannelDisable(targetChannel);
+                    }
+#else
                     AudioSeq_SequenceChannelDisable(seqPlayer->channels[cmdLowBits]);
+#endif
                     break;
 
                 case ASEQ_OP_SEQ_LDCHAN:
+#if defined(TARGET_PSP)
+                    if (!OotPspAudio_ValidateSeqPtr(seqPlayer, seqScript->pc, 2, "seq-ldchan-arg")) {
+                        AudioSeq_SequencePlayerDisable(seqPlayer);
+                        return;
+                    }
+#endif
                     temp = AudioSeq_ScriptReadS16(seqScript);
+#if defined(TARGET_PSP)
+                    data = OotPspAudio_GetSeqPtr(seqPlayer, temp, 1, "seq-ldchan");
+                    if (data == NULL) {
+                        AudioSeq_SequencePlayerDisable(seqPlayer);
+                        return;
+                    }
+                    AudioSeq_SequenceChannelEnable(seqPlayer, cmdLowBits, data);
+#else
                     AudioSeq_SequenceChannelEnable(seqPlayer, cmdLowBits, (void*)&seqPlayer->seqData[temp]);
+#endif
                     break;
 
                 case ASEQ_OP_SEQ_RLDCHAN:
+#if defined(TARGET_PSP)
+                    if (!OotPspAudio_ValidateSeqPtr(seqPlayer, seqScript->pc, 2, "seq-rldchan-arg")) {
+                        AudioSeq_SequencePlayerDisable(seqPlayer);
+                        return;
+                    }
+#endif
                     tempS = AudioSeq_ScriptReadS16(seqScript);
+#if defined(TARGET_PSP)
+                    data = &seqScript->pc[tempS];
+                    if (!OotPspAudio_ValidateSeqPtr(seqPlayer, data, 1, "seq-rldchan")) {
+                        AudioSeq_SequencePlayerDisable(seqPlayer);
+                        return;
+                    }
+                    AudioSeq_SequenceChannelEnable(seqPlayer, cmdLowBits, data);
+#else
                     AudioSeq_SequenceChannelEnable(seqPlayer, cmdLowBits, (void*)&seqScript->pc[tempS]);
+#endif
                     break;
 
                 case ASEQ_OP_SEQ_LDSEQ:
                     cmd = AudioSeq_ScriptReadU8(seqScript);
                     temp = AudioSeq_ScriptReadS16(seqScript);
+#if defined(TARGET_PSP)
+                    data2 = OotPspAudio_GetSeqPtr(seqPlayer, temp, 1, "seq-ldseq-ret");
+                    if (data2 == NULL) {
+                        AudioSeq_SequencePlayerDisable(seqPlayer);
+                        return;
+                    }
+#else
                     data2 = &seqPlayer->seqData[temp];
+#endif
                     AudioLoad_SlowLoadSeq(cmd, data2, &seqPlayer->seqScriptIO[cmdLowBits]);
                     break;
 
@@ -2138,9 +3165,16 @@ void AudioSeq_SequencePlayerProcessSequence(SequencePlayer* seqPlayer) {
     }
 
     for (i = 0; i < SEQ_NUM_CHANNELS; i++) {
+#if defined(TARGET_PSP)
+        targetChannel = OotPspAudio_GetSafeSequenceChannel(seqPlayer, i, "seq-process-channel");
+        if ((targetChannel != NULL) && targetChannel->enabled) {
+            AudioSeq_SequenceChannelProcessScript(targetChannel);
+        }
+#else
         if (seqPlayer->channels[i]->enabled) {
             AudioSeq_SequenceChannelProcessScript(seqPlayer->channels[i]);
         }
+#endif
     }
 }
 
@@ -2180,6 +3214,14 @@ void AudioSeq_SkipForwardSequence(SequencePlayer* seqPlayer) {
  */
 void AudioSeq_ResetSequencePlayer(SequencePlayer* seqPlayer) {
     s32 i;
+#if defined(TARGET_PSP)
+    SequenceChannel* channel;
+
+    if (!OotPspAudio_IsAlignedNativePtr(seqPlayer)) {
+        OotPspAudio_LogBadChannel("reset-seq", seqPlayer, -1, NULL);
+        return;
+    }
+#endif
 
     AudioSeq_SequencePlayerDisable(seqPlayer);
     seqPlayer->stopScript = false;
@@ -2201,7 +3243,14 @@ void AudioSeq_ResetSequencePlayer(SequencePlayer* seqPlayer) {
     seqPlayer->muteVolumeScale = 0.5f;
 
     for (i = 0; i < SEQ_NUM_CHANNELS; i++) {
+#if defined(TARGET_PSP)
+        channel = OotPspAudio_GetSafeSequenceChannel(seqPlayer, i, "reset-channel");
+        if (channel != NULL) {
+            AudioSeq_InitSequenceChannel(channel);
+        }
+#else
         AudioSeq_InitSequenceChannel(seqPlayer->channels[i]);
+#endif
     }
 }
 
@@ -2210,10 +3259,31 @@ void AudioSeq_ResetSequencePlayer(SequencePlayer* seqPlayer) {
  */
 void AudioSeq_InitSequencePlayerChannels(s32 playerIdx) {
     SequenceChannel* channel;
-    SequencePlayer* seqPlayer = &gAudioCtx.seqPlayers[playerIdx];
+    SequencePlayer* seqPlayer;
     s32 i;
     s32 j;
 
+#if defined(TARGET_PSP)
+    if ((playerIdx < 0) || (playerIdx >= (s32)ARRAY_COUNT(sOotPspAudioSequenceChannels))) {
+        return;
+    }
+#endif
+
+    seqPlayer = &gAudioCtx.seqPlayers[playerIdx];
+
+#if defined(TARGET_PSP)
+    for (i = 0; i < SEQ_NUM_CHANNELS; i++) {
+        channel = &sOotPspAudioSequenceChannels[playerIdx][i];
+        memset(channel, 0, sizeof(*channel));
+        seqPlayer->channels[i] = channel;
+        channel->seqPlayer = seqPlayer;
+        channel->enabled = false;
+        for (j = 0; j < ARRAY_COUNT(channel->layers); j++) {
+            channel->layers[j] = NULL;
+        }
+        AudioSeq_InitSequenceChannel(channel);
+    }
+#else
     for (i = 0; i < SEQ_NUM_CHANNELS; i++) {
         seqPlayer->channels[i] = AudioHeap_AllocZeroed(&gAudioCtx.miscPool, sizeof(SequenceChannel));
         if (seqPlayer->channels[i] == NULL) {
@@ -2228,6 +3298,7 @@ void AudioSeq_InitSequencePlayerChannels(s32 playerIdx) {
         }
         AudioSeq_InitSequenceChannel(seqPlayer->channels[i]);
     }
+#endif
 }
 
 /**

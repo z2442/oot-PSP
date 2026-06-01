@@ -4,10 +4,17 @@
 #include "audio.h"
 
 #include "assets/audio/sequence_sizes.h"
+#if !defined(TARGET_PSP)
 #include "assets/audio/soundfont_sizes.h"
+#endif
 
 #define SFX_SEQ_SIZE Sequence_0_SIZE
+#if defined(TARGET_PSP)
+#define NUM_SOUNDFONTS 38
+#define SFX_SOUNDFONTS_SIZE 0xC000
+#else
 #define SFX_SOUNDFONTS_SIZE (Soundfont_0_SIZE + Soundfont_1_SIZE)
+#endif
 
 TempoData gTempoData = {
     0x1C00,            // unk_00

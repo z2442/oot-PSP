@@ -4,11 +4,13 @@
 
 #include <pspctrl.h>
 #include <pspkernel.h>
+#include <pspthreadman.h>
 #include <psprtc.h>
 #include <stdarg.h>
 #include <stdio.h>
 
 #include "controller.h"
+#include "oot_psp_audio_backend.h"
 
 #define OOT_PSP_MAX_THREADS 16
 #define OOT_PSP_MAX_TIMERS  16
@@ -38,6 +40,7 @@ static void* sCurrentFramebuffer;
 static void* sNextFramebuffer;
 static OSViMode* sCurrentViMode;
 static OSViContext sCurrentViContext;
+static u32 sMesgQueueSemaIndex;
 
 s32 osRomType = 0;
 void* osRomBase = NULL;
@@ -119,6 +122,33 @@ static OotPspTimerSlot* OotPsp_AllocTimerSlot(OSTimer* timer) {
     }
 
     return NULL;
+}
+
+static SceUID OotPsp_GetMesgQueueSema(OSMesgQueue* mq) {
+    SceUID sema;
+
+    if (mq == NULL) {
+        return -1;
+    }
+
+    sema = (SceUID)(s32)(uintptr_t)mq->mtqueue;
+    return (sema > 0) ? sema : -1;
+}
+
+static void OotPsp_LockMesgQueue(OSMesgQueue* mq) {
+    SceUID sema = OotPsp_GetMesgQueueSema(mq);
+
+    if (sema > 0) {
+        sceKernelWaitSema(sema, 1, NULL);
+    }
+}
+
+static void OotPsp_UnlockMesgQueue(OSMesgQueue* mq) {
+    SceUID sema = OotPsp_GetMesgQueueSema(mq);
+
+    if (sema > 0) {
+        sceKernelSignalSema(sema, 1);
+    }
 }
 
 static int OotPsp_TimerThread(SceSize args, void* argp) {
@@ -245,56 +275,83 @@ u32 osGetMemSize(void) {
 }
 
 void osCreateMesgQueue(OSMesgQueue* mq, OSMesg* msgBuf, s32 count) {
+    SceUID sema;
+    char name[32];
+
     mq->mtqueue = NULL;
     mq->fullqueue = NULL;
     mq->validCount = 0;
     mq->first = 0;
     mq->msgCount = count;
     mq->msg = msgBuf;
+
+    snprintf(name, sizeof(name), "oot-mq-%lu", (unsigned long)sMesgQueueSemaIndex++);
+    sema = sceKernelCreateSema(name, 0, 1, 1, NULL);
+    if (sema > 0) {
+        mq->mtqueue = (OSThread*)(uintptr_t)sema;
+    }
 }
 
 s32 osSendMesg(OSMesgQueue* mq, OSMesg msg, s32 flag) {
-    while (MQ_IS_FULL(mq)) {
+    while (true) {
+        OotPsp_LockMesgQueue(mq);
+        if (!MQ_IS_FULL(mq)) {
+            mq->msg[(mq->first + mq->validCount) % mq->msgCount] = msg;
+            mq->validCount++;
+            OotPsp_UnlockMesgQueue(mq);
+            return 0;
+        }
+
+        OotPsp_UnlockMesgQueue(mq);
         if (flag == OS_MESG_NOBLOCK) {
             return -1;
         }
+
         sceKernelDelayThread(1000);
     }
-
-    mq->msg[(mq->first + mq->validCount) % mq->msgCount] = msg;
-    mq->validCount++;
-    return 0;
 }
 
 s32 osJamMesg(OSMesgQueue* mq, OSMesg msg, s32 flag) {
-    while (MQ_IS_FULL(mq)) {
+    while (true) {
+        OotPsp_LockMesgQueue(mq);
+        if (!MQ_IS_FULL(mq)) {
+            mq->first = (mq->first + mq->msgCount - 1) % mq->msgCount;
+            mq->msg[mq->first] = msg;
+            mq->validCount++;
+            OotPsp_UnlockMesgQueue(mq);
+            return 0;
+        }
+
+        OotPsp_UnlockMesgQueue(mq);
         if (flag == OS_MESG_NOBLOCK) {
             return -1;
         }
+
         sceKernelDelayThread(1000);
     }
-
-    mq->first = (mq->first + mq->msgCount - 1) % mq->msgCount;
-    mq->msg[mq->first] = msg;
-    mq->validCount++;
-    return 0;
 }
 
 s32 osRecvMesg(OSMesgQueue* mq, OSMesg* msg, s32 flag) {
-    while (MQ_IS_EMPTY(mq)) {
+    while (true) {
+        OotPsp_LockMesgQueue(mq);
+        if (!MQ_IS_EMPTY(mq)) {
+            if (msg != NULL) {
+                *msg = mq->msg[mq->first];
+            }
+
+            mq->first = (mq->first + 1) % mq->msgCount;
+            mq->validCount--;
+            OotPsp_UnlockMesgQueue(mq);
+            return 0;
+        }
+
+        OotPsp_UnlockMesgQueue(mq);
         if (flag == OS_MESG_NOBLOCK) {
             return -1;
         }
+
         sceKernelDelayThread(1000);
     }
-
-    if (msg != NULL) {
-        *msg = mq->msg[mq->first];
-    }
-
-    mq->first = (mq->first + 1) % mq->msgCount;
-    mq->validCount--;
-    return 0;
 }
 
 void osSetEventMesg(UNUSED OSEvent e, UNUSED OSMesgQueue* mq, UNUSED OSMesg msg) {
@@ -738,10 +795,10 @@ u32 osDpGetStatus(void) {
 void osDpSetStatus(UNUSED u32 status) {
 }
 
-s32 osAiSetFrequency(UNUSED u32 frequency) {
-    return 32000;
+s32 osAiSetFrequency(u32 frequency) {
+    return OotPspAudioBackend_SetFrequency(frequency);
 }
 
 u32 osAiGetLength(void) {
-    return 0;
+    return OotPspAudioBackend_GetLength();
 }

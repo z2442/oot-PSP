@@ -14,7 +14,8 @@
 #define OOT_PSP_NATIVE_ADDR_END             0x0C000000U
 #define OOT_PSP_LOADED_ASSET_RANGE_COUNT    4096
 #define OOT_PSP_ASSET_READ_CHUNK_SIZE       0x4000
-#define OOT_PSP_ASSET_CACHE_SIZE            (4 * 1024 * 1024)
+#define OOT_PSP_ASSET_CACHE_SIZE            (2 * 1024 * 1024)
+#define OOT_PSP_AUDIOTABLE_CACHE_SIZE       (5 * 1024 * 1024)
 #define OOT_PSP_HOT_ASSET_CACHE_COUNT       4
 #define OOT_PSP_HOT_READ_TRACKER_COUNT      16
 #define OOT_PSP_HOT_READ_PROMOTE_COUNT      4
@@ -23,6 +24,7 @@
 #define OOT_PSP_ASSET_RANGE_SERIAL_CACHE_COUNT 128
 #define OOT_PSP_KANJI_ASSET_PATH            "data/segments/kanji.bin"
 #define OOT_PSP_LINK_ANIMATION_ASSET_PATH   "data/segments/link_animetion.bin"
+#define OOT_PSP_AUDIOTABLE_ASSET_PATH       "data/segments/Audiotable.bin"
 #define OOT_PSP_ASSET_READ_ZERO_RETRY_COUNT 16
 #define OOT_PSP_ASSET_READ_ZERO_RETRY_USEC  1000
 
@@ -72,6 +74,7 @@ static u32 sOotPspAssetCacheClock;
 static OotPspAssetCache sOotPspPinnedAssetCaches[] = {
     { OOT_PSP_KANJI_ASSET_PATH, NULL, NULL, 0, 0, 0, 0, false },
     { OOT_PSP_LINK_ANIMATION_ASSET_PATH, NULL, NULL, 0, 0, 0, 0, false },
+    { OOT_PSP_AUDIOTABLE_ASSET_PATH, NULL, NULL, 0, 0, 0, 0, false },
 };
 static OotPspAssetCache sOotPspHotAssetCaches[OOT_PSP_HOT_ASSET_CACHE_COUNT];
 static OotPspHotReadTracker sOotPspHotReadTrackers[OOT_PSP_HOT_READ_TRACKER_COUNT];
@@ -264,6 +267,10 @@ static s32 OotPsp_RecordHotAssetRead(const OotPspExternalAsset* asset) {
         return false;
     }
 
+    if (strcmp(asset->path, OOT_PSP_AUDIOTABLE_ASSET_PATH) == 0) {
+        return false;
+    }
+
     for (i = 0; i < OOT_PSP_HOT_READ_TRACKER_COUNT; i++) {
         OotPspHotReadTracker* tracker = &sOotPspHotReadTrackers[i];
 
@@ -373,6 +380,14 @@ static s32 OotPsp_ReadAssetFileRange(const OotPspExternalAsset* asset, size_t of
     return true;
 }
 
+static size_t OotPsp_GetAssetCacheSizeLimit(const OotPspExternalAsset* asset) {
+    if ((asset != NULL) && (strcmp(asset->path, OOT_PSP_AUDIOTABLE_ASSET_PATH) == 0)) {
+        return OOT_PSP_AUDIOTABLE_CACHE_SIZE;
+    }
+
+    return OOT_PSP_ASSET_CACHE_SIZE;
+}
+
 static s32 OotPsp_EnsureAssetCacheRange(OotPspAssetCache* cache, const OotPspExternalAsset* asset, size_t offset,
                                         size_t size) {
     u8* data;
@@ -381,6 +396,7 @@ static s32 OotPsp_EnsureAssetCacheRange(OotPspAssetCache* cache, const OotPspExt
     size_t windowStart;
     size_t windowSize;
     size_t capacity;
+    size_t cacheSizeLimit;
 
     if (cache == NULL) {
         return false;
@@ -389,7 +405,8 @@ static s32 OotPsp_EnsureAssetCacheRange(OotPspAssetCache* cache, const OotPspExt
     cache->asset = asset;
     cache->lastUsed = OotPsp_NextAssetCacheClock();
 
-    if (size > OOT_PSP_ASSET_CACHE_SIZE) {
+    cacheSizeLimit = OotPsp_GetAssetCacheSizeLimit(asset);
+    if (size > cacheSizeLimit) {
         return false;
     }
 
@@ -415,7 +432,7 @@ static s32 OotPsp_EnsureAssetCacheRange(OotPspAssetCache* cache, const OotPspExt
     }
 
     if (cache->data == NULL) {
-        capacity = fileSize < OOT_PSP_ASSET_CACHE_SIZE ? fileSize : OOT_PSP_ASSET_CACHE_SIZE;
+        capacity = fileSize < cacheSizeLimit ? fileSize : cacheSizeLimit;
         if (size > capacity) {
             return false;
         }

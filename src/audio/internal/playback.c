@@ -4,6 +4,48 @@
 #include "ultra64.h"
 #include "audio.h"
 
+#if defined(TARGET_PSP)
+#define OOT_PSP_AUDIO_NATIVE_PTR_START 0x08000000U
+#define OOT_PSP_AUDIO_NATIVE_PTR_END   0x0C000000U
+
+static u8 sOotPspAudioNoteListBadLogged;
+static u8 sOotPspAudioFontLookupBadLogged;
+
+static s32 OotPspAudio_IsAlignedNativePtr(const void* ptr) {
+    u32 addr = (u32)ptr;
+
+    return (addr >= OOT_PSP_AUDIO_NATIVE_PTR_START) && (addr < OOT_PSP_AUDIO_NATIVE_PTR_END) && ((addr & 3) == 0);
+}
+
+static void OotPspAudio_LogBadNoteList(const char* op, AudioListItem* list, AudioListItem* item) {
+    if (!sOotPspAudioNoteListBadLogged) {
+        s32 listIsValid = OotPspAudio_IsAlignedNativePtr(list);
+
+        sOotPspAudioNoteListBadLogged = true;
+        osSyncPrintf("oot-psp audio guarded bad note-list %s list=%p prev=%p next=%p item=%p itemPrev=%p itemNext=%p\n",
+                     op, list, listIsValid ? list->prev : NULL, listIsValid ? list->next : NULL, item,
+                     OotPspAudio_IsAlignedNativePtr(item) ? item->prev : NULL,
+                     OotPspAudio_IsAlignedNativePtr(item) ? item->next : NULL);
+    }
+}
+
+static void OotPspAudio_LogBadFontLookup(const char* op, s32 fontId, s32 index, void* ptr) {
+    if (!sOotPspAudioFontLookupBadLogged) {
+        sOotPspAudioFontLookupBadLogged = true;
+        osSyncPrintf("oot-psp audio skipped bad font lookup op=%s font=%d index=%d ptr=%p\n", op, fontId, index,
+                     ptr);
+    }
+}
+
+static s32 OotPspAudio_IsSafeFontId(s32 fontId) {
+    return (fontId >= 0) && (fontId < 0x30) && OotPspAudio_IsAlignedNativePtr(gAudioCtx.soundFontList);
+}
+
+static s32 OotPspAudio_IsSafeLayerPtr(SequenceLayer* layer) {
+    return OotPspAudio_IsAlignedNativePtr(layer);
+}
+#endif
+
 /**
  * original name: Nas_smzSetParam
  */
@@ -187,9 +229,15 @@ void Audio_ProcessNotes(void) {
         noteSubEu2 = &gAudioCtx.noteSubsEu[gAudioCtx.noteSubEuOffset + i];
         playbackState = &note->playbackState;
         if (playbackState->parentLayer != NO_LAYER) {
+#if defined(TARGET_PSP)
+            if (!OotPspAudio_IsSafeLayerPtr(playbackState->parentLayer)) {
+                continue;
+            }
+#else
             if ((u32)playbackState->parentLayer < 0x7FFFFFFF) {
                 continue;
             }
+#endif
 
             if (note != playbackState->parentLayer->note && playbackState->unk_04 == 0) {
                 playbackState->adsr.action.s.release = true;
@@ -339,6 +387,13 @@ Instrument* Audio_GetInstrumentInner(s32 fontId, s32 instId) {
         return NULL;
     }
 
+#if defined(TARGET_PSP)
+    if (!OotPspAudio_IsSafeFontId(fontId) || (instId < 0)) {
+        OotPspAudio_LogBadFontLookup("inst-range", fontId, instId, NULL);
+        return NULL;
+    }
+#endif
+
     if (!AudioLoad_IsFontLoadComplete(fontId)) {
         gAudioCtx.audioErrorFlags = fontId + 0x10000000;
         return NULL;
@@ -349,7 +404,20 @@ Instrument* Audio_GetInstrumentInner(s32 fontId, s32 instId) {
         return NULL;
     }
 
+#if defined(TARGET_PSP)
+    if (!OotPspAudio_IsAlignedNativePtr(gAudioCtx.soundFontList[fontId].instruments)) {
+        OotPspAudio_LogBadFontLookup("inst-table", fontId, instId, gAudioCtx.soundFontList[fontId].instruments);
+        return NULL;
+    }
+#endif
+
     inst = gAudioCtx.soundFontList[fontId].instruments[instId];
+#if defined(TARGET_PSP)
+    if ((inst != NULL) && !OotPspAudio_IsAlignedNativePtr(inst)) {
+        OotPspAudio_LogBadFontLookup("inst", fontId, instId, inst);
+        return NULL;
+    }
+#endif
     if (inst == NULL) {
         gAudioCtx.audioErrorFlags = ((fontId << 8) + instId) + 0x1000000;
         return inst;
@@ -368,6 +436,13 @@ Drum* Audio_GetDrum(s32 fontId, s32 drumId) {
         return NULL;
     }
 
+#if defined(TARGET_PSP)
+    if (!OotPspAudio_IsSafeFontId(fontId) || (drumId < 0)) {
+        OotPspAudio_LogBadFontLookup("drum-range", fontId, drumId, NULL);
+        return NULL;
+    }
+#endif
+
     if (!AudioLoad_IsFontLoadComplete(fontId)) {
         gAudioCtx.audioErrorFlags = fontId + 0x10000000;
         return NULL;
@@ -380,7 +455,19 @@ Drum* Audio_GetDrum(s32 fontId, s32 drumId) {
     if ((u32)gAudioCtx.soundFontList[fontId].drums < AUDIO_RELOCATED_ADDRESS_START) {
         return NULL;
     }
+#if defined(TARGET_PSP)
+    if (!OotPspAudio_IsAlignedNativePtr(gAudioCtx.soundFontList[fontId].drums)) {
+        OotPspAudio_LogBadFontLookup("drum-table", fontId, drumId, gAudioCtx.soundFontList[fontId].drums);
+        return NULL;
+    }
+#endif
     drum = gAudioCtx.soundFontList[fontId].drums[drumId];
+#if defined(TARGET_PSP)
+    if ((drum != NULL) && !OotPspAudio_IsAlignedNativePtr(drum)) {
+        OotPspAudio_LogBadFontLookup("drum", fontId, drumId, drum);
+        return NULL;
+    }
+#endif
 
     if (drum == NULL) {
         gAudioCtx.audioErrorFlags = ((fontId << 8) + drumId) + 0x5000000;
@@ -399,6 +486,13 @@ SoundEffect* Audio_GetSoundEffect(s32 fontId, s32 sfxId) {
         return NULL;
     }
 
+#if defined(TARGET_PSP)
+    if (!OotPspAudio_IsSafeFontId(fontId) || (sfxId < 0)) {
+        OotPspAudio_LogBadFontLookup("sfx-range", fontId, sfxId, NULL);
+        return NULL;
+    }
+#endif
+
     if (!AudioLoad_IsFontLoadComplete(fontId)) {
         gAudioCtx.audioErrorFlags = fontId + 0x10000000;
         return NULL;
@@ -412,6 +506,13 @@ SoundEffect* Audio_GetSoundEffect(s32 fontId, s32 sfxId) {
     if ((u32)gAudioCtx.soundFontList[fontId].soundEffects < AUDIO_RELOCATED_ADDRESS_START) {
         return NULL;
     }
+
+#if defined(TARGET_PSP)
+    if (!OotPspAudio_IsAlignedNativePtr(gAudioCtx.soundFontList[fontId].soundEffects)) {
+        OotPspAudio_LogBadFontLookup("sfx-table", fontId, sfxId, gAudioCtx.soundFontList[fontId].soundEffects);
+        return NULL;
+    }
+#endif
 
     soundEffect = &gAudioCtx.soundFontList[fontId].soundEffects[sfxId];
 
@@ -773,6 +874,20 @@ void Audio_NotePoolFill(NotePool* pool, s32 count) {
  * original name: Nas_AddListHead
  */
 void Audio_AudioListPushFront(AudioListItem* list, AudioListItem* item) {
+#if defined(TARGET_PSP)
+    if (!OotPspAudio_IsAlignedNativePtr(list) || !OotPspAudio_IsAlignedNativePtr(item)) {
+        OotPspAudio_LogBadNoteList("push-front", list, item);
+        return;
+    }
+
+    if (!OotPspAudio_IsAlignedNativePtr(list->next)) {
+        OotPspAudio_LogBadNoteList("push-front", list, item);
+        list->prev = list;
+        list->next = list;
+        list->u.count = 0;
+    }
+#endif
+
     // add 'item' to the front of the list given by 'list', if it's not in any list
     if (item->prev == NULL) {
         item->prev = list;
@@ -790,6 +905,16 @@ void Audio_AudioListPushFront(AudioListItem* list, AudioListItem* item) {
 void Audio_AudioListRemove(AudioListItem* item) {
     // remove 'item' from the list it's in, if any
     if (item->prev != NULL) {
+#if defined(TARGET_PSP)
+        if (!OotPspAudio_IsAlignedNativePtr(item) || !OotPspAudio_IsAlignedNativePtr(item->prev) ||
+            !OotPspAudio_IsAlignedNativePtr(item->next)) {
+            OotPspAudio_LogBadNoteList("remove", NULL, item);
+            if (OotPspAudio_IsAlignedNativePtr(item)) {
+                item->prev = NULL;
+            }
+            return;
+        }
+#endif
         item->prev->next = item->next;
         item->next->prev = item->prev;
         item->prev = NULL;

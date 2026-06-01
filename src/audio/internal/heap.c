@@ -15,6 +15,28 @@ void AudioHeap_DiscardSampleCaches(void);
 void AudioHeap_DiscardSampleBank(s32 sampleBankId);
 void AudioHeap_DiscardSampleBanks(void);
 
+static u32 AudioHeap_GetRealSequenceId(u32 seqId) {
+    AudioTable* table = gAudioCtx.sequenceTable;
+
+    if ((table != NULL) && (seqId < (u32)table->header.numEntries) && (table->entries[seqId].size == 0)) {
+        seqId = table->entries[seqId].romAddr;
+    }
+
+    return seqId;
+}
+
+static s32 AudioHeap_IsSequenceCacheEntryInUse(u32 seqId) {
+    s32 i;
+
+    for (i = 0; i < gAudioCtx.audioBufferParameters.numSequencePlayers; i++) {
+        if (gAudioCtx.seqPlayers[i].enabled && (AudioHeap_GetRealSequenceId(gAudioCtx.seqPlayers[i].seqId) == seqId)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 /**
  * Effectively scales `ticksPerUpdateInv` by the reciprocal of `scaleInv`
  *
@@ -482,28 +504,14 @@ void* AudioHeap_AllocCached(s32 tableType, s32 size, s32 cache, s32 id) {
             // Check if there is a side which isn't in active use, if so, evict that one.
             if (tableType == SEQUENCE_TABLE) {
                 if (loadStatusEntry0 == LOAD_STATUS_COMPLETE) {
-                    for (i = 0; i < gAudioCtx.audioBufferParameters.numSequencePlayers; i++) {
-                        if (gAudioCtx.seqPlayers[i].enabled &&
-                            gAudioCtx.seqPlayers[i].seqId == temporaryCache->entries[0].id) {
-                            break;
-                        }
-                    }
-
-                    if (i == gAudioCtx.audioBufferParameters.numSequencePlayers) {
+                    if (!AudioHeap_IsSequenceCacheEntryInUse(temporaryCache->entries[0].id)) {
                         temporaryCache->nextSide = 0;
                         goto done;
                     }
                 }
 
                 if (loadStatusEntry1 == LOAD_STATUS_COMPLETE) {
-                    for (i = 0; i < gAudioCtx.audioBufferParameters.numSequencePlayers; i++) {
-                        if (gAudioCtx.seqPlayers[i].enabled &&
-                            gAudioCtx.seqPlayers[i].seqId == temporaryCache->entries[1].id) {
-                            break;
-                        }
-                    }
-
-                    if (i == gAudioCtx.audioBufferParameters.numSequencePlayers) {
+                    if (!AudioHeap_IsSequenceCacheEntryInUse(temporaryCache->entries[1].id)) {
                         temporaryCache->nextSide = 1;
                         goto done;
                     }

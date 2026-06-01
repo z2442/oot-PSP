@@ -20,7 +20,8 @@ typedef void (*AudioCustomUpdateFunction)(void);
 #define REFRESH_RATE_DEVIATION_MPAL 0.99276f
 #define REFRESH_RATE_DEVIATION_NTSC 1.00278f
 
-#define AUDIO_MK_CMD(b0,b1,b2,b3) ((((b0) & 0xFF) << 0x18) | (((b1) & 0xFF) << 0x10) | (((b2) & 0xFF) << 0x8) | (((b3) & 0xFF) << 0))
+#define AUDIO_MK_CMD(b0, b1, b2, b3) \
+    ((((b0) & 0xFF) << 0x18) | (((b1) & 0xFF) << 0x10) | (((b2) & 0xFF) << 0x8) | (((b3) & 0xFF) << 0))
 
 #define NO_LAYER ((SequenceLayer*)(-1))
 
@@ -64,7 +65,11 @@ typedef void (*AudioCustomUpdateFunction)(void);
 // Must be the same amount of samples as copied by aDuplicate() (audio microcode)
 #define WAVE_SAMPLE_COUNT 64
 
+#if defined(TARGET_PSP)
+#define AUDIO_RELOCATED_ADDRESS_START 0x01000000
+#else
 #define AUDIO_RELOCATED_ADDRESS_START K0BASE
+#endif
 
 typedef enum SoundSetting {
     /* 0 */ SOUND_SETTING_STEREO,

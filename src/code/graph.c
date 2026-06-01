@@ -29,6 +29,9 @@
 #include "audio.h"
 #include "save.h"
 #include "play_state.h"
+#if defined(TARGET_PSP)
+#include "oot_psp_audio_backend.h"
+#endif
 
 #define GFXPOOL_HEAD_MAGIC 0x1234
 #define GFXPOOL_TAIL_MAGIC 0x5678
@@ -472,6 +475,9 @@ void Graph_Update(GraphicsContext* gfxCtx, GameState* gameState) {
     }
 
     Audio_Update();
+#if defined(TARGET_PSP)
+    OotPspAudio_Update();
+#endif
 
     {
         OSTime timeNow = osGetTime();

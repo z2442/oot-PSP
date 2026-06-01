@@ -62,6 +62,7 @@
 #include "z_game_dlftbls.h"
 #include "z_lib.h"
 #include "oot_psp_asset_loader.h"
+#include "oot_psp_audio_backend.h"
 
 #include <pspiofilemgr.h>
 #include <pspkernel.h>
@@ -504,7 +505,15 @@ void DmaMgr_DmaFromDriveRom(void* ram, uintptr_t rom, size_t size) {
     OotPsp_DmaRead(ram, rom, size);
 }
 
-s32 DmaMgr_AudioDmaHandler(UNUSED OSPiHandle* pihandle, UNUSED OSIoMesg* mb, UNUSED s32 direction) {
+s32 DmaMgr_AudioDmaHandler(UNUSED OSPiHandle* pihandle, OSIoMesg* mb, UNUSED s32 direction) {
+    if (mb == NULL) {
+        return -1;
+    }
+
+    OotPsp_DmaRead(mb->dramAddr, mb->devAddr, mb->size);
+    if (mb->hdr.retQueue != NULL) {
+        osSendMesg(mb->hdr.retQueue, mb, OS_MESG_NOBLOCK);
+    }
     return 0;
 }
 
@@ -718,4 +727,5 @@ void OotPspGame_Init(void) {
     gPadMgr.nControllers = 1;
 
     Sched_Init(&gScheduler, NULL, THREAD_PRI_SCHED, 0, 0, &gIrqMgr);
+    OotPspAudio_Init();
 }

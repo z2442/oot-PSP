@@ -178,12 +178,21 @@ AudioTask* AudioThread_UpdateImpl(void) {
     task = &gAudioCtx.curTask->task.t;
     task->type = M_AUDTASK;
     task->flags = 0;
+#if defined(TARGET_PSP)
+    task->ucode_boot = NULL;
+    task->ucode_boot_size = 0;
+    task->ucode_data_size = 0;
+    task->ucode = NULL;
+    task->ucode_data = NULL;
+    task->ucode_size = 0;
+#else
     task->ucode_boot = aspMainTextStart;
     task->ucode_boot_size = SP_UCODE_SIZE;
     task->ucode_data_size = (size_t)(aspMainDataEnd - aspMainDataStart) * sizeof(u64) - 1;
     task->ucode = aspMainTextStart;
     task->ucode_data = aspMainDataStart;
     task->ucode_size = SP_UCODE_SIZE;
+#endif
     task->dram_stack = NULL;
     task->dram_stack_size = 0;
     task->output_buff = NULL;
@@ -389,7 +398,14 @@ void AudioThread_InitMesgQueuesImpl(void) {
 void AudioThread_QueueCmd(u32 opArgs, void** data) {
     AudioCmd* cmd = &gAudioCtx.threadCmdBuf[gAudioCtx.threadCmdWritePos & 0xFF];
 
+#if defined(TARGET_PSP)
+    cmd->op = (opArgs >> 24) & 0xFF;
+    cmd->arg0 = (opArgs >> 16) & 0xFF;
+    cmd->arg1 = (opArgs >> 8) & 0xFF;
+    cmd->arg2 = opArgs & 0xFF;
+#else
     cmd->opArgs = opArgs;
+#endif
     cmd->data = *data;
 
     gAudioCtx.threadCmdWritePos++;
@@ -417,7 +433,11 @@ void AudioThread_QueueCmdS32(u32 opArgs, s32 data) {
  * original name: Nap_SetS8
  */
 void AudioThread_QueueCmdS8(u32 opArgs, s8 data) {
+#if defined(TARGET_PSP)
+    u32 uData = (u8)data;
+#else
     u32 uData = data << 0x18;
+#endif
 
     AudioThread_QueueCmd(opArgs, (void**)&uData);
 }
@@ -426,7 +446,11 @@ void AudioThread_QueueCmdS8(u32 opArgs, s8 data) {
  * original name: Nap_SetU16
  */
 void AudioThread_QueueCmdU16(u32 opArgs, u16 data) {
+#if defined(TARGET_PSP)
+    u32 uData = data;
+#else
     u32 uData = data << 0x10;
+#endif
 
     AudioThread_QueueCmd(opArgs, (void**)&uData);
 }
