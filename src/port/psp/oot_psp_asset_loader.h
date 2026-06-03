@@ -19,6 +19,7 @@ typedef struct OotPspExternalAsset {
     uintptr_t originalVromStart;
     uintptr_t originalVromEnd;
     u32 flags;
+    uintptr_t fileOffset;
     const char* path;
 } OotPspExternalAsset;
 

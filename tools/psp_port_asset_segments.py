@@ -22,6 +22,7 @@ from tools import version_config
 EXTERNAL_VROM_BASE = 0x20000000
 EXTERNAL_VROM_ALIGN = 16
 RUNTIME_SEGMENT_DIR = Path("data/segments")
+PACKED_ASSET_FILENAME = "oot_psp_assets.bin"
 NATIVE_ASSET_FLAG = 1
 TEXTURE_WORDS_FLAG = 2
 TEXTURE_WORD_ALIGN = 8
@@ -1058,23 +1059,28 @@ def build_message_entries(version: str, entries: list[dict[str, object]]) -> dic
 
 def copy_data_files(entries: list[dict[str, object]], data_dir: Path, native_assets: NativeAssetContext) -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
-    expected: set[str] = set()
+    packed_path = data_dir / PACKED_ASSET_FILENAME
 
-    for entry in entries:
-        source = entry["source"]
-        assert isinstance(source, Path)
-        filename = f"{entry['name']}.bin"
-        target = data_dir / filename
-        native_data = native_assets.build_native_segment(entry)
+    with packed_path.open("wb") as out:
+        for entry in entries:
+            source = entry["source"]
+            assert isinstance(source, Path)
+            native_data = native_assets.build_native_segment(entry)
+            offset = align(out.tell(), EXTERNAL_VROM_ALIGN)
 
-        expected.add(filename)
-        if native_data is not None:
-            target.write_bytes(native_data)
-        else:
-            shutil.copy2(source, target)
+            if offset != out.tell():
+                out.write(bytes(offset - out.tell()))
+
+            entry["file_offset"] = offset
+
+            if native_data is not None:
+                out.write(native_data)
+            else:
+                with source.open("rb") as src:
+                    shutil.copyfileobj(src, out, length=1024 * 1024)
 
     for stale in data_dir.glob("*.bin"):
-        if stale.name not in expected:
+        if stale.name != PACKED_ASSET_FILENAME:
             stale.unlink()
 
 
@@ -1229,6 +1235,7 @@ def emit_table(
             f"    {{ 0x{entry['vrom_start']:08X}, 0x{entry['vrom_end']:08X}, "
             f"0x{entry['original_vrom_start']:08X}, 0x{entry['original_vrom_end']:08X}, "
             f"0x{entry['flags']:08X}, "
+            f"0x{entry['file_offset']:08X}, "
             f'"{c_string(path.as_posix())}" }},'
         )
 
@@ -1259,9 +1266,9 @@ def emit(version: str, asm_output: Path, table_output: Path, data_dir: Path, bui
     native_assets = NativeAssetContext(version, entries, build_root)
     annotate_asset_flags(entries, native_assets)
     message_entries = build_message_entries(version, entries)
+    copy_data_files(entries, data_dir, native_assets)
     emit_asm(asm_output, entries, native_assets)
     emit_table(table_output, entries, message_entries, native_assets)
-    copy_data_files(entries, data_dir, native_assets)
 
 
 def main() -> None:
