@@ -67,6 +67,8 @@ s32 OotPsp_GetLoadedExternalAssetRangeFlags(const void* ptr, size_t size, u32* f
 u32 OotPsp_GetExternalAssetRangeSerial(const void* ptr, size_t size);
 s32 OotPsp_MapNativeExternalTextureByte(const void* ptr, const void** mapped);
 s32 OotPsp_AssetRead(void* ram, uintptr_t vrom, size_t size);
+s32 OotPsp_AssetReadAudio(void* ram, uintptr_t vrom, size_t size);
+s32 OotPsp_AssetReadAudioUrgent(void* ram, uintptr_t vrom, size_t size);
 const OotPspMessageEntry* OotPsp_FindMessageEntry(const OotPspMessageEntry* entries, size_t count, u16 textId);
 
 #endif

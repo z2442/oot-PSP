@@ -8,6 +8,8 @@
 #define ROUND_UP_32(v) (((v) + 31) & ~31)
 #define ROUND_UP_16(v) (((v) + 15) & ~15)
 #define ROUND_UP_8(v) (((v) + 7) & ~7)
+#define OOT_PSP_FILTER_TAP_COUNT 8
+#define OOT_PSP_FILTER_CENTER_TAP 3
 
 #define DMEM_U8(addr) (&sMixer.dmem.u8[(u16)(addr)])
 #define DMEM_S16(addr) (&sMixer.dmem.s16[(u16)(addr) / sizeof(s16)])
@@ -18,6 +20,9 @@ typedef struct {
     u16 nbytes;
     ADPCM_STATE* adpcmLoopState;
     s16 adpcmTable[8][2][8];
+    u16 filterNbytes;
+    s16 filter[OOT_PSP_FILTER_TAP_COUNT];
+    s16 filterScratch[OOT_PSP_DMEM_SIZE / sizeof(s16)];
     struct {
         s32 initialReverb;
         s32 rampReverb;
@@ -266,10 +271,10 @@ void OotPspMixer_Resample(u8 flags, u16 pitch, RESAMPLE_STATE state) {
     while (nbytes > 0) {
         for (i = 0; i < 8; i++) {
             s16* tbl = sResampleTable[(pitchAccumulator * 64) >> 16];
-            s32 sample = ((in[0] * tbl[0] + 0x4000) >> 15) + ((in[1] * tbl[1] + 0x4000) >> 15) +
-                         ((in[2] * tbl[2] + 0x4000) >> 15) + ((in[3] * tbl[3] + 0x4000) >> 15);
+            s32 sample =
+                (in[0] * tbl[0]) + (in[1] * tbl[1]) + (in[2] * tbl[2]) + (in[3] * tbl[3]);
 
-            *out++ = OotPspMixer_Clamp16(sample);
+            *out++ = OotPspMixer_Clamp16((sample + 0x4000) >> 15);
             pitchAccumulator += pitch << 1;
             in += pitchAccumulator >> 16;
             pitchAccumulator &= 0xFFFF;
@@ -414,7 +419,61 @@ void OotPspMixer_Duplicate(s32 numCopies, u16 dmemSrc, u16 dmemDest) {
     }
 }
 
-void OotPspMixer_Filter(UNUSED u8 flags, UNUSED s32 countOrBuf, UNUSED void* state) {
+void OotPspMixer_Filter(u8 flags, s32 countOrBuf, void* state) {
+    s16* filterState = state;
+    s16* in;
+    s16* scratch = sMixer.filterScratch;
+    s32 samples;
+    s32 i;
+
+    if (flags == 2) {
+        sMixer.filterNbytes = ROUND_UP_16(countOrBuf);
+        if (state != NULL) {
+            memcpy(sMixer.filter, state, sizeof(sMixer.filter));
+        }
+        return;
+    }
+
+    if ((filterState == NULL) || (sMixer.filterNbytes == 0)) {
+        return;
+    }
+
+    if (flags & A_INIT) {
+        memset(filterState, 0, 32 * sizeof(s16));
+    }
+
+    in = DMEM_S16((u16)countOrBuf);
+    samples = ROUND_UP_16(sMixer.filterNbytes) / sizeof(s16);
+    memcpy(scratch, in, samples * sizeof(s16));
+
+    for (i = 0; i < samples; i++) {
+        s32 acc = 0;
+        s32 tap;
+
+        for (tap = 0; tap < OOT_PSP_FILTER_TAP_COUNT; tap++) {
+            s32 sampleIndex = i + tap - OOT_PSP_FILTER_CENTER_TAP;
+            s16 sample;
+
+            if (sampleIndex < 0) {
+                sample = filterState[OOT_PSP_FILTER_TAP_COUNT + sampleIndex];
+            } else if (sampleIndex >= samples) {
+                sample = 0;
+            } else {
+                sample = scratch[sampleIndex];
+            }
+
+            acc += sample * sMixer.filter[tap];
+        }
+
+        in[i] = OotPspMixer_Clamp16((acc + 0x4000) >> 15);
+    }
+
+    if (samples >= OOT_PSP_FILTER_TAP_COUNT) {
+        memcpy(filterState, &scratch[samples - OOT_PSP_FILTER_TAP_COUNT], OOT_PSP_FILTER_TAP_COUNT * sizeof(s16));
+    } else {
+        memmove(filterState, &filterState[samples], (OOT_PSP_FILTER_TAP_COUNT - samples) * sizeof(s16));
+        memcpy(&filterState[OOT_PSP_FILTER_TAP_COUNT - samples], scratch, samples * sizeof(s16));
+    }
 }
 
 void OotPspMixer_HiLoGain(s32 gain, u16 dmemIn, UNUSED u16 dmemOut, s32 nbytes) {

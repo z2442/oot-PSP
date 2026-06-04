@@ -451,8 +451,15 @@ static s32 OotPsp_IsNativeRange(uintptr_t addr, size_t size) {
     return size <= (OOT_PSP_NATIVE_ADDR_END - addr);
 }
 
-static s32 OotPsp_DmaRead(void* ram, uintptr_t vrom, size_t size) {
-    s32 status = OotPsp_AssetRead(ram, vrom, size);
+static s32 OotPsp_DmaReadInternal(void* ram, uintptr_t vrom, size_t size, s32 isAudioRead) {
+    s32 status;
+
+    if (isAudioRead) {
+        status = OotPspAudioBackend_NeedsRefillUrgently() ? OotPsp_AssetReadAudioUrgent(ram, vrom, size)
+                                                          : OotPsp_AssetReadAudio(ram, vrom, size);
+    } else {
+        status = OotPsp_AssetRead(ram, vrom, size);
+    }
 
     if (status == OOT_PSP_ASSET_READ_OK) {
         return 0;
@@ -472,6 +479,10 @@ static s32 OotPsp_DmaRead(void* ram, uintptr_t vrom, size_t size) {
 
     memcpy(ram, (const void*)vrom, size);
     return 0;
+}
+
+static s32 OotPsp_DmaRead(void* ram, uintptr_t vrom, size_t size) {
+    return OotPsp_DmaReadInternal(ram, vrom, size, false);
 }
 
 s32 DmaMgr_RequestAsync(DmaRequest* req, void* ram, uintptr_t vrom, size_t size, u32 unk5, OSMesgQueue* queue, OSMesg msg) {
@@ -510,7 +521,7 @@ s32 DmaMgr_AudioDmaHandler(UNUSED OSPiHandle* pihandle, OSIoMesg* mb, UNUSED s32
         return -1;
     }
 
-    OotPsp_DmaRead(mb->dramAddr, mb->devAddr, mb->size);
+    OotPsp_DmaReadInternal(mb->dramAddr, mb->devAddr, mb->size, true);
     if (mb->hdr.retQueue != NULL) {
         osSendMesg(mb->hdr.retQueue, mb, OS_MESG_NOBLOCK);
     }

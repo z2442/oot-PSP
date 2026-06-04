@@ -16,6 +16,11 @@
 #define ASYNC_TBLTYPE(v) ((u8)(v >> 16))
 #define ASYNC_ID(v) ((u8)(v >> 8))
 #define ASYNC_LOAD_STATUS(v) ((u8)(v >> 0))
+#if defined(TARGET_PSP)
+#define AUDIOLOAD_SYNC_DMA_CHUNK_SIZE 0x4000
+#else
+#define AUDIOLOAD_SYNC_DMA_CHUNK_SIZE 0x400
+#endif
 
 typedef enum SlowLoadState {
     /* 0 */ SLOW_LOAD_STATE_WAITING,
@@ -1321,14 +1326,15 @@ void AudioLoad_SyncDma(u32 devAddr, u8* ramAddr, u32 size, s32 medium) {
     Audio_InvalDCache(ramAddr, size);
 
     while (true) {
-        if (size < 0x400) {
+        if (size < AUDIOLOAD_SYNC_DMA_CHUNK_SIZE) {
             break;
         }
-        AudioLoad_Dma(ioMesg, OS_MESG_PRI_HIGH, OS_READ, devAddr, ramAddr, 0x400, msgQueue, medium, "FastCopy");
+        AudioLoad_Dma(ioMesg, OS_MESG_PRI_HIGH, OS_READ, devAddr, ramAddr, AUDIOLOAD_SYNC_DMA_CHUNK_SIZE, msgQueue,
+                      medium, "FastCopy");
         osRecvMesg(msgQueue, NULL, OS_MESG_BLOCK);
-        size -= 0x400;
-        devAddr += 0x400;
-        ramAddr += 0x400;
+        size -= AUDIOLOAD_SYNC_DMA_CHUNK_SIZE;
+        devAddr += AUDIOLOAD_SYNC_DMA_CHUNK_SIZE;
+        ramAddr += AUDIOLOAD_SYNC_DMA_CHUNK_SIZE;
     }
 
     if (size != 0) {

@@ -15,7 +15,7 @@
 #define OOT_PSP_LOADED_ASSET_RANGE_COUNT    4096
 #define OOT_PSP_ASSET_READ_CHUNK_SIZE       0x10000
 #define OOT_PSP_ASSET_CACHE_SIZE            (2 * 1024 * 1024)
-#define OOT_PSP_AUDIOTABLE_CACHE_SIZE       (5 * 1024 * 1024)
+#define OOT_PSP_AUDIOTABLE_CACHE_SIZE       0x10000
 #define OOT_PSP_HOT_ASSET_CACHE_COUNT       4
 #define OOT_PSP_HOT_READ_TRACKER_COUNT      16
 #define OOT_PSP_HOT_READ_PROMOTE_COUNT      4
@@ -36,6 +36,8 @@
 #define OOT_PSP_AUDIOTABLE_ASSET_PATH       "data/segments/Audiotable.bin"
 #define OOT_PSP_ASSET_READ_ZERO_RETRY_COUNT 16
 #define OOT_PSP_ASSET_READ_ZERO_RETRY_USEC  1000
+#define OOT_PSP_AUDIO_READ_BACKOFF_USEC     1000
+#define OOT_PSP_AUDIO_READ_BACKOFF_MAX_USEC 2000
 
 typedef struct OotPspLoadedAssetRange {
     uintptr_t ramStart;
@@ -99,6 +101,7 @@ static size_t sOotPspNativeTextureRangeCacheNext;
 static size_t sOotPspLoadedAssetRangeNext;
 static u32 sOotPspLoadedAssetSerial = 1;
 static u32 sOotPspAssetCacheClock;
+static volatile s32 sOotPspForegroundAssetReadWaiters;
 static OotPspAssetCache sOotPspPinnedAssetCaches[] = {
     { OOT_PSP_KANJI_ASSET_PATH, NULL, NULL, 0, 0, 0, 0, false },
     { OOT_PSP_LINK_ANIMATION_ASSET_PATH, NULL, NULL, 0, 0, 0, 0, false },
@@ -715,14 +718,14 @@ static size_t OotPsp_GetAssetCacheSizeLimit(const OotPspExternalAsset* asset) {
         return OOT_PSP_ASSET_CACHE_SIZE;
     }
 
+    if (strcmp(asset->path, OOT_PSP_AUDIOTABLE_ASSET_PATH) == 0) {
+        return OOT_PSP_AUDIOTABLE_CACHE_SIZE;
+    }
+
     for (i = 0; i < OOT_PSP_PINNED_ASSET_CACHE_COUNT; i++) {
         if (strcmp(asset->path, sOotPspPinnedAssetCaches[i].path) == 0) {
             return asset->vromEnd - asset->vromStart;
         }
-    }
-
-    if (strcmp(asset->path, OOT_PSP_AUDIOTABLE_ASSET_PATH) == 0) {
-        return OOT_PSP_AUDIOTABLE_CACHE_SIZE;
     }
 
     return OOT_PSP_ASSET_CACHE_SIZE;
@@ -825,12 +828,20 @@ static void OotPsp_PreloadPersistentAssets(void) {
         for (assetIndex = 0; assetIndex < gOotPspExternalAssetCount; assetIndex++) {
             const OotPspExternalAsset* asset = &gOotPspExternalAssets[assetIndex];
             size_t fileSize = asset->vromEnd - asset->vromStart;
+            size_t cacheSizeLimit;
 
             if (strcmp(asset->path, cache->path) != 0) {
                 continue;
             }
 
             cache->asset = asset;
+            cacheSizeLimit = OotPsp_GetAssetCacheSizeLimit(asset);
+            if (fileSize > cacheSizeLimit) {
+                printf("oot-psp persistent asset deferred cache path=%s size=%lu window=%lu\n", asset->path,
+                       (unsigned long)fileSize, (unsigned long)cacheSizeLimit);
+                break;
+            }
+
             if (!OotPsp_EnsureAssetCacheRange(cache, asset, 0, fileSize)) {
                 printf("oot-psp persistent asset preload failed path=%s size=%lu\n", asset->path,
                        (unsigned long)fileSize);
@@ -1679,12 +1690,49 @@ static s32 OotPsp_AssetReadLocked(void* ram, uintptr_t vrom, size_t size) {
     return OOT_PSP_ASSET_READ_OK;
 }
 
-s32 OotPsp_AssetRead(void* ram, uintptr_t vrom, size_t size) {
+static void OotPsp_WaitForForegroundAssetReads(void) {
+    u32 waitStartUsec = sceKernelGetSystemTimeLow();
+
+    while (sOotPspForegroundAssetReadWaiters > 0) {
+        u32 nowUsec = sceKernelGetSystemTimeLow();
+
+        if ((s32)(nowUsec - waitStartUsec) >= OOT_PSP_AUDIO_READ_BACKOFF_MAX_USEC) {
+            break;
+        }
+        sceKernelDelayThread(OOT_PSP_AUDIO_READ_BACKOFF_USEC);
+    }
+}
+
+static s32 OotPsp_AssetReadInternal(void* ram, uintptr_t vrom, size_t size, s32 isAudioRead, s32 urgentAudioRead) {
     s32 status;
 
     OotPsp_InitAssetSema();
+    if (isAudioRead) {
+        if (!urgentAudioRead) {
+            OotPsp_WaitForForegroundAssetReads();
+        }
+    } else {
+        sOotPspForegroundAssetReadWaiters++;
+    }
+
     OotPsp_LockAssetLoader();
+    if (!isAudioRead) {
+        sOotPspForegroundAssetReadWaiters--;
+    }
+
     status = OotPsp_AssetReadLocked(ram, vrom, size);
     OotPsp_UnlockAssetLoader();
     return status;
+}
+
+s32 OotPsp_AssetRead(void* ram, uintptr_t vrom, size_t size) {
+    return OotPsp_AssetReadInternal(ram, vrom, size, false, false);
+}
+
+s32 OotPsp_AssetReadAudio(void* ram, uintptr_t vrom, size_t size) {
+    return OotPsp_AssetReadInternal(ram, vrom, size, true, false);
+}
+
+s32 OotPsp_AssetReadAudioUrgent(void* ram, uintptr_t vrom, size_t size) {
+    return OotPsp_AssetReadInternal(ram, vrom, size, true, true);
 }

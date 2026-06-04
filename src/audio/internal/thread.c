@@ -19,6 +19,9 @@ void AudioThread_ProcessSeqPlayerCmd(SequencePlayer* seqPlayer, AudioCmd* cmd);
 void AudioThread_ProcessChannelCmd(SequenceChannel* channel, AudioCmd* cmd);
 s32 func_800E66C0(s32 flags);
 
+static void* sAudioExternalPoolRamAddr;
+static u32 sAudioExternalPoolSize;
+
 // AudioMgr_Retrace
 AudioTask* AudioThread_Update(void) {
     return AudioThread_UpdateImpl();
@@ -665,10 +668,22 @@ s8 AudioThread_GetSeqPlayerIO(s32 seqPlayerIndex, s32 ioPort) {
 }
 
 void AudioThread_InitExternalPool(void* ramAddr, u32 size) {
+    sAudioExternalPoolRamAddr = ramAddr;
+    sAudioExternalPoolSize = size;
     AudioHeap_InitPool(&gAudioCtx.externalPool, ramAddr, size);
 }
 
+void AudioThread_ApplyExternalPool(void) {
+    if ((sAudioExternalPoolRamAddr != NULL) && (sAudioExternalPoolSize != 0)) {
+        AudioHeap_InitPool(&gAudioCtx.externalPool, sAudioExternalPoolRamAddr, sAudioExternalPoolSize);
+    } else {
+        gAudioCtx.externalPool.startRamAddr = NULL;
+    }
+}
+
 void AudioThread_ResetExternalPool(void) {
+    sAudioExternalPoolRamAddr = NULL;
+    sAudioExternalPoolSize = 0;
     gAudioCtx.externalPool.startRamAddr = NULL;
 }
 

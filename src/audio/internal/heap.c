@@ -14,6 +14,7 @@ void AudioHeap_UnapplySampleCache(SampleCacheEntry* entry, Sample* sample);
 void AudioHeap_DiscardSampleCaches(void);
 void AudioHeap_DiscardSampleBank(s32 sampleBankId);
 void AudioHeap_DiscardSampleBanks(void);
+void AudioThread_ApplyExternalPool(void);
 
 static u32 AudioHeap_GetRealSequenceId(u32 seqId) {
     AudioTable* table = gAudioCtx.sequenceTable;
@@ -354,7 +355,7 @@ void AudioHeap_InitMainPools(s32 initPoolSize) {
     AudioHeap_InitPool(&gAudioCtx.initPool, gAudioCtx.audioHeap, initPoolSize);
     AudioHeap_InitPool(&gAudioCtx.sessionPool, gAudioCtx.audioHeap + initPoolSize,
                        gAudioCtx.audioHeapSize - initPoolSize);
-    gAudioCtx.externalPool.startRamAddr = NULL;
+    AudioThread_ApplyExternalPool();
 }
 
 /**
@@ -992,6 +993,14 @@ void AudioHeap_Init(void) {
     // SampleDma buffer size
     gAudioCtx.sampleDmaBufSize1 = spec->sampleDmaBufSize1;
     gAudioCtx.sampleDmaBufSize2 = spec->sampleDmaBufSize2;
+#if defined(TARGET_PSP)
+    if (gAudioCtx.sampleDmaBufSize1 < 0x1000) {
+        gAudioCtx.sampleDmaBufSize1 = 0x1000;
+    }
+    if (gAudioCtx.sampleDmaBufSize2 < 0x4000) {
+        gAudioCtx.sampleDmaBufSize2 = 0x4000;
+    }
+#endif
 
     gAudioCtx.numNotes = spec->numNotes;
     gAudioCtx.audioBufferParameters.numSequencePlayers = spec->numSequencePlayers;
