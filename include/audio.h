@@ -376,13 +376,23 @@ typedef struct SequencePlayer {
 typedef struct AdsrSettings {
     /* 0x0 */ u8 decayIndex; // index used to obtain adsr decay rate from adsrDecayTable
     /* 0x1 */ u8 sustain;
+#if defined(TARGET_PSP)
+    /* 0x2 */ u8 envelopeBigEndian;
+#else
+    /* 0x2 */ u8 pad_02;
+#endif
+    /* 0x3 */ u8 pad_03;
     /* 0x4 */ EnvelopePoint* envelope;
 } AdsrSettings; // size = 0x8
 
 typedef struct AdsrState {
     /* 0x00 */ union {
         struct A {
+#if defined(TARGET_PSP)
+            /* 0x00 */ u8 envelopeBigEndian : 1;
+#else
             /* 0x00 */ u8 unused : 1;
+#endif
             /* 0x00 */ u8 hang : 1;
             /* 0x00 */ u8 decay : 1;
             /* 0x00 */ u8 release : 1;

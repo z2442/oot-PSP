@@ -179,13 +179,13 @@ void Audio_NoteSetResamplingRate(NoteSubEu* noteSubEu, f32 resamplingRateInput) 
  * original name: Nas_StartVoice
  */
 void Audio_NoteInit(Note* note) {
-    if (note->playbackState.parentLayer->adsr.decayIndex == 0) {
-        Audio_AdsrInit(&note->playbackState.adsr, note->playbackState.parentLayer->channel->adsr.envelope,
-                       &note->playbackState.adsrVolScaleUnused);
-    } else {
-        Audio_AdsrInit(&note->playbackState.adsr, note->playbackState.parentLayer->adsr.envelope,
-                       &note->playbackState.adsrVolScaleUnused);
-    }
+    SequenceLayer* layer = note->playbackState.parentLayer;
+    AdsrSettings* settings = (layer->adsr.decayIndex == 0) ? &layer->channel->adsr : &layer->adsr;
+
+    Audio_AdsrInit(&note->playbackState.adsr, settings->envelope, &note->playbackState.adsrVolScaleUnused);
+#if defined(TARGET_PSP)
+    note->playbackState.adsr.action.s.envelopeBigEndian = settings->envelopeBigEndian;
+#endif
 
     note->playbackState.unk_04 = 0;
     note->playbackState.adsr.action.s.state = ADSR_STATE_INITIAL;

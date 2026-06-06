@@ -12,9 +12,12 @@
 #define OOT_PSP_AUDIO_CHANNELS 2
 #define OOT_PSP_AUDIO_DEFAULT_SOURCE_FREQUENCY 32006
 #define OOT_PSP_AUDIO_OUTPUT_FREQUENCY 44100
-#define OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES 1024
+#define OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES 512
 #define OOT_PSP_AUDIO_RING_FRAMES 16384
 #define OOT_PSP_AUDIO_RING_MASK (OOT_PSP_AUDIO_RING_FRAMES - 1)
+#define OOT_PSP_AUDIO_RESAMPLE_FRAC_BITS 24
+#define OOT_PSP_AUDIO_RESAMPLE_FRAC_MASK ((1U << OOT_PSP_AUDIO_RESAMPLE_FRAC_BITS) - 1)
+#define OOT_PSP_AUDIO_LERP_FRAC_BITS 15
 
 /*
  * One-thread backend:
@@ -39,6 +42,10 @@
 #error OOT_PSP_AUDIO_RING_FRAMES must be a power of two
 #endif
 
+#if (OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES & 63) != 0
+#error OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES must be a multiple of 64
+#endif
+
 static s16 sAudioRing[OOT_PSP_AUDIO_RING_FRAMES * OOT_PSP_AUDIO_CHANNELS] __attribute__((aligned(64)));
 static s16 sAudioMix[OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES * OOT_PSP_AUDIO_CHANNELS] __attribute__((aligned(64)));
 static u8 sAudioExternalPool[OOT_PSP_AUDIO_EXTERNAL_POOL_SIZE] __attribute__((aligned(64)));
@@ -50,8 +57,9 @@ static volatile s32 sAudioThreadRunning;
 static volatile s32 sAudioPlaybackPrimed;
 static volatile u32 sAudioSourceFrequency = OOT_PSP_AUDIO_DEFAULT_SOURCE_FREQUENCY;
 
-/* Q16 source-frame step per 44100 Hz PSP output frame. */
+/* Q24 source-frame phase and step per 44100 Hz PSP output frame. */
 static u32 sAudioResampleFrac;
+static u32 sAudioResampleStep;
 static s16 sAudioLastLeft;
 static s16 sAudioLastRight;
 static SceUID sAudioThreadId = -1;
@@ -78,8 +86,8 @@ static u32 OotPspAudioBackend_UrgentBufferFrames(void) {
     return OotPspAudioBackend_SourceChunkFrames() * OOT_PSP_AUDIO_URGENT_CHUNKS;
 }
 
-static u32 OotPspAudioBackend_ResampleStep(void) {
-    return (u32)(((u64)sAudioSourceFrequency << 16) / OOT_PSP_AUDIO_OUTPUT_FREQUENCY);
+static u32 OotPspAudioBackend_CalculateResampleStep(u32 frequency) {
+    return (u32)(((u64)frequency << OOT_PSP_AUDIO_RESAMPLE_FRAC_BITS) / OOT_PSP_AUDIO_OUTPUT_FREQUENCY);
 }
 
 static u32 OotPspAudioBackend_ViClock(void) {
@@ -145,8 +153,21 @@ static u32 OotPspAudioBackend_ReportableFrames(void) {
     return buffered - targetFrames;
 }
 
+static s16 OotPspAudioBackend_LerpSample(s16 current, s16 next, u32 frac) {
+    s32 scaledFrac = frac >> (OOT_PSP_AUDIO_RESAMPLE_FRAC_BITS - OOT_PSP_AUDIO_LERP_FRAC_BITS);
+    s32 delta = ((s32)next - current) * scaledFrac;
+
+    if (delta >= 0) {
+        delta += 1 << (OOT_PSP_AUDIO_LERP_FRAC_BITS - 1);
+    } else {
+        delta -= 1 << (OOT_PSP_AUDIO_LERP_FRAC_BITS - 1);
+    }
+
+    return current + (delta >> OOT_PSP_AUDIO_LERP_FRAC_BITS);
+}
+
 static void OotPspAudioBackend_OutputMix(u32 sourceFrames) {
-    sceKernelDcacheWritebackInvalidateRange(sAudioMix, sizeof(sAudioMix));
+    sceKernelDcacheWritebackRange(sAudioMix, sizeof(sAudioMix));
     sAudioOutputFrames = sourceFrames;
     sceAudioOutputBlocking(sAudioOutputChannel, PSP_AUDIO_VOLUME_MAX, sAudioMix);
     sAudioOutputFrames = 0;
@@ -220,7 +241,6 @@ static u32 OotPspAudioBackend_RenderOutputChunk(void) {
     u32 buffered = OotPspAudioBackend_BufferedFrames();
     u32 readPos = sAudioReadPos;
     u32 sourceFrames = 0;
-    u32 resampleStep = OotPspAudioBackend_ResampleStep();
     s16* out = sAudioMix;
     u32 i;
 
@@ -230,6 +250,7 @@ static u32 OotPspAudioBackend_RenderOutputChunk(void) {
 
     for (i = 0; i < OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES; i++) {
         u32 ringOffset;
+        u32 nextRingOffset;
         u32 advance;
         s16 left;
         s16 right;
@@ -239,23 +260,26 @@ static u32 OotPspAudioBackend_RenderOutputChunk(void) {
         }
 
         ringOffset = readPos * OOT_PSP_AUDIO_CHANNELS;
+        nextRingOffset = ((readPos + 1) & OOT_PSP_AUDIO_RING_MASK) * OOT_PSP_AUDIO_CHANNELS;
 
         /*
-         * Cheap zero-order hold resampler. The original linear Q32/s64
-         * interpolation is too expensive on PSP. This keeps AI pacing while
-         * making the output thread much cheaper.
+         * Linear interpolation avoids the imaging from zero-order hold. Q24
+         * phase keeps N64 AI pacing accurate, while Q15 interpolation needs
+         * only one 32-bit multiply per channel on Allegrex.
          */
-        left = sAudioRing[ringOffset + 0];
-        right = sAudioRing[ringOffset + 1];
+        left = OotPspAudioBackend_LerpSample(sAudioRing[ringOffset + 0], sAudioRing[nextRingOffset + 0],
+                                             sAudioResampleFrac);
+        right = OotPspAudioBackend_LerpSample(sAudioRing[ringOffset + 1], sAudioRing[nextRingOffset + 1],
+                                              sAudioResampleFrac);
 
         *out++ = left;
         *out++ = right;
         sAudioLastLeft = left;
         sAudioLastRight = right;
 
-        sAudioResampleFrac += resampleStep;
-        advance = sAudioResampleFrac >> 16;
-        sAudioResampleFrac &= 0xFFFF;
+        sAudioResampleFrac += sAudioResampleStep;
+        advance = sAudioResampleFrac >> OOT_PSP_AUDIO_RESAMPLE_FRAC_BITS;
+        sAudioResampleFrac &= OOT_PSP_AUDIO_RESAMPLE_FRAC_MASK;
 
         if (advance > (buffered - 1)) {
             advance = buffered - 1;
@@ -344,6 +368,7 @@ s32 OotPspAudioBackend_Init(void) {
     sAudioLastRight = 0;
     sAudioResampleFrac = 0;
     sAudioSourceFrequency = OOT_PSP_AUDIO_DEFAULT_SOURCE_FREQUENCY;
+    sAudioResampleStep = OotPspAudioBackend_CalculateResampleStep(sAudioSourceFrequency);
 
     sceAudioOutput2Release();
     sceAudioSRCChRelease();
@@ -427,6 +452,7 @@ s32 OotPspAudioBackend_SetFrequency(u32 frequency) {
 
     if (sAudioSourceFrequency != (u32)actualFrequency) {
         sAudioSourceFrequency = (u32)actualFrequency;
+        sAudioResampleStep = OotPspAudioBackend_CalculateResampleStep(sAudioSourceFrequency);
         sAudioResampleFrac = 0;
     }
 

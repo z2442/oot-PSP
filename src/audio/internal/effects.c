@@ -254,6 +254,18 @@ void Audio_AdsrInit(AdsrState* adsr, EnvelopePoint* envelope, s16* volOut) {
     // removed, but the function parameter was forgotten and remains.)
 }
 
+static s16 Audio_AdsrReadEnvelopeS16(AdsrState* adsr, s16 value) {
+#if defined(TARGET_PSP)
+    if (adsr->action.s.envelopeBigEndian) {
+        u16 raw = (u16)value;
+
+        return (s16)((raw << 8) | (raw >> 8));
+    }
+#endif
+
+    return value;
+}
+
 /**
  * original name: Nas_EnvProcess
  */
@@ -276,7 +288,7 @@ f32 Audio_AdsrUpdate(AdsrState* adsr) {
         retry:;
             FALLTHROUGH;
         case ADSR_STATE_LOOP:
-            adsr->delay = adsr->envelope[adsr->envIndex].delay;
+            adsr->delay = Audio_AdsrReadEnvelopeS16(adsr, adsr->envelope[adsr->envIndex].delay);
             switch (adsr->delay) {
                 case ADSR_DISABLE:
                     adsr->action.s.state = ADSR_STATE_DISABLED;
@@ -287,7 +299,7 @@ f32 Audio_AdsrUpdate(AdsrState* adsr) {
                     break;
 
                 case ADSR_GOTO:
-                    adsr->envIndex = adsr->envelope[adsr->envIndex].arg;
+                    adsr->envIndex = Audio_AdsrReadEnvelopeS16(adsr, adsr->envelope[adsr->envIndex].arg);
                     goto retry;
 
                 case ADSR_RESTART:
@@ -299,7 +311,8 @@ f32 Audio_AdsrUpdate(AdsrState* adsr) {
                     if (adsr->delay == 0) {
                         adsr->delay = 1;
                     }
-                    adsr->target = adsr->envelope[adsr->envIndex].arg / 32767.0f;
+                    adsr->target =
+                        Audio_AdsrReadEnvelopeS16(adsr, adsr->envelope[adsr->envIndex].arg) / 32767.0f;
                     adsr->target = SQ(adsr->target);
                     adsr->velocity = (adsr->target - adsr->current) / adsr->delay;
                     adsr->action.s.state = ADSR_STATE_FADE;

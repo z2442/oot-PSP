@@ -745,6 +745,9 @@ void AudioSeq_InitSequenceChannel(SequenceChannel* channel) {
     channel->adsr.envelope = gDefaultEnvelope;
     channel->adsr.decayIndex = 0xF0;
     channel->adsr.sustain = 0;
+#if defined(TARGET_PSP)
+    channel->adsr.envelopeBigEndian = false;
+#endif
     channel->vibratoRateTarget = 0x800;
     channel->vibratoRateStart = 0x800;
     channel->vibratoDepthTarget = 0;
@@ -1449,6 +1452,9 @@ s32 AudioSeq_SeqLayerProcessScriptStep2(SequenceLayer* layer) {
                 }
 #endif
                 layer->adsr.envelope = (EnvelopePoint*)(seqPlayer->seqData + cmdArg16);
+#if defined(TARGET_PSP)
+                layer->adsr.envelopeBigEndian = true;
+#endif
                 FALLTHROUGH;
             case ASEQ_OP_LAYER_RELEASERATE:
 #if defined(TARGET_PSP)
@@ -1554,6 +1560,9 @@ s32 AudioSeq_SeqLayerProcessScriptStep4(SequenceLayer* layer, s32 cmd) {
             tunedSample = &drum->tunedSample;
             layer->adsr.envelope = drum->envelope;
             layer->adsr.decayIndex = drum->adsrDecayIndex;
+#if defined(TARGET_PSP)
+            layer->adsr.envelopeBigEndian = false;
+#endif
             if (!layer->ignoreDrumPan) {
                 layer->pan = drum->pan;
             }
@@ -1904,6 +1913,9 @@ u8 AudioSeq_GetInstrument(SequenceChannel* channel, u8 instId, Instrument** inst
 
     adsr->envelope = inst->envelope;
     adsr->decayIndex = inst->adsrDecayIndex;
+#if defined(TARGET_PSP)
+    adsr->envelopeBigEndian = false;
+#endif
     *instOut = inst;
 
     // temporarily offset instrument id by 2 so that instId 0, 1
@@ -2176,6 +2188,9 @@ void AudioSeq_SequenceChannelProcessScript(SequenceChannel* channel) {
                 case ASEQ_OP_CHAN_ENV:
                     cmdArgU16 = (u16)cmdArgs[0];
                     channel->adsr.envelope = (EnvelopePoint*)&seqPlayer->seqData[cmdArgU16];
+#if defined(TARGET_PSP)
+                    channel->adsr.envelopeBigEndian = true;
+#endif
                     break;
 
                 case ASEQ_OP_CHAN_RELEASERATE:

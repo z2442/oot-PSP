@@ -11,6 +11,7 @@
 
 #include "controller.h"
 #include "oot_psp_audio_backend.h"
+#include "versions.h"
 
 #define OOT_PSP_MAX_THREADS 16
 #define OOT_PSP_MAX_TIMERS  16
@@ -44,7 +45,11 @@ static u32 sMesgQueueSemaIndex;
 
 s32 osRomType = 0;
 void* osRomBase = NULL;
+#if OOT_PAL_N64
+s32 osTvType = OS_TV_PAL;
+#else
 s32 osTvType = OS_TV_NTSC;
+#endif
 s32 osResetType = 0;
 s32 osCicId = 0;
 s32 osVersion = 0;
