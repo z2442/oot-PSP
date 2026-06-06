@@ -12,8 +12,11 @@
 #define OOT_PSP_AUDIO_CHANNELS 2
 #define OOT_PSP_AUDIO_DEFAULT_SOURCE_FREQUENCY 32006
 #define OOT_PSP_AUDIO_OUTPUT_FREQUENCY 44100
-#define OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES 704
-#define OOT_PSP_AUDIO_RING_FRAMES 32768
+#define OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES 1024
+#define OOT_PSP_AUDIO_RING_FRAMES 8192
+#define OOT_PSP_AUDIO_TARGET_CHUNKS 2
+#define OOT_PSP_AUDIO_REFILL_CHUNKS 2
+#define OOT_PSP_AUDIO_URGENT_CHUNKS 1
 #define OOT_PSP_AUDIO_UPDATE_HZ 60
 #define OOT_PSP_AUDIO_UPDATE_USEC (1000000 / OOT_PSP_AUDIO_UPDATE_HZ)
 #define OOT_PSP_AUDIO_MAX_UPDATES_PER_PUMP 8
@@ -48,15 +51,15 @@ static u32 OotPspAudioBackend_SourceChunkFrames(void) {
 }
 
 static u32 OotPspAudioBackend_TargetBufferFrames(void) {
-    return OotPspAudioBackend_SourceChunkFrames() * 6;
+    return OotPspAudioBackend_SourceChunkFrames() * OOT_PSP_AUDIO_TARGET_CHUNKS;
 }
 
 static u32 OotPspAudioBackend_RefillBufferFrames(void) {
-    return OotPspAudioBackend_SourceChunkFrames() * 5;
+    return OotPspAudioBackend_SourceChunkFrames() * OOT_PSP_AUDIO_REFILL_CHUNKS;
 }
 
 static u32 OotPspAudioBackend_UrgentBufferFrames(void) {
-    return OotPspAudioBackend_SourceChunkFrames() * 3;
+    return OotPspAudioBackend_SourceChunkFrames() * OOT_PSP_AUDIO_URGENT_CHUNKS;
 }
 
 static u64 OotPspAudioBackend_ResampleStep(void) {

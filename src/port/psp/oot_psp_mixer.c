@@ -5,11 +5,13 @@
 #include <string.h>
 
 #define OOT_PSP_DMEM_SIZE 0x2000
+#define ROUND_UP_64(v) (((v) + 63) & ~63)
 #define ROUND_UP_32(v) (((v) + 31) & ~31)
 #define ROUND_UP_16(v) (((v) + 15) & ~15)
 #define ROUND_UP_8(v) (((v) + 7) & ~7)
+#define ROUND_DOWN_16(v) ((v) & ~15)
 #define OOT_PSP_FILTER_TAP_COUNT 8
-#define OOT_PSP_FILTER_CENTER_TAP 3
+#define OOT_PSP_A_COPYBLOCKS 16
 
 #define DMEM_U8(addr) (&sMixer.dmem.u8[(u16)(addr)])
 #define DMEM_S16(addr) (&sMixer.dmem.s16[(u16)(addr) / sizeof(s16)])
@@ -20,9 +22,10 @@ typedef struct {
     u16 nbytes;
     ADPCM_STATE* adpcmLoopState;
     s16 adpcmTable[8][2][8];
-    u16 filterNbytes;
-    s16 filter[OOT_PSP_FILTER_TAP_COUNT];
     s16 filterScratch[OOT_PSP_DMEM_SIZE / sizeof(s16)];
+    s32 filter2Count;
+    s16 filter2Lut[OOT_PSP_FILTER_TAP_COUNT];
+    s32 filter2Valid;
     struct {
         s32 initialReverb;
         s32 rampReverb;
@@ -74,7 +77,7 @@ static s16 sResampleTable[64][4] = {
     { 0xFFD8, 0x0E5F, 0x6696, 0x0B39 }, { 0xFFDF, 0x0D46, 0x66AD, 0x0C39 },
 };
 
-static s16 OotPspMixer_Clamp16(s32 value) {
+static s16 OotPspMixer_Clamp16(s64 value) {
     if (value < -0x8000) {
         return -0x8000;
     }
@@ -82,6 +85,14 @@ static s16 OotPspMixer_Clamp16(s32 value) {
         return 0x7FFF;
     }
     return value;
+}
+
+static s16 OotPspMixer_Vmulf(s16 left, s16 right) {
+    return OotPspMixer_Clamp16((((s64)left * right * 2) + 0x8000) >> 16);
+}
+
+static s16 OotPspMixer_Vadd(s16 left, s16 right) {
+    return OotPspMixer_Clamp16((s32)left + right);
 }
 
 static s16 OotPspMixer_SignExtendShift2(u8 value, s32 shift) {
@@ -118,30 +129,28 @@ void OotPspMixer_ClearBuffer(u16 dmem, s32 nbytes) {
 }
 
 void OotPspMixer_LoadBuffer(const void* source, u16 dmemDest, u16 nbytes) {
-    memcpy(DMEM_U8(dmemDest), source, ROUND_UP_8(nbytes));
+    memcpy(DMEM_U8(dmemDest), source, ROUND_DOWN_16(nbytes));
 }
 
 void OotPspMixer_SaveBuffer(u16 dmemSrc, void* dest, u16 nbytes) {
-    memcpy(dest, DMEM_U8(dmemSrc), ROUND_UP_8(nbytes));
+    memcpy(dest, DMEM_U8(dmemSrc), ROUND_DOWN_16(nbytes));
 }
 
 void OotPspMixer_LoadADPCM(s32 numEntriesBytes, const s16* book) {
     memcpy(sMixer.adpcmTable, book, numEntriesBytes);
 }
 
-void OotPspMixer_SetBuffer(u8 flags, u16 dmemIn, u16 dmemOut, u16 nbytes) {
-    if ((flags & A_AUX) == 0) {
-        sMixer.in = dmemIn;
-        sMixer.out = dmemOut;
-        sMixer.nbytes = nbytes;
-    }
+void OotPspMixer_SetBuffer(UNUSED u8 flags, u16 dmemIn, u16 dmemOut, u16 nbytes) {
+    sMixer.in = dmemIn;
+    sMixer.out = dmemOut;
+    sMixer.nbytes = nbytes;
 }
 
 void OotPspMixer_Interleave(u16 dmemOut, u16 dmemLeft, u16 dmemRight, u16 count) {
     s16* out = DMEM_S16(dmemOut);
     s16* left = DMEM_S16(dmemLeft);
     s16* right = DMEM_S16(dmemRight);
-    s32 frames = count / 2;
+    s32 frames = ROUND_DOWN_16(count) / 2;
     s32 i;
 
     for (i = 0; i < frames; i++) {
@@ -153,15 +162,23 @@ void OotPspMixer_Interleave(u16 dmemOut, u16 dmemLeft, u16 dmemRight, u16 count)
 void OotPspMixer_Interl(u16 dmemIn, u16 dmemOut, u16 count) {
     s16* in = DMEM_S16(dmemIn);
     s16* out = DMEM_S16(dmemOut);
+    s32 samples = ROUND_UP_8(count);
     s32 i;
 
-    for (i = 0; i < count; i++) {
+    for (i = 0; i < samples; i++) {
         out[i] = in[i * 2];
     }
 }
 
 void OotPspMixer_DMEMMove(u16 dmemIn, u16 dmemOut, s32 nbytes) {
-    memmove(DMEM_U8(dmemOut), DMEM_U8(dmemIn), ROUND_UP_16(nbytes));
+    u8 block[16];
+    s32 count = ROUND_UP_16(nbytes);
+    s32 offset;
+
+    for (offset = 0; offset < count; offset += sizeof(block)) {
+        memcpy(block, DMEM_U8(dmemIn + offset), sizeof(block));
+        memcpy(DMEM_U8(dmemOut + offset), block, sizeof(block));
+    }
 }
 
 void OotPspMixer_SetLoop(ADPCM_STATE* state) {
@@ -230,18 +247,23 @@ void OotPspMixer_ADPCMdec(u8 flags, ADPCM_STATE state) {
 void OotPspMixer_S8Dec(u8 flags, ADPCM_STATE state) {
     s8* in = (s8*)DMEM_U8(sMixer.in);
     s16* out = DMEM_S16(sMixer.out);
-    s32 samples = ROUND_UP_16(sMixer.nbytes) / sizeof(s16);
+    s32 samples = ROUND_UP_32(sMixer.nbytes) / sizeof(s16);
     s32 i;
 
     if (flags & A_INIT) {
-        memset(state, 0, sizeof(ADPCM_STATE));
+        memset(out, 0, sizeof(ADPCM_STATE));
+    } else if ((flags & A_LOOP) && (sMixer.adpcmLoopState != NULL)) {
+        memcpy(out, sMixer.adpcmLoopState, sizeof(ADPCM_STATE));
+    } else {
+        memcpy(out, state, sizeof(ADPCM_STATE));
     }
+    out += 16;
 
     for (i = 0; i < samples; i++) {
         out[i] = in[i] << 8;
     }
 
-    memcpy(state, out + samples - 16, 16 * sizeof(s16));
+    memcpy(state, out + samples - 16, sizeof(ADPCM_STATE));
 }
 
 void OotPspMixer_Resample(u8 flags, u16 pitch, RESAMPLE_STATE state) {
@@ -271,10 +293,12 @@ void OotPspMixer_Resample(u8 flags, u16 pitch, RESAMPLE_STATE state) {
     while (nbytes > 0) {
         for (i = 0; i < 8; i++) {
             s16* tbl = sResampleTable[(pitchAccumulator * 64) >> 16];
-            s32 sample =
-                (in[0] * tbl[0]) + (in[1] * tbl[1]) + (in[2] * tbl[2]) + (in[3] * tbl[3]);
+            s16 product01 = OotPspMixer_Vadd(OotPspMixer_Vmulf(in[0], tbl[0]),
+                                             OotPspMixer_Vmulf(in[1], tbl[1]));
+            s16 product23 = OotPspMixer_Vadd(OotPspMixer_Vmulf(in[2], tbl[2]),
+                                             OotPspMixer_Vmulf(in[3], tbl[3]));
 
-            *out++ = OotPspMixer_Clamp16((sample + 0x4000) >> 15);
+            *out++ = OotPspMixer_Vadd(product01, product23);
             pitchAccumulator += pitch << 1;
             in += pitchAccumulator >> 16;
             pitchAccumulator &= 0xFFFF;
@@ -294,15 +318,15 @@ void OotPspMixer_Resample(u8 flags, u16 pitch, RESAMPLE_STATE state) {
 }
 
 void OotPspMixer_ResampleZoh(u16 pitch, u16 pitchAccu) {
-    s16* in = DMEM_S16(sMixer.in);
     s16* out = DMEM_S16(sMixer.out);
-    s32 samples = ROUND_UP_16(sMixer.nbytes) / sizeof(s16);
-    u32 accumulator = pitchAccu;
+    s32 samples = ROUND_UP_8(sMixer.nbytes) / sizeof(s16);
+    u32 accumulator = ((u32)sMixer.in << 16) | pitchAccu;
+    u32 step = (u32)pitch << 2;
     s32 i;
 
     for (i = 0; i < samples; i++) {
-        out[i] = in[accumulator >> 15];
-        accumulator += pitch;
+        out[i] = *DMEM_S16((accumulator >> 16) & 0xFFFE);
+        accumulator += step;
     }
 }
 
@@ -316,6 +340,10 @@ void OotPspMixer_EnvSetup1(s32 initialReverb, s32 rampReverb, s32 rampLeft, s32 
 void OotPspMixer_EnvSetup2(s32 volLeft, s32 volRight) {
     sMixer.env.volLeft = volLeft;
     sMixer.env.volRight = volRight;
+}
+
+static s16 OotPspMixer_MulHighSignedUnsigned(s16 sample, u16 volume) {
+    return (s16)(((s64)sample * volume) >> 16);
 }
 
 void OotPspMixer_EnvMixer(u16 dmemSrc, s32 aiBufLen, s32 swapLR, s32 x0, s32 x1, s32 x2, s32 x3, u32 dmemDests,
@@ -344,12 +372,12 @@ void OotPspMixer_EnvMixer(u16 dmemSrc, s32 aiBufLen, s32 swapLR, s32 x0, s32 x1,
         s32 block;
 
         for (block = 0; block < 16; block++) {
-            s32 sample = *in++;
+            s16 sample = *in++;
             u16 volLeft = (block < 8) ? volLeft0 : volLeft1;
             u16 volRight = (block < 8) ? volRight0 : volRight1;
             u16 reverb = (block < 8) ? reverb0 : reverb1;
-            s16 left = (s16)(((s32)sample * volLeft) >> 16);
-            s16 right = (s16)(((s32)sample * volRight) >> 16);
+            s16 left = OotPspMixer_MulHighSignedUnsigned(sample, volLeft);
+            s16 right = OotPspMixer_MulHighSignedUnsigned(sample, volRight);
             s16 wetL;
             s16 wetR;
 
@@ -361,8 +389,8 @@ void OotPspMixer_EnvMixer(u16 dmemSrc, s32 aiBufLen, s32 swapLR, s32 x0, s32 x1,
             *dryRight = OotPspMixer_Clamp16(*dryRight + right);
             dryRight++;
 
-            wetL = (s16)(((s32)left * reverb) >> 16);
-            wetR = (s16)(((s32)right * reverb) >> 16);
+            wetL = OotPspMixer_MulHighSignedUnsigned(left, reverb);
+            wetR = OotPspMixer_MulHighSignedUnsigned(right, reverb);
             wetL ^= wetLeftMask;
             wetR ^= wetRightMask;
 
@@ -390,24 +418,32 @@ void OotPspMixer_EnvMixer(u16 dmemSrc, s32 aiBufLen, s32 swapLR, s32 x0, s32 x1,
 }
 
 void OotPspMixer_Mix(s32 countQuads, s16 gain, u16 dmemIn, u16 dmemOut) {
-    OotPspMixer_AddMixer(countQuads << 4, dmemIn, dmemOut, gain);
-}
-
-void OotPspMixer_AddMixer(s32 nbytes, u16 dmemIn, u16 dmemOut, s16 gain) {
     s16* in = DMEM_S16(dmemIn);
     s16* out = DMEM_S16(dmemOut);
-    s32 samples = ROUND_UP_16(nbytes) / sizeof(s16);
+    s32 samples = ROUND_UP_32((countQuads & 0xFF) << 4) / sizeof(s16);
     s32 i;
 
-    if (gain == (s16)-0x8000) {
-        for (i = 0; i < samples; i++) {
-            out[i] = OotPspMixer_Clamp16(out[i] - in[i]);
-        }
+    for (i = 0; i < samples; i++) {
+        s64 accumulator = ((s64)out[i] * 0x7FFF * 2) + 0x8000;
+
+        accumulator += (s64)in[i] * gain * 2;
+        out[i] = OotPspMixer_Clamp16(accumulator >> 16);
+    }
+}
+
+void OotPspMixer_AddMixer(s32 nbytes, u16 dmemIn, u16 dmemOut, UNUSED s16 gain) {
+    s16* in = DMEM_S16(dmemIn);
+    s16* out = DMEM_S16(dmemOut);
+    s32 encodedBytes = ROUND_DOWN_16(nbytes);
+    s32 samples = ROUND_UP_64(encodedBytes) / sizeof(s16);
+    s32 i;
+
+    if (encodedBytes == 0) {
         return;
     }
 
     for (i = 0; i < samples; i++) {
-        out[i] = OotPspMixer_Clamp16(out[i] + ((in[i] * gain) >> 15));
+        out[i] = OotPspMixer_Vadd(out[i], in[i]);
     }
 }
 
@@ -419,77 +455,219 @@ void OotPspMixer_Duplicate(s32 numCopies, u16 dmemSrc, u16 dmemDest) {
     }
 }
 
+void OotPspMixer_CopyBlocks(s32 numBlocks, u16 dmemSrc, u16 dmemDest, s32 blockSize) {
+    u8 block[32];
+    s32 blockBytes = ROUND_UP_32(blockSize);
+    s32 blockIndex;
+    s32 offset;
+
+    for (blockIndex = 0; blockIndex < numBlocks; blockIndex++) {
+        for (offset = 0; offset < blockBytes; offset += sizeof(block)) {
+            memcpy(block, DMEM_U8(dmemSrc), sizeof(block));
+            memcpy(DMEM_U8(dmemDest), block, sizeof(block));
+            dmemSrc += sizeof(block);
+            dmemDest += sizeof(block);
+        }
+    }
+}
+
 void OotPspMixer_Filter(u8 flags, s32 countOrBuf, void* state) {
-    s16* filterState = state;
-    s16* in;
-    s16* scratch = sMixer.filterScratch;
-    s32 samples;
+    s16* save = state;
+    s16* input;
+    s16* out = sMixer.filterScratch;
+    s16 history[OOT_PSP_FILTER_TAP_COUNT];
+    s16 taps[OOT_PSP_FILTER_TAP_COUNT];
+    s32 count;
+    s32 processedCount;
     s32 i;
+    u8 lastStateLowByte;
 
-    if (flags == 2) {
-        sMixer.filterNbytes = ROUND_UP_16(countOrBuf);
+    /* Zelda ABI2 FILTER is a two-command sequence: setup taps/count, then process DMEM with persistent state. */
+    if (flags > 1) {
+        sMixer.filter2Count = ROUND_UP_16(countOrBuf);
         if (state != NULL) {
-            memcpy(sMixer.filter, state, sizeof(sMixer.filter));
+            memcpy(sMixer.filter2Lut, state, sizeof(sMixer.filter2Lut));
+            sMixer.filter2Valid = 1;
+        } else {
+            sMixer.filter2Valid = 0;
         }
         return;
     }
 
-    if ((filterState == NULL) || (sMixer.filterNbytes == 0)) {
+    if ((save == NULL) || !sMixer.filter2Valid || (sMixer.filter2Count <= 0)) {
         return;
     }
 
+    /* aspMain writes 31 state bytes, preserving the final low byte in RAM. */
+    lastStateLowByte = (u16)save[15] & 0xFF;
     if (flags & A_INIT) {
-        memset(filterState, 0, 32 * sizeof(s16));
+        memset(save, 0, 16 * sizeof(s16));
     }
 
-    in = DMEM_S16((u16)countOrBuf);
-    samples = ROUND_UP_16(sMixer.filterNbytes) / sizeof(s16);
-    memcpy(scratch, in, samples * sizeof(s16));
+    /* RSP vector halfword pairs are reversed relative to native s16 array order. */
+    for (i = 0; i < OOT_PSP_FILTER_TAP_COUNT; i++) {
+        s32 logicalIndex = i ^ 1;
+        s16 avg = OotPspMixer_Clamp16(
+            ((((s64)save[OOT_PSP_FILTER_TAP_COUNT + logicalIndex] + sMixer.filter2Lut[logicalIndex]) * 0x8000) +
+             0x8000) >>
+            16);
 
-    for (i = 0; i < samples; i++) {
-        s32 acc = 0;
-        s32 tap;
+        history[i] = save[logicalIndex];
+        taps[i] = avg;
+        save[OOT_PSP_FILTER_TAP_COUNT + logicalIndex] = avg;
+    }
+    save[15] = (save[15] & 0xFF00) | lastStateLowByte;
 
-        for (tap = 0; tap < OOT_PSP_FILTER_TAP_COUNT; tap++) {
-            s32 sampleIndex = i + tap - OOT_PSP_FILTER_CENTER_TAP;
-            s16 sample;
+    input = DMEM_S16((u16)countOrBuf);
+    count = sMixer.filter2Count;
+    if (count > (s32)sizeof(sMixer.filterScratch)) {
+        count = sizeof(sMixer.filterScratch);
+    }
+    processedCount = count;
 
-            if (sampleIndex < 0) {
-                sample = filterState[OOT_PSP_FILTER_TAP_COUNT + sampleIndex];
-            } else if (sampleIndex >= samples) {
-                sample = 0;
-            } else {
-                sample = scratch[sampleIndex];
-            }
+    while (count > 0) {
+        s16 blockInput[OOT_PSP_FILTER_TAP_COUNT];
+        s64 out1[OOT_PSP_FILTER_TAP_COUNT];
 
-            acc += sample * sMixer.filter[tap];
+        for (i = 0; i < OOT_PSP_FILTER_TAP_COUNT; i++) {
+            blockInput[i] = input[i ^ 1];
         }
 
-        in[i] = OotPspMixer_Clamp16((acc + 0x4000) >> 15);
+        out1[1] = history[0] * taps[6];
+        out1[1] += history[3] * taps[7];
+        out1[1] += history[2] * taps[4];
+        out1[1] += history[5] * taps[5];
+        out1[1] += history[4] * taps[2];
+        out1[1] += history[7] * taps[3];
+        out1[1] += history[6] * taps[0];
+        out1[1] += blockInput[1] * taps[1];
+
+        out1[0] = history[3] * taps[6];
+        out1[0] += history[2] * taps[7];
+        out1[0] += history[5] * taps[4];
+        out1[0] += history[4] * taps[5];
+        out1[0] += history[7] * taps[2];
+        out1[0] += history[6] * taps[3];
+        out1[0] += blockInput[1] * taps[0];
+        out1[0] += blockInput[0] * taps[1];
+
+        out1[3] = history[2] * taps[6];
+        out1[3] += history[5] * taps[7];
+        out1[3] += history[4] * taps[4];
+        out1[3] += history[7] * taps[5];
+        out1[3] += history[6] * taps[2];
+        out1[3] += blockInput[1] * taps[3];
+        out1[3] += blockInput[0] * taps[0];
+        out1[3] += blockInput[3] * taps[1];
+
+        out1[2] = history[5] * taps[6];
+        out1[2] += history[4] * taps[7];
+        out1[2] += history[7] * taps[4];
+        out1[2] += history[6] * taps[5];
+        out1[2] += blockInput[1] * taps[2];
+        out1[2] += blockInput[0] * taps[3];
+        out1[2] += blockInput[3] * taps[0];
+        out1[2] += blockInput[2] * taps[1];
+
+        out1[5] = history[4] * taps[6];
+        out1[5] += history[7] * taps[7];
+        out1[5] += history[6] * taps[4];
+        out1[5] += blockInput[1] * taps[5];
+        out1[5] += blockInput[0] * taps[2];
+        out1[5] += blockInput[3] * taps[3];
+        out1[5] += blockInput[2] * taps[0];
+        out1[5] += blockInput[5] * taps[1];
+
+        out1[4] = history[7] * taps[6];
+        out1[4] += history[6] * taps[7];
+        out1[4] += blockInput[1] * taps[4];
+        out1[4] += blockInput[0] * taps[5];
+        out1[4] += blockInput[3] * taps[2];
+        out1[4] += blockInput[2] * taps[3];
+        out1[4] += blockInput[5] * taps[0];
+        out1[4] += blockInput[4] * taps[1];
+
+        out1[7] = history[6] * taps[6];
+        out1[7] += blockInput[1] * taps[7];
+        out1[7] += blockInput[0] * taps[4];
+        out1[7] += blockInput[3] * taps[5];
+        out1[7] += blockInput[2] * taps[2];
+        out1[7] += blockInput[5] * taps[3];
+        out1[7] += blockInput[4] * taps[0];
+        out1[7] += blockInput[7] * taps[1];
+
+        out1[6] = blockInput[1] * taps[6];
+        out1[6] += blockInput[0] * taps[7];
+        out1[6] += blockInput[3] * taps[4];
+        out1[6] += blockInput[2] * taps[5];
+        out1[6] += blockInput[5] * taps[2];
+        out1[6] += blockInput[4] * taps[3];
+        out1[6] += blockInput[7] * taps[0];
+        out1[6] += blockInput[6] * taps[1];
+
+        out[0] = OotPspMixer_Clamp16((out1[1] + 0x4000) >> 15);
+        out[1] = OotPspMixer_Clamp16((out1[0] + 0x4000) >> 15);
+        out[2] = OotPspMixer_Clamp16((out1[3] + 0x4000) >> 15);
+        out[3] = OotPspMixer_Clamp16((out1[2] + 0x4000) >> 15);
+        out[4] = OotPspMixer_Clamp16((out1[5] + 0x4000) >> 15);
+        out[5] = OotPspMixer_Clamp16((out1[4] + 0x4000) >> 15);
+        out[6] = OotPspMixer_Clamp16((out1[7] + 0x4000) >> 15);
+        out[7] = OotPspMixer_Clamp16((out1[6] + 0x4000) >> 15);
+
+        memcpy(history, blockInput, sizeof(history));
+        input += OOT_PSP_FILTER_TAP_COUNT;
+        out += OOT_PSP_FILTER_TAP_COUNT;
+        count -= OOT_PSP_FILTER_TAP_COUNT * sizeof(s16);
     }
 
-    if (samples >= OOT_PSP_FILTER_TAP_COUNT) {
-        memcpy(filterState, &scratch[samples - OOT_PSP_FILTER_TAP_COUNT], OOT_PSP_FILTER_TAP_COUNT * sizeof(s16));
-    } else {
-        memmove(filterState, &filterState[samples], (OOT_PSP_FILTER_TAP_COUNT - samples) * sizeof(s16));
-        memcpy(&filterState[OOT_PSP_FILTER_TAP_COUNT - samples], scratch, samples * sizeof(s16));
-    }
+    memcpy(state, input - OOT_PSP_FILTER_TAP_COUNT, OOT_PSP_FILTER_TAP_COUNT * sizeof(s16));
+    memcpy(DMEM_S16((u16)countOrBuf), sMixer.filterScratch, processedCount);
 }
 
 void OotPspMixer_HiLoGain(s32 gain, u16 dmemIn, UNUSED u16 dmemOut, s32 nbytes) {
     s16* out = DMEM_S16(dmemIn);
-    s32 samples = ROUND_UP_16(nbytes) / sizeof(s16);
+    s32 samples = ROUND_UP_32(nbytes) / sizeof(s16);
     s32 i;
 
+    gain &= 0xFF;
     for (i = 0; i < samples; i++) {
         out[i] = OotPspMixer_Clamp16((out[i] * gain) >> 4);
     }
 }
 
-void OotPspMixer_UnkCmd3(UNUSED s32 arg1, UNUSED s32 arg2, UNUSED s32 size) {
+void OotPspMixer_UnkCmd3(s32 arg1, s32 arg2, s32 size) {
+    s16* src = DMEM_S16(arg1);
+    s16* dst = DMEM_S16(arg2);
+    s32 samples = ROUND_UP_32(size) / sizeof(s16);
+    s32 i;
+
+    for (i = 0; i < samples; i += 16) {
+        s32 lane;
+
+        for (lane = 0; lane < 8; lane++) {
+            s64 product = (u16)src[i + 8 + lane] * (s64)src[i + lane];
+            s64 doubled = product * 2;
+            u16 highResult;
+
+            if (doubled < -0x80000000LL) {
+                highResult = 0;
+            } else if (doubled > 0x7FFFFFFFLL) {
+                highResult = 0xFFFF;
+            } else {
+                highResult = (u16)doubled;
+            }
+
+            dst[i + lane] = (s16)highResult;
+            dst[i + 8 + lane] = (s16)(u16)product;
+        }
+    }
 }
 
 void OotPspMixer_UnkCmd19(UNUSED s32 arg1, UNUSED s32 arg2, UNUSED s32 size, UNUSED s32 arg4) {
+    /*
+     * Opcode 25 is not present in OoT's aspMain jump table, and the stock
+     * sequences never emit samplebook mode 3. There is no N64 operation to emulate.
+     */
 }
 
 void OotPspMixer_ExecuteCommandList(const Acmd* cmdList, s32 cmdCount) {
@@ -563,6 +741,10 @@ void OotPspMixer_ExecuteCommandList(const Acmd* cmdList, s32 cmdCount) {
 
             case A_SETLOOP:
                 OotPspMixer_SetLoop((ADPCM_STATE*)(uintptr_t)w1);
+                break;
+
+            case OOT_PSP_A_COPYBLOCKS:
+                OotPspMixer_CopyBlocks((w0 >> 16) & 0xFF, w0 & 0xFFFF, (w1 >> 16) & 0xFFFF, w1 & 0xFFFF);
                 break;
 
             case A_INTERL:

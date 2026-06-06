@@ -23,6 +23,7 @@ void OotPspMixer_EnvMixer(u16 dmemSrc, s32 aiBufLen, s32 swapLR, s32 x0, s32 x1,
 void OotPspMixer_Mix(s32 countQuads, s16 gain, u16 dmemIn, u16 dmemOut);
 void OotPspMixer_AddMixer(s32 nbytes, u16 dmemIn, u16 dmemOut, s16 gain);
 void OotPspMixer_Duplicate(s32 numCopies, u16 dmemSrc, u16 dmemDest);
+void OotPspMixer_CopyBlocks(s32 numBlocks, u16 dmemSrc, u16 dmemDest, s32 blockSize);
 void OotPspMixer_Filter(u8 flags, s32 countOrBuf, void* state);
 void OotPspMixer_HiLoGain(s32 gain, u16 dmemIn, u16 dmemOut, s32 nbytes);
 void OotPspMixer_UnkCmd3(s32 arg1, s32 arg2, s32 size);
