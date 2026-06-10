@@ -16,6 +16,17 @@
 #define OOT_PSP_MAX_THREADS 16
 #define OOT_PSP_MAX_TIMERS  16
 
+/*
+ * PSP note:
+ *   Valid SceUID thread/sema ids are positive.
+ *   0 is not a valid thread id for sceKernelStartThread().
+ *
+ * The old timer backend created one PSP thread per osSetTimer() call. If the
+ * same OSTimer was reset repeatedly, the old thread id could be overwritten
+ * and leaked. This replacement uses one timer service thread for all OSTimers.
+ */
+#define OOT_PSP_INVALID_UID (-1)
+
 typedef struct {
     OSThread* thread;
     SceUID sceThreadId;
@@ -25,9 +36,17 @@ typedef struct {
 
 typedef struct {
     OSTimer* timer;
-    SceUID sceThreadId;
+    OSMesgQueue* mq;
+    OSMesg msg;
+    u64 dueUsec;
+    u64 intervalUsec;
     volatile s32 active;
 } OotPspTimerSlot;
+
+typedef struct {
+    OSMesgQueue* mq;
+    OSMesg msg;
+} OotPspPendingTimerMsg;
 
 static OotPspThreadSlot sThreadSlots[OOT_PSP_MAX_THREADS];
 static OotPspTimerSlot sTimerSlots[OOT_PSP_MAX_TIMERS];
@@ -41,7 +60,11 @@ static void* sCurrentFramebuffer;
 static void* sNextFramebuffer;
 static OSViMode* sCurrentViMode;
 static OSViContext sCurrentViContext;
-static u32 sMesgQueueSemaIndex;
+static SceUID sMesgQueueLockSema = OOT_PSP_INVALID_UID;
+
+static SceUID sTimerServiceThreadId = OOT_PSP_INVALID_UID;
+static SceUID sTimerLockSema = OOT_PSP_INVALID_UID;
+static volatile s32 sTimerServiceRunning;
 
 s32 osRomType = 0;
 void* osRomBase = NULL;
@@ -64,6 +87,35 @@ OSPifRam __osContPifRam;
 OSPifRam __osPfsPifRam;
 u8 __osMaxControllers = 1;
 
+static s32 OotPsp_IsValidUid(SceUID uid) {
+    return uid > 0;
+}
+
+static u64 OotPsp_GetUsec(void) {
+    return sceKernelGetSystemTimeWide();
+}
+
+static u64 OotPsp_CyclesToUsec(OSTime cycles) {
+    if (cycles == 0) {
+        return 0;
+    }
+
+    return (u64)OS_CYCLES_TO_USEC(cycles);
+}
+
+static void OotPsp_ClearThreadSlot(OotPspThreadSlot* slot) {
+    if (slot != NULL) {
+        memset(slot, 0, sizeof(*slot));
+        slot->sceThreadId = OOT_PSP_INVALID_UID;
+    }
+}
+
+static void OotPsp_ClearTimerSlot(OotPspTimerSlot* slot) {
+    if (slot != NULL) {
+        memset(slot, 0, sizeof(*slot));
+    }
+}
+
 static OotPspThreadSlot* OotPsp_FindThreadSlot(OSThread* thread) {
     s32 i;
 
@@ -76,11 +128,28 @@ static OotPspThreadSlot* OotPsp_FindThreadSlot(OSThread* thread) {
     return NULL;
 }
 
+static OotPspThreadSlot* OotPsp_FindThreadSlotBySceId(SceUID sceThreadId) {
+    s32 i;
+
+    if (!OotPsp_IsValidUid(sceThreadId)) {
+        return NULL;
+    }
+
+    for (i = 0; i < OOT_PSP_MAX_THREADS; i++) {
+        if (sThreadSlots[i].sceThreadId == sceThreadId) {
+            return &sThreadSlots[i];
+        }
+    }
+
+    return NULL;
+}
+
 static OotPspThreadSlot* OotPsp_AllocThreadSlot(OSThread* thread) {
     s32 i;
 
     for (i = 0; i < OOT_PSP_MAX_THREADS; i++) {
         if (sThreadSlots[i].thread == NULL) {
+            OotPsp_ClearThreadSlot(&sThreadSlots[i]);
             sThreadSlots[i].thread = thread;
             return &sThreadSlots[i];
         }
@@ -99,13 +168,19 @@ static int OotPsp_ThreadTrampoline(SceSize args, void* argp) {
         thread->state = OS_STATE_RUNNING;
         slot->entry(slot->arg);
         thread->state = OS_STATE_STOPPED;
+        OotPsp_ClearThreadSlot(slot);
     }
 
+    sceKernelExitDeleteThread(0);
     return 0;
 }
 
 static OotPspTimerSlot* OotPsp_FindTimerSlot(OSTimer* timer) {
     s32 i;
+
+    if (timer == NULL) {
+        return NULL;
+    }
 
     for (i = 0; i < OOT_PSP_MAX_TIMERS; i++) {
         if (sTimerSlots[i].timer == timer) {
@@ -121,6 +196,7 @@ static OotPspTimerSlot* OotPsp_AllocTimerSlot(OSTimer* timer) {
 
     for (i = 0; i < OOT_PSP_MAX_TIMERS; i++) {
         if (sTimerSlots[i].timer == NULL) {
+            OotPsp_ClearTimerSlot(&sTimerSlots[i]);
             sTimerSlots[i].timer = timer;
             return &sTimerSlots[i];
         }
@@ -129,67 +205,204 @@ static OotPspTimerSlot* OotPsp_AllocTimerSlot(OSTimer* timer) {
     return NULL;
 }
 
-static SceUID OotPsp_GetMesgQueueSema(OSMesgQueue* mq) {
+static s32 OotPsp_EnsureTimerLock(void) {
     SceUID sema;
 
-    if (mq == NULL) {
+    if (OotPsp_IsValidUid(sTimerLockSema)) {
+        return 0;
+    }
+
+    sema = sceKernelCreateSema("oot-timer-lock", 0, 1, 1, NULL);
+    if (!OotPsp_IsValidUid(sema)) {
+        sTimerLockSema = OOT_PSP_INVALID_UID;
         return -1;
     }
 
-    sema = (SceUID)(s32)(uintptr_t)mq->mtqueue;
-    return (sema > 0) ? sema : -1;
-}
-
-static void OotPsp_LockMesgQueue(OSMesgQueue* mq) {
-    SceUID sema = OotPsp_GetMesgQueueSema(mq);
-
-    if (sema > 0) {
-        sceKernelWaitSema(sema, 1, NULL);
-    }
-}
-
-static void OotPsp_UnlockMesgQueue(OSMesgQueue* mq) {
-    SceUID sema = OotPsp_GetMesgQueueSema(mq);
-
-    if (sema > 0) {
-        sceKernelSignalSema(sema, 1);
-    }
-}
-
-static int OotPsp_TimerThread(SceSize args, void* argp) {
-    OotPspTimerSlot* slot = (OotPspTimerSlot*)argp;
-
-    (void)args;
-
-    while (slot != NULL && slot->active) {
-        u32 delayUsec = (u32)OS_CYCLES_TO_USEC(slot->timer->value);
-
-        if (delayUsec > 0) {
-            sceKernelDelayThread(delayUsec);
-        }
-
-        if (!slot->active) {
-            break;
-        }
-
-        if (slot->timer->mq != NULL) {
-            osSendMesg(slot->timer->mq, slot->timer->msg, OS_MESG_NOBLOCK);
-        }
-
-        if (slot->timer->interval == 0) {
-            break;
-        }
-
-        slot->timer->value = slot->timer->interval;
-    }
-
-    if (slot != NULL) {
-        slot->active = false;
-        slot->timer = NULL;
-        slot->sceThreadId = -1;
-    }
-
+    sTimerLockSema = sema;
     return 0;
+}
+
+static void OotPsp_LockTimers(void) {
+    if (OotPsp_IsValidUid(sTimerLockSema)) {
+        sceKernelWaitSema(sTimerLockSema, 1, NULL);
+    }
+}
+
+static void OotPsp_UnlockTimers(void) {
+    if (OotPsp_IsValidUid(sTimerLockSema)) {
+        sceKernelSignalSema(sTimerLockSema, 1);
+    }
+}
+
+static int OotPsp_TimerServiceThread(SceSize args, void* argp) {
+    (void)args;
+    (void)argp;
+
+    while (sTimerServiceRunning) {
+        OotPspPendingTimerMsg pending[OOT_PSP_MAX_TIMERS];
+        s32 pendingCount = 0;
+        s32 anyActive = false;
+        u64 now = OotPsp_GetUsec();
+        u32 sleepUsec = 1000;
+        s32 i;
+
+        OotPsp_LockTimers();
+
+        for (i = 0; i < OOT_PSP_MAX_TIMERS; i++) {
+            OotPspTimerSlot* slot = &sTimerSlots[i];
+
+            if (!slot->active || slot->timer == NULL) {
+                continue;
+            }
+
+            anyActive = true;
+
+            if (slot->dueUsec <= now) {
+                if (slot->mq != NULL && pendingCount < OOT_PSP_MAX_TIMERS) {
+                    pending[pendingCount].mq = slot->mq;
+                    pending[pendingCount].msg = slot->msg;
+                    pendingCount++;
+                }
+
+                if (slot->intervalUsec != 0) {
+                    /*
+                     * Keep only one event per service wake. This prevents a
+                     * delayed frame from causing a huge timer catch-up burst.
+                     */
+                    slot->dueUsec = now + slot->intervalUsec;
+                } else {
+                    OotPsp_ClearTimerSlot(slot);
+                    continue;
+                }
+            }
+        }
+
+        for (i = 0; i < OOT_PSP_MAX_TIMERS; i++) {
+            OotPspTimerSlot* slot = &sTimerSlots[i];
+
+            if (slot->active && slot->timer != NULL) {
+                u64 delta = (slot->dueUsec > now) ? (slot->dueUsec - now) : 0;
+
+                anyActive = true;
+                if (delta < sleepUsec) {
+                    sleepUsec = (u32)delta;
+                }
+            }
+        }
+
+        OotPsp_UnlockTimers();
+
+        for (i = 0; i < pendingCount; i++) {
+            osSendMesg(pending[i].mq, pending[i].msg, OS_MESG_NOBLOCK);
+        }
+
+        if (!anyActive) {
+            sleepUsec = 1000;
+        } else {
+            if (sleepUsec < 100) {
+                sleepUsec = 100;
+            }
+            if (sleepUsec > 1000) {
+                sleepUsec = 1000;
+            }
+        }
+
+        sceKernelDelayThread(sleepUsec);
+    }
+
+    sTimerServiceThreadId = OOT_PSP_INVALID_UID;
+    sceKernelExitDeleteThread(0);
+    return 0;
+}
+
+static s32 OotPsp_EnsureTimerService(void) {
+    SceUID threadId;
+    s32 ret;
+
+    if (OotPsp_EnsureTimerLock() < 0) {
+        return -1;
+    }
+
+    if (OotPsp_IsValidUid(sTimerServiceThreadId)) {
+        return 0;
+    }
+
+    sTimerServiceRunning = true;
+
+    threadId = sceKernelCreateThread("oot-timers", OotPsp_TimerServiceThread, 0x18, 0x2000, THREAD_ATTR_USER, NULL);
+    if (!OotPsp_IsValidUid(threadId)) {
+        sTimerServiceRunning = false;
+        sTimerServiceThreadId = OOT_PSP_INVALID_UID;
+        return -1;
+    }
+
+    ret = sceKernelStartThread(threadId, 0, NULL);
+    if (ret < 0) {
+        sceKernelDeleteThread(threadId);
+        sTimerServiceRunning = false;
+        sTimerServiceThreadId = OOT_PSP_INVALID_UID;
+        return -1;
+    }
+
+    sTimerServiceThreadId = threadId;
+    return 0;
+}
+
+static void OotPsp_StopTimerService(void) {
+    SceUID threadId = sTimerServiceThreadId;
+    SceUID sema = sTimerLockSema;
+
+    sTimerServiceRunning = false;
+    sTimerServiceThreadId = OOT_PSP_INVALID_UID;
+
+    if (OotPsp_IsValidUid(threadId) && threadId != sceKernelGetThreadId()) {
+        sceKernelTerminateDeleteThread(threadId);
+    }
+
+    if (OotPsp_IsValidUid(sema)) {
+        sceKernelDeleteSema(sema);
+    }
+
+    sTimerLockSema = OOT_PSP_INVALID_UID;
+}
+
+static s32 OotPsp_EnsureMesgQueueLock(void) {
+    SceUID sema;
+
+    if (OotPsp_IsValidUid(sMesgQueueLockSema)) {
+        return 0;
+    }
+
+    sema = sceKernelCreateSema("oot-mq-lock", 0, 1, 1, NULL);
+    if (!OotPsp_IsValidUid(sema)) {
+        sMesgQueueLockSema = OOT_PSP_INVALID_UID;
+        return -1;
+    }
+
+    sMesgQueueLockSema = sema;
+    return 0;
+}
+
+static void OotPsp_StopMesgQueueLock(void) {
+    SceUID sema = sMesgQueueLockSema;
+
+    sMesgQueueLockSema = OOT_PSP_INVALID_UID;
+
+    if (OotPsp_IsValidUid(sema)) {
+        sceKernelDeleteSema(sema);
+    }
+}
+
+static void OotPsp_LockMesgQueue(UNUSED OSMesgQueue* mq) {
+    if (OotPsp_IsValidUid(sMesgQueueLockSema)) {
+        sceKernelWaitSema(sMesgQueueLockSema, 1, NULL);
+    }
+}
+
+static void OotPsp_UnlockMesgQueue(UNUSED OSMesgQueue* mq) {
+    if (OotPsp_IsValidUid(sMesgQueueLockSema)) {
+        sceKernelSignalSema(sMesgQueueLockSema, 1);
+    }
 }
 
 static u16 OotPsp_MapButtons(const SceCtrlData* pad) {
@@ -260,16 +473,26 @@ void isPrintfInit(void) {
 }
 
 void __osInitialize_common(void) {
+    s32 i;
+
+    OotPsp_StopTimerService();
+    OotPsp_StopMesgQueueLock();
+
     memset(sThreadSlots, 0, sizeof(sThreadSlots));
     memset(sTimerSlots, 0, sizeof(sTimerSlots));
     memset(sControllerPads, 0, sizeof(sControllerPads));
     memset(sControllerStatus, 0, sizeof(sControllerStatus));
     memset(&sCurrentViContext, 0, sizeof(sCurrentViContext));
 
+    for (i = 0; i < OOT_PSP_MAX_THREADS; i++) {
+        sThreadSlots[i].sceThreadId = OOT_PSP_INVALID_UID;
+    }
+
     osMemSize = 0x02000000;
     osClockRate = OS_CLOCK_RATE;
     sceCtrlSetSamplingCycle(0);
     sceCtrlSetSamplingMode(PSP_CTRL_MODE_ANALOG);
+    OotPsp_EnsureMesgQueueLock();
 }
 
 void __osInitialize_autodetect(void) {
@@ -280,9 +503,21 @@ u32 osGetMemSize(void) {
 }
 
 void osCreateMesgQueue(OSMesgQueue* mq, OSMesg* msgBuf, s32 count) {
-    SceUID sema;
-    char name[32];
+    if (mq == NULL) {
+        return;
+    }
 
+    /*
+     * Do not create one PSP semaphore per OSMesgQueue.
+     *
+     * Libultra-style queues often do not have a matching destroy call, and OOT
+     * creates queues in several hot paths. A per-queue sceKernelCreateSema()
+     * leaks kernel objects until PPSSPP/PSP reports:
+     *   "Unable to allocate kernel object, too many objects slots in use."
+     *
+     * mtqueue/fullqueue are not used as real wait queues in this PSP shim.
+     * Synchronization is handled by one shared PSP semaphore.
+     */
     mq->mtqueue = NULL;
     mq->fullqueue = NULL;
     mq->validCount = 0;
@@ -290,14 +525,18 @@ void osCreateMesgQueue(OSMesgQueue* mq, OSMesg* msgBuf, s32 count) {
     mq->msgCount = count;
     mq->msg = msgBuf;
 
-    snprintf(name, sizeof(name), "oot-mq-%lu", (unsigned long)sMesgQueueSemaIndex++);
-    sema = sceKernelCreateSema(name, 0, 1, 1, NULL);
-    if (sema > 0) {
-        mq->mtqueue = (OSThread*)(uintptr_t)sema;
+    if (count <= 0 || msgBuf == NULL) {
+        return;
     }
+
+    OotPsp_EnsureMesgQueueLock();
 }
 
 s32 osSendMesg(OSMesgQueue* mq, OSMesg msg, s32 flag) {
+    if (mq == NULL || mq->msg == NULL || mq->msgCount <= 0) {
+        return -1;
+    }
+
     while (true) {
         OotPsp_LockMesgQueue(mq);
         if (!MQ_IS_FULL(mq)) {
@@ -317,6 +556,10 @@ s32 osSendMesg(OSMesgQueue* mq, OSMesg msg, s32 flag) {
 }
 
 s32 osJamMesg(OSMesgQueue* mq, OSMesg msg, s32 flag) {
+    if (mq == NULL || mq->msg == NULL || mq->msgCount <= 0) {
+        return -1;
+    }
+
     while (true) {
         OotPsp_LockMesgQueue(mq);
         if (!MQ_IS_FULL(mq)) {
@@ -337,6 +580,10 @@ s32 osJamMesg(OSMesgQueue* mq, OSMesg msg, s32 flag) {
 }
 
 s32 osRecvMesg(OSMesgQueue* mq, OSMesg* msg, s32 flag) {
+    if (mq == NULL || mq->msg == NULL || mq->msgCount <= 0) {
+        return -1;
+    }
+
     while (true) {
         OotPsp_LockMesgQueue(mq);
         if (!MQ_IS_EMPTY(mq)) {
@@ -363,8 +610,19 @@ void osSetEventMesg(UNUSED OSEvent e, UNUSED OSMesgQueue* mq, UNUSED OSMesg msg)
 }
 
 void osCreateThread(OSThread* thread, OSId id, void (*entry)(void*), void* arg, void* sp, OSPri pri) {
-    OotPspThreadSlot* slot = OotPsp_AllocThreadSlot(thread);
+    OotPspThreadSlot* slot;
+    SceUID threadId;
     char name[32];
+
+    if (thread == NULL) {
+        return;
+    }
+
+    slot = OotPsp_FindThreadSlot(thread);
+    if (slot != NULL && OotPsp_IsValidUid(slot->sceThreadId)) {
+        sceKernelTerminateDeleteThread(slot->sceThreadId);
+        OotPsp_ClearThreadSlot(slot);
+    }
 
     memset(thread, 0, sizeof(*thread));
     thread->id = id;
@@ -372,39 +630,87 @@ void osCreateThread(OSThread* thread, OSId id, void (*entry)(void*), void* arg, 
     thread->state = OS_STATE_STOPPED;
     thread->context.sp = (u32)(uintptr_t)sp;
 
+    slot = OotPsp_AllocThreadSlot(thread);
     if (slot == NULL) {
         return;
     }
 
     snprintf(name, sizeof(name), "oot-thr-%ld", (long)id);
+
     slot->entry = entry;
     slot->arg = arg;
-    slot->sceThreadId =
-        sceKernelCreateThread(name, OotPsp_ThreadTrampoline, 0x20 + (OS_PRIORITY_APPMAX - pri), 0x20000,
-                              THREAD_ATTR_USER | THREAD_ATTR_VFPU, NULL);
+    slot->sceThreadId = OOT_PSP_INVALID_UID;
+
+    threadId = sceKernelCreateThread(name, OotPsp_ThreadTrampoline, 0x20 + (OS_PRIORITY_APPMAX - pri), 0x20000,
+                                     THREAD_ATTR_USER | THREAD_ATTR_VFPU, NULL);
+    if (!OotPsp_IsValidUid(threadId)) {
+        OotPsp_ClearThreadSlot(slot);
+        return;
+    }
+
+    slot->sceThreadId = threadId;
 }
 
 void osStartThread(OSThread* thread) {
-    OotPspThreadSlot* slot = OotPsp_FindThreadSlot(thread);
+    OotPspThreadSlot* slot;
+    s32 ret;
 
-    if (slot == NULL || slot->sceThreadId < 0) {
+    if (thread == NULL) {
+        return;
+    }
+
+    slot = OotPsp_FindThreadSlot(thread);
+    if (slot == NULL || !OotPsp_IsValidUid(slot->sceThreadId)) {
+        return;
+    }
+
+    if (thread->state == OS_STATE_RUNNING || thread->state == OS_STATE_RUNNABLE) {
         return;
     }
 
     thread->state = OS_STATE_RUNNABLE;
-    sceKernelStartThread(slot->sceThreadId, sizeof(thread), thread);
+
+    ret = sceKernelStartThread(slot->sceThreadId, sizeof(thread), thread);
+    if (ret < 0) {
+        thread->state = OS_STATE_STOPPED;
+    }
 }
 
 void osDestroyThread(OSThread* thread) {
-    OotPspThreadSlot* slot = OotPsp_FindThreadSlot(thread);
+    OotPspThreadSlot* slot;
+    SceUID threadId;
 
-    if (slot != NULL && slot->sceThreadId >= 0) {
-        sceKernelTerminateDeleteThread(slot->sceThreadId);
-        memset(slot, 0, sizeof(*slot));
+    if (thread == NULL) {
+        threadId = sceKernelGetThreadId();
+        slot = OotPsp_FindThreadSlotBySceId(threadId);
+        if (slot != NULL) {
+            if (slot->thread != NULL) {
+                slot->thread->state = OS_STATE_STOPPED;
+            }
+            OotPsp_ClearThreadSlot(slot);
+        }
+
+        sceKernelExitDeleteThread(0);
+        return;
     }
 
-    if (thread != NULL) {
+    slot = OotPsp_FindThreadSlot(thread);
+    if (slot == NULL) {
         thread->state = OS_STATE_STOPPED;
+        return;
+    }
+
+    threadId = slot->sceThreadId;
+
+    OotPsp_ClearThreadSlot(slot);
+    thread->state = OS_STATE_STOPPED;
+
+    if (OotPsp_IsValidUid(threadId)) {
+        if (threadId == sceKernelGetThreadId()) {
+            sceKernelExitDeleteThread(0);
+        } else {
+            sceKernelTerminateDeleteThread(threadId);
+        }
     }
 }
 
@@ -423,7 +729,7 @@ void osSetThreadPri(OSThread* thread, OSPri pri) {
         thread->priority = pri;
     }
 
-    if (slot != NULL && slot->sceThreadId >= 0) {
+    if (slot != NULL && OotPsp_IsValidUid(slot->sceThreadId)) {
         sceKernelChangeThreadPriority(slot->sceThreadId, 0x20 + (OS_PRIORITY_APPMAX - pri));
     }
 }
@@ -467,13 +773,28 @@ u32 osGetCount(void) {
 }
 
 s32 osSetTimer(OSTimer* timer, OSTime countdown, OSTime interval, OSMesgQueue* mq, OSMesg msg) {
-    OotPspTimerSlot* slot = OotPsp_FindTimerSlot(timer);
-    char name[32];
+    OotPspTimerSlot* slot;
+    u64 now;
 
+    if (timer == NULL) {
+        return -1;
+    }
+
+    if (OotPsp_EnsureTimerService() < 0) {
+        return -1;
+    }
+
+    now = OotPsp_GetUsec();
+
+    OotPsp_LockTimers();
+
+    slot = OotPsp_FindTimerSlot(timer);
     if (slot == NULL) {
         slot = OotPsp_AllocTimerSlot(timer);
     }
+
     if (slot == NULL) {
+        OotPsp_UnlockTimers();
         return -1;
     }
 
@@ -482,32 +803,39 @@ s32 osSetTimer(OSTimer* timer, OSTime countdown, OSTime interval, OSMesgQueue* m
     timer->mq = mq;
     timer->msg = msg;
 
+    slot->timer = timer;
+    slot->mq = mq;
+    slot->msg = msg;
+    slot->dueUsec = now + OotPsp_CyclesToUsec(countdown);
+    slot->intervalUsec = OotPsp_CyclesToUsec(interval);
     slot->active = true;
-    snprintf(name, sizeof(name), "oot-timer-%02d", (int)(slot - sTimerSlots));
-    slot->sceThreadId = sceKernelCreateThread(name, OotPsp_TimerThread, 0x18, 0x1000, THREAD_ATTR_USER, NULL);
-    if (slot->sceThreadId < 0) {
-        slot->active = false;
-        slot->timer = NULL;
-        return -1;
-    }
 
-    sceKernelStartThread(slot->sceThreadId, sizeof(slot), slot);
+    OotPsp_UnlockTimers();
     return 0;
 }
 
 s32 osStopTimer(OSTimer* timer) {
-    OotPspTimerSlot* slot = OotPsp_FindTimerSlot(timer);
+    OotPspTimerSlot* slot;
 
-    if (slot == NULL) {
+    if (timer == NULL) {
         return -1;
     }
 
-    slot->active = false;
-    if (slot->sceThreadId >= 0) {
-        sceKernelTerminateDeleteThread(slot->sceThreadId);
+    if (OotPsp_EnsureTimerLock() < 0) {
+        return -1;
     }
-    slot->timer = NULL;
-    slot->sceThreadId = -1;
+
+    OotPsp_LockTimers();
+
+    slot = OotPsp_FindTimerSlot(timer);
+    if (slot == NULL) {
+        OotPsp_UnlockTimers();
+        return -1;
+    }
+
+    OotPsp_ClearTimerSlot(slot);
+
+    OotPsp_UnlockTimers();
     return 0;
 }
 

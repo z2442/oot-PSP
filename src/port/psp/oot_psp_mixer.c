@@ -24,7 +24,7 @@ typedef struct {
     s16 adpcmTable[8][2][8];
     s16 filterScratch[OOT_PSP_DMEM_SIZE / sizeof(s16)];
     s32 filter2Count;
-    s16 filter2Lut[OOT_PSP_FILTER_TAP_COUNT];
+    s16* filter2Lut;
     s32 filter2Valid;
     struct {
         s32 initialReverb;
@@ -480,17 +480,12 @@ void OotPspMixer_Filter(u8 flags, s32 countOrBuf, void* state) {
     s32 count;
     s32 processedCount;
     s32 i;
-    u8 lastStateLowByte;
 
     /* Zelda ABI2 FILTER is a two-command sequence: setup taps/count, then process DMEM with persistent state. */
     if (flags > 1) {
         sMixer.filter2Count = ROUND_UP_16(countOrBuf);
-        if (state != NULL) {
-            memcpy(sMixer.filter2Lut, state, sizeof(sMixer.filter2Lut));
-            sMixer.filter2Valid = 1;
-        } else {
-            sMixer.filter2Valid = 0;
-        }
+        sMixer.filter2Lut = state;
+        sMixer.filter2Valid = state != NULL;
         return;
     }
 
@@ -498,25 +493,18 @@ void OotPspMixer_Filter(u8 flags, s32 countOrBuf, void* state) {
         return;
     }
 
-    /* aspMain writes 31 state bytes, preserving the final low byte in RAM. */
-    lastStateLowByte = (u16)save[15] & 0xFF;
     if (flags & A_INIT) {
         memset(save, 0, 16 * sizeof(s16));
     }
 
-    /* RSP vector halfword pairs are reversed relative to native s16 array order. */
     for (i = 0; i < OOT_PSP_FILTER_TAP_COUNT; i++) {
-        s32 logicalIndex = i ^ 1;
-        s16 avg = OotPspMixer_Clamp16(
-            ((((s64)save[OOT_PSP_FILTER_TAP_COUNT + logicalIndex] + sMixer.filter2Lut[logicalIndex]) * 0x8000) +
-             0x8000) >>
-            16);
+        s16 avg = ((s32)save[OOT_PSP_FILTER_TAP_COUNT + i] + sMixer.filter2Lut[i]) >> 1;
 
-        history[i] = save[logicalIndex];
+        history[i] = save[i];
         taps[i] = avg;
-        save[OOT_PSP_FILTER_TAP_COUNT + logicalIndex] = avg;
+        save[OOT_PSP_FILTER_TAP_COUNT + i] = avg;
+        sMixer.filter2Lut[i] = avg;
     }
-    save[15] = (save[15] & 0xFF00) | lastStateLowByte;
 
     input = DMEM_S16((u16)countOrBuf);
     count = sMixer.filter2Count;
@@ -529,9 +517,7 @@ void OotPspMixer_Filter(u8 flags, s32 countOrBuf, void* state) {
         s16 blockInput[OOT_PSP_FILTER_TAP_COUNT];
         s64 out1[OOT_PSP_FILTER_TAP_COUNT];
 
-        for (i = 0; i < OOT_PSP_FILTER_TAP_COUNT; i++) {
-            blockInput[i] = input[i ^ 1];
-        }
+        memcpy(blockInput, input, sizeof(blockInput));
 
         out1[1] = history[0] * taps[6];
         out1[1] += history[3] * taps[7];
@@ -605,14 +591,14 @@ void OotPspMixer_Filter(u8 flags, s32 countOrBuf, void* state) {
         out1[6] += blockInput[7] * taps[0];
         out1[6] += blockInput[6] * taps[1];
 
-        out[0] = OotPspMixer_Clamp16((out1[1] + 0x4000) >> 15);
-        out[1] = OotPspMixer_Clamp16((out1[0] + 0x4000) >> 15);
-        out[2] = OotPspMixer_Clamp16((out1[3] + 0x4000) >> 15);
-        out[3] = OotPspMixer_Clamp16((out1[2] + 0x4000) >> 15);
-        out[4] = OotPspMixer_Clamp16((out1[5] + 0x4000) >> 15);
-        out[5] = OotPspMixer_Clamp16((out1[4] + 0x4000) >> 15);
-        out[6] = OotPspMixer_Clamp16((out1[7] + 0x4000) >> 15);
-        out[7] = OotPspMixer_Clamp16((out1[6] + 0x4000) >> 15);
+        out[1] = OotPspMixer_Clamp16((out1[1] + 0x4000) >> 15);
+        out[0] = OotPspMixer_Clamp16((out1[0] + 0x4000) >> 15);
+        out[3] = OotPspMixer_Clamp16((out1[3] + 0x4000) >> 15);
+        out[2] = OotPspMixer_Clamp16((out1[2] + 0x4000) >> 15);
+        out[5] = OotPspMixer_Clamp16((out1[5] + 0x4000) >> 15);
+        out[4] = OotPspMixer_Clamp16((out1[4] + 0x4000) >> 15);
+        out[7] = OotPspMixer_Clamp16((out1[7] + 0x4000) >> 15);
+        out[6] = OotPspMixer_Clamp16((out1[6] + 0x4000) >> 15);
 
         memcpy(history, blockInput, sizeof(history));
         input += OOT_PSP_FILTER_TAP_COUNT;

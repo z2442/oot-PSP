@@ -19,6 +19,8 @@
 #define OOT_PSP_AUDIO_RESAMPLE_FRAC_MASK ((1U << OOT_PSP_AUDIO_RESAMPLE_FRAC_BITS) - 1)
 #define OOT_PSP_AUDIO_LERP_FRAC_BITS 15
 
+static volatile s32 sOotPspAudioInitialized = false;
+
 /*
  * One-thread backend:
  *   - The same PSP thread generates N64 audio and submits PSP output.
@@ -315,7 +317,6 @@ static void OotPspAudioBackend_PumpBeforeOutput(void) {
 }
 
 static int OotPspAudioBackend_Thread(UNUSED SceSize args, UNUSED void* argp) {
-    /* Prime once after Audio_Init/Audio_InitSound have completed. */
     OotPspAudioBackend_RunUpdates(OOT_PSP_AUDIO_MAX_UPDATES_PRIME, true);
 
     while (sAudioThreadRunning) {
@@ -348,6 +349,9 @@ static int OotPspAudioBackend_Thread(UNUSED SceSize args, UNUSED void* argp) {
 
         OotPspAudioBackend_OutputMix(sourceFrames);
     }
+
+    sAudioThreadRunning = false;
+    sAudioThreadId = -1;
 
     sceKernelExitDeleteThread(0);
     return 0;
@@ -387,7 +391,10 @@ s32 OotPspAudioBackend_Init(void) {
 }
 
 static s32 OotPspAudioBackend_StartThread(void) {
-    if (sAudioThreadRunning) {
+    SceUID threadId;
+    s32 ret;
+
+    if (sAudioThreadId >= 0 || sAudioThreadRunning) {
         return 0;
     }
 
@@ -396,15 +403,31 @@ static s32 OotPspAudioBackend_StartThread(void) {
     }
 
     sAudioThreadRunning = true;
-    sAudioThreadId = sceKernelCreateThread("OOT PSP AudioPump", OotPspAudioBackend_Thread,
-                                           OOT_PSP_AUDIO_THREAD_PRIORITY, 0x20000,
-                                           PSP_THREAD_ATTR_USER | PSP_THREAD_ATTR_VFPU, NULL);
-    if (sAudioThreadId < 0) {
+
+    threadId = sceKernelCreateThread(
+        "OOT PSP AudioPump",
+        OotPspAudioBackend_Thread,
+        OOT_PSP_AUDIO_THREAD_PRIORITY,
+        0x20000,
+        PSP_THREAD_ATTR_USER | PSP_THREAD_ATTR_VFPU,
+        NULL
+    );
+
+    if (threadId < 0) {
         sAudioThreadRunning = false;
-        return -1;
+        sAudioThreadId = -1;
+        return threadId;
     }
 
-    sceKernelStartThread(sAudioThreadId, 0, NULL);
+    ret = sceKernelStartThread(threadId, 0, NULL);
+    if (ret < 0) {
+        sceKernelDeleteThread(threadId);
+        sAudioThreadRunning = false;
+        sAudioThreadId = -1;
+        return ret;
+    }
+
+    sAudioThreadId = threadId;
     return 0;
 }
 
@@ -468,14 +491,27 @@ s32 OotPspAudioBackend_NeedsRefillUrgently(void) {
 }
 
 void OotPspAudio_Init(void) {
+    if (sOotPspAudioInitialized) {
+        OotPspAudioBackend_StartThread();
+        return;
+    }
+
     if (OotPspAudioBackend_Init() < 0) {
         return;
     }
 
     AudioLoad_SetDmaHandler(DmaMgr_AudioDmaHandler);
+
+    /*
+     * These must only happen once.
+     * Audio_Init / Audio_InitSound may create internal timer threads.
+     * Re-running them can leak kernel thread objects like oot-timer-00.
+     */
     AudioThread_InitExternalPool(sAudioExternalPool, sizeof(sAudioExternalPool));
     Audio_Init();
     Audio_InitSound();
+
+    sOotPspAudioInitialized = true;
 
     OotPspAudioBackend_StartThread();
 }
