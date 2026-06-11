@@ -1495,7 +1495,8 @@ void Scene_DrawConfigDeathMountainTrail(PlayState* play) {
         }
 
         gDPSetPrimColor(displayListHead++, 0, 0, 255, 255, 255, play->roomCtx.drawParams[0]);
-        gSPDisplayList(displayListHead++, OOT_PSP_ROOM_ASSET(spot16_room_0DL_00AA48, 0x00AA48));
+        // The NTSC 1.0 room places this list at 0xA9C8 despite the symbol's legacy suffix.
+        gSPDisplayList(displayListHead++, OOT_PSP_ROOM_ASSET(spot16_room_0DL_00AA48, 0x00A9C8));
         gSPEndDisplayList(displayListHead++);
     }
 
