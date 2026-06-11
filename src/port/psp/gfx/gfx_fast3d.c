@@ -182,6 +182,7 @@ static struct RSP {
     bool lights_changed;
     
     uint32_t geometry_mode;
+    uint32_t rdp_half_1;
     int16_t fog_mul, fog_offset;
     
     struct {
@@ -3832,6 +3833,20 @@ static void gfx_run_dl(Gfx* cmd) {
                 gfx_sp_texture(C1(16, 16), C1(0, 16), C0(11, 3), C0(8, 3), C0(0, 8));
 #endif
                 break;
+            case (uint8_t)G_RDPHALF_1:
+                rsp.rdp_half_1 = cmd->words.w1;
+                break;
+            case (uint8_t)G_BRANCH_Z:
+                /*
+                 * The PSP path does not retain the RSP's fixed-point screen Z.
+                 * Follow the detailed branch so conditional scene chunks are
+                 * rendered instead of falling through to an empty display list.
+                 */
+                if (rsp.rdp_half_1 != 0) {
+                    cmd = (Gfx *)seg_addr(rsp.rdp_half_1);
+                    --cmd;
+                }
+                break;
             case G_VTX:
 #ifdef F3DEX_GBI_2
 #if defined(TARGET_PSP)
@@ -4063,6 +4078,7 @@ static void gfx_sp_reset() {
     rsp.modelview_matrix_stack_size = 1;
     rsp.current_num_lights = 2;
     rsp.lights_changed = true;
+    rsp.rdp_half_1 = 0;
     memset(rsp.segments, 0, sizeof(rsp.segments));
 #if defined(TARGET_PSP)
     memset(rsp.segment_cmd, 0, sizeof(rsp.segment_cmd));
