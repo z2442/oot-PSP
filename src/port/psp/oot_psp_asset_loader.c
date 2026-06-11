@@ -797,6 +797,10 @@ static s32 OotPsp_EnsureAssetCacheRange(OotPspAssetCache* cache, const OotPspExt
         windowSize = fileSize;
     } else {
         windowStart = (offset / cache->capacity) * cache->capacity;
+        cacheOffset = offset - windowStart;
+        if (size > (cache->capacity - cacheOffset)) {
+            windowStart = (offset + size) - cache->capacity;
+        }
         if (windowStart > (fileSize - cache->capacity)) {
             windowStart = fileSize - cache->capacity;
         }
@@ -1238,6 +1242,9 @@ static s32 OotPsp_TryReadAssetCache(const OotPspExternalAsset* asset, void* ram,
     }
 
     cacheOffset = offset - cache->offset;
+    if ((cacheOffset > cache->dataSize) || (size > (cache->dataSize - cacheOffset))) {
+        return false;
+    }
     memcpy(ram, &cache->data[cacheOffset], size);
     OotPsp_RegisterLoadedAssetRanges(ram, size, vrom, asset, OotPsp_NextLoadedAssetSerial());
     return true;
