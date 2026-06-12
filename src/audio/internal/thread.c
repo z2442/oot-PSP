@@ -7,6 +7,9 @@
 #include "ultra64.h"
 #include "versions.h"
 #include "audio.h"
+#if defined(TARGET_PSP)
+#include "oot_psp_audio_backend.h"
+#endif
 
 #define SAMPLES_TO_OVERPRODUCE 0x10
 #define EXTRA_BUFFERED_AI_SAMPLES_TARGET 0x80
@@ -164,6 +167,9 @@ AudioTask* AudioThread_UpdateImpl(void) {
 
     gAudioCtx.curAbiCmdBuf =
         AudioSynth_Update(gAudioCtx.curAbiCmdBuf, &abiCmdCnt, curAiBuffer, gAudioCtx.aiBufLengths[index]);
+#if defined(TARGET_PSP)
+    OotPspAudioBackend_ExecuteCommands(gAudioCtx.abiCmdBufs[gAudioCtx.rspTaskIndex], abiCmdCnt);
+#endif
 
     // Update audioRandom to the next random number
     gAudioCtx.audioRandom = (gAudioCtx.audioRandom + gAudioCtx.totalTaskCount) * osGetCount();

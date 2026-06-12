@@ -3,49 +3,72 @@
 #include "attributes.h"
 #include "audio.h"
 #include "dma.h"
+#include "oot_psp_mixer.h"
 
+#include <me-core-mapper/me-core.h>
 #include <pspaudio.h>
 #include <pspkernel.h>
 #include <pspthreadman.h>
 #include <string.h>
 
 #define OOT_PSP_AUDIO_CHANNELS 2
-#define OOT_PSP_AUDIO_DEFAULT_SOURCE_FREQUENCY 32006
-#define OOT_PSP_AUDIO_OUTPUT_FREQUENCY 44100
-#define OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES 512
+#define OOT_PSP_AUDIO_FREQUENCY 32000
+#define OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES 544
 #define OOT_PSP_AUDIO_RING_FRAMES 16384
 #define OOT_PSP_AUDIO_RING_MASK (OOT_PSP_AUDIO_RING_FRAMES - 1)
-#define OOT_PSP_AUDIO_RESAMPLE_FRAC_BITS 24
-#define OOT_PSP_AUDIO_RESAMPLE_FRAC_MASK ((1U << OOT_PSP_AUDIO_RESAMPLE_FRAC_BITS) - 1)
-#define OOT_PSP_AUDIO_LERP_FRAC_BITS 15
+#define OOT_PSP_AUDIO_CACHE_LINE_SIZE 64
 
 static volatile s32 sOotPspAudioInitialized = false;
 
-/*
- * One-thread backend:
- *   - The same PSP thread generates N64 audio and submits PSP output.
- *   - No separate producer timer, so audio threads cannot fight each other.
- *   - The thread only generates a tiny bounded amount of audio before each
- *     output block. This prevents the old 8-update catch-up burst stutter.
- */
 #define OOT_PSP_AUDIO_TARGET_CHUNKS 3
 #define OOT_PSP_AUDIO_REFILL_CHUNKS 2
 #define OOT_PSP_AUDIO_URGENT_CHUNKS 1
 
-/* PSP priorities: lower number == higher priority. */
-#define OOT_PSP_AUDIO_THREAD_PRIORITY 0x20
+/*
+ * Output only copies a prepared block and sleeps in sceAudioSRCOutputBlocking,
+ * so it can safely preempt the game at block boundaries. Synthesis stays at
+ * the main thread's priority and explicitly shares that ready queue.
+ */
+#define OOT_PSP_AUDIO_OUTPUT_THREAD_PRIORITY 0x1F
+#define OOT_PSP_AUDIO_PRODUCER_THREAD_PRIORITY 0x20
 
 #define OOT_PSP_AUDIO_MAX_UPDATES_NORMAL 1
 #define OOT_PSP_AUDIO_MAX_UPDATES_URGENT 2
 #define OOT_PSP_AUDIO_MAX_UPDATES_PRIME 3
+#define OOT_PSP_AUDIO_UPDATE_USEC (1000000U / 60U)
 #define OOT_PSP_AUDIO_EXTERNAL_POOL_SIZE (2 * 1024 * 1024)
+#define OOT_PSP_AUDIO_ME_TIMEOUT_US 250000
+#define OOT_PSP_AUDIO_OUTPUT_RETRY_USEC \
+    ((OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES * 1000000U) / OOT_PSP_AUDIO_FREQUENCY)
+
+typedef enum {
+    OOT_PSP_AUDIO_ME_STATE_BOOTING,
+    OOT_PSP_AUDIO_ME_STATE_IDLE,
+    OOT_PSP_AUDIO_ME_STATE_RUN,
+    OOT_PSP_AUDIO_ME_STATE_STOP,
+    OOT_PSP_AUDIO_ME_STATE_HALTED,
+    OOT_PSP_AUDIO_ME_STATE_FAULT,
+} OotPspAudioMeState;
+
+enum {
+    OOT_PSP_AUDIO_ME_SHARED_STATE,
+    OOT_PSP_AUDIO_ME_SHARED_CMD_LIST,
+    OOT_PSP_AUDIO_ME_SHARED_CMD_COUNT,
+    OOT_PSP_AUDIO_ME_SHARED_PROGRESS,
+    OOT_PSP_AUDIO_ME_SHARED_COUNT,
+};
+
+meLibMakeUncachedMem(sAudioMeSharedStorage, OOT_PSP_AUDIO_ME_SHARED_COUNT, u32Me);
+
+#define sAudioMeShared \
+    ((volatile u32Me*)(UNCACHED_USER_MASK | (u32Me)(uintptr_t)sAudioMeSharedStorage))
+#define sAudioMeState    sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_STATE]
+#define sAudioMeCmdList  sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_CMD_LIST]
+#define sAudioMeCmdCount sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_CMD_COUNT]
+#define sAudioMeProgress sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_PROGRESS]
 
 #if (OOT_PSP_AUDIO_RING_FRAMES & (OOT_PSP_AUDIO_RING_FRAMES - 1)) != 0
 #error OOT_PSP_AUDIO_RING_FRAMES must be a power of two
-#endif
-
-#if (OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES & 63) != 0
-#error OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES must be a multiple of 64
 #endif
 
 static s16 sAudioRing[OOT_PSP_AUDIO_RING_FRAMES * OOT_PSP_AUDIO_CHANNELS] __attribute__((aligned(64)));
@@ -55,25 +78,194 @@ static u8 sAudioExternalPool[OOT_PSP_AUDIO_EXTERNAL_POOL_SIZE] __attribute__((al
 static volatile u32 sAudioReadPos;
 static volatile u32 sAudioWritePos;
 static volatile u32 sAudioOutputFrames;
-static volatile s32 sAudioThreadRunning;
+static volatile s32 sAudioOutputThreadRunning;
+static volatile s32 sAudioProducerThreadRunning;
 static volatile s32 sAudioPlaybackPrimed;
-static volatile u32 sAudioSourceFrequency = OOT_PSP_AUDIO_DEFAULT_SOURCE_FREQUENCY;
+static volatile s32 sAudioMeInitialized;
 
-/* Q24 source-frame phase and step per 44100 Hz PSP output frame. */
-static u32 sAudioResampleFrac;
-static u32 sAudioResampleStep;
 static s16 sAudioLastLeft;
 static s16 sAudioLastRight;
-static SceUID sAudioThreadId = -1;
-static s32 sAudioOutputChannel = -1;
+static SceUID sAudioOutputThreadId = -1;
+static SceUID sAudioProducerThreadId = -1;
+static s32 sAudioSrcReserved;
 
 void AudioThread_InitExternalPool(void* ramAddr, u32 size);
 
-static u32 OotPspAudioBackend_SourceChunkFrames(void) {
-    u32 frequency = sAudioSourceFrequency;
+__attribute__((noinline, aligned(4))) void meLibOnException(void) {
+    sAudioMeState = OOT_PSP_AUDIO_ME_STATE_FAULT;
+    meLibSync();
+    meLibHalt();
+}
 
-    return (((OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES * frequency) + OOT_PSP_AUDIO_OUTPUT_FREQUENCY - 1) /
-            OOT_PSP_AUDIO_OUTPUT_FREQUENCY);
+__attribute__((noinline, aligned(4))) void meLibOnExternalInterrupt(void) {
+    sAudioMeState = OOT_PSP_AUDIO_ME_STATE_FAULT;
+    meLibSync();
+    meLibHalt();
+}
+
+__attribute__((noinline, aligned(4))) void meLibOnProcess(void) {
+    meLibExceptionHandlerInit(0);
+
+    do {
+        meLibDelayPipeline();
+    } while (sAudioMeState == OOT_PSP_AUDIO_ME_STATE_BOOTING);
+
+    while (sAudioMeState != OOT_PSP_AUDIO_ME_STATE_STOP) {
+        if (sAudioMeState == OOT_PSP_AUDIO_ME_STATE_RUN) {
+            const Acmd* cmdList = (const Acmd*)(uintptr_t)sAudioMeCmdList;
+            s32 cmdCount = (s32)sAudioMeCmdCount;
+
+            sAudioMeProgress = 1;
+            meLibDcacheWritebackInvalidateAll();
+            sAudioMeProgress = 2;
+            OotPspMixer_ExecuteCommandList(cmdList, cmdCount);
+            sAudioMeProgress = 3;
+            meLibDcacheWritebackInvalidateAll();
+            meLibSync();
+            sAudioMeState = OOT_PSP_AUDIO_ME_STATE_IDLE;
+        } else {
+            meLibDelayPipeline();
+        }
+    }
+
+    sAudioMeState = OOT_PSP_AUDIO_ME_STATE_HALTED;
+    meLibSync();
+    meLibHalt();
+}
+
+static s32 OotPspAudioBackend_InitMe(void) {
+    s32 ret;
+
+    if (sAudioMeInitialized) {
+        return 0;
+    }
+
+    sAudioMeCmdList = 0;
+    sAudioMeCmdCount = 0;
+    sAudioMeProgress = 0;
+    sAudioMeState = OOT_PSP_AUDIO_ME_STATE_BOOTING;
+    sceKernelDcacheWritebackAll();
+
+    ret = meLibDefaultInit();
+    if (ret < 0) {
+        return ret;
+    }
+
+    meLibSync();
+    sAudioMeState = OOT_PSP_AUDIO_ME_STATE_IDLE;
+    sAudioMeInitialized = true;
+    return 0;
+}
+
+static void OotPspAudioBackend_InvalidateRange(const void* address, u32 size) {
+    uintptr_t start;
+    uintptr_t end;
+
+    if ((address == NULL) || (size == 0)) {
+        return;
+    }
+
+    start = (uintptr_t)address & ~(OOT_PSP_AUDIO_CACHE_LINE_SIZE - 1);
+    end = ((uintptr_t)address + size + OOT_PSP_AUDIO_CACHE_LINE_SIZE - 1) &
+          ~(OOT_PSP_AUDIO_CACHE_LINE_SIZE - 1);
+    sceKernelDcacheInvalidateRange((void*)start, end - start);
+}
+
+static void OotPspAudioBackend_InvalidateMeWrites(const Acmd* cmdList, s32 cmdCount) {
+    void* filterLut = NULL;
+    s32 i;
+
+    for (i = 0; i < cmdCount; i++) {
+        u32 w0 = cmdList[i].words.w0;
+        u32 w1 = cmdList[i].words.w1;
+
+        switch (w0 >> 24) {
+            case A_ADPCM:
+            case A_RESAMPLE:
+            case A_S8DEC:
+                OotPspAudioBackend_InvalidateRange((void*)(uintptr_t)w1, sizeof(ADPCM_STATE));
+                break;
+
+            case A_FILTER:
+                if (((w0 >> 16) & 0xFF) > 1) {
+                    filterLut = (void*)(uintptr_t)w1;
+                } else {
+                    OotPspAudioBackend_InvalidateRange((void*)(uintptr_t)w1, sizeof(ADPCM_STATE));
+                    if (filterLut != NULL) {
+                        OotPspAudioBackend_InvalidateRange(filterLut, 8 * sizeof(s16));
+                    }
+                }
+                break;
+
+            case A_SAVEBUFF:
+                OotPspAudioBackend_InvalidateRange((void*)(uintptr_t)w1, ((w0 >> 16) & 0xFF) << 4);
+                break;
+
+            default:
+                break;
+        }
+    }
+}
+
+static void OotPspAudioBackend_FallbackFromMe(const Acmd* cmdList, s32 cmdCount) {
+    sAudioMeInitialized = false;
+    OotPspMixer_InvalidateStateCache();
+    OotPspMixer_ExecuteCommandList(cmdList, cmdCount);
+}
+
+void OotPspAudioBackend_ExecuteCommands(const Acmd* cmdList, s32 cmdCount) {
+    u32 startTime;
+
+    if ((cmdList == NULL) || (cmdCount <= 0)) {
+        return;
+    }
+
+    if (!sAudioMeInitialized) {
+        OotPspMixer_ExecuteCommandList(cmdList, cmdCount);
+        return;
+    }
+
+    while (sAudioMeState != OOT_PSP_AUDIO_ME_STATE_IDLE) {
+        sceKernelDelayThread(10);
+    }
+
+    /*
+     * The CPU produces command lists and sample data in its cache. The ME
+     * invalidates its cache before consuming them, then writes all mixer state
+     * and PCM back before publishing IDLE.
+     */
+    sceKernelDcacheWritebackAll();
+    sAudioMeCmdList = (u32)(uintptr_t)cmdList;
+    sAudioMeCmdCount = (u32)cmdCount;
+    sAudioMeProgress = 0;
+    meLibSync();
+    sAudioMeState = OOT_PSP_AUDIO_ME_STATE_RUN;
+
+    startTime = sceKernelGetSystemTimeLow();
+    while (sAudioMeState == OOT_PSP_AUDIO_ME_STATE_RUN) {
+        if ((sceKernelGetSystemTimeLow() - startTime) >= OOT_PSP_AUDIO_ME_TIMEOUT_US) {
+            meLibEmitSoftwareInterrupt();
+            startTime = sceKernelGetSystemTimeLow();
+            while ((sAudioMeState == OOT_PSP_AUDIO_ME_STATE_RUN) &&
+                   ((sceKernelGetSystemTimeLow() - startTime) < 10000)) {
+                sceKernelDelayThread(10);
+            }
+            OotPspAudioBackend_FallbackFromMe(cmdList, cmdCount);
+            return;
+        }
+        sceKernelDelayThread(10);
+    }
+
+    if (sAudioMeState != OOT_PSP_AUDIO_ME_STATE_IDLE) {
+        OotPspAudioBackend_FallbackFromMe(cmdList, cmdCount);
+        return;
+    }
+
+    OotPspAudioBackend_InvalidateMeWrites(cmdList, cmdCount);
+}
+
+static u32 OotPspAudioBackend_SourceChunkFrames(void) {
+    return OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES;
 }
 
 static u32 OotPspAudioBackend_TargetBufferFrames(void) {
@@ -88,56 +280,6 @@ static u32 OotPspAudioBackend_UrgentBufferFrames(void) {
     return OotPspAudioBackend_SourceChunkFrames() * OOT_PSP_AUDIO_URGENT_CHUNKS;
 }
 
-static u32 OotPspAudioBackend_CalculateResampleStep(u32 frequency) {
-    u32 whole = frequency / OOT_PSP_AUDIO_OUTPUT_FREQUENCY;
-    u32 remainder = frequency % OOT_PSP_AUDIO_OUTPUT_FREQUENCY;
-    u32 fraction = 0;
-    s32 i;
-
-    for (i = 0; i < OOT_PSP_AUDIO_RESAMPLE_FRAC_BITS; i++) {
-        remainder <<= 1;
-        fraction <<= 1;
-        if (remainder >= OOT_PSP_AUDIO_OUTPUT_FREQUENCY) {
-            remainder -= OOT_PSP_AUDIO_OUTPUT_FREQUENCY;
-            fraction++;
-        }
-    }
-
-    return (whole << OOT_PSP_AUDIO_RESAMPLE_FRAC_BITS) | fraction;
-}
-
-static u32 OotPspAudioBackend_ViClock(void) {
-    if (osTvType == OS_TV_PAL) {
-        return VI_PAL_CLOCK;
-    }
-
-    if (osTvType == OS_TV_MPAL) {
-        return VI_MPAL_CLOCK;
-    }
-
-    return VI_NTSC_CLOCK;
-}
-
-static s32 OotPspAudioBackend_CalculateAiFrequency(u32 frequency) {
-    u32 clock;
-    u32 dacRate;
-
-    if (frequency == 0) {
-        return -1;
-    }
-
-    clock = OotPspAudioBackend_ViClock();
-    dacRate = clock / frequency;
-    if ((clock % frequency) >= ((frequency >> 1) + (frequency & 1))) {
-        dacRate++;
-    }
-    if (dacRate < AI_MIN_DAC_RATE) {
-        return -1;
-    }
-
-    return clock / (s32)dacRate;
-}
-
 static u32 OotPspAudioBackend_BufferedFrames(void) {
     return (sAudioWritePos - sAudioReadPos) & OOT_PSP_AUDIO_RING_MASK;
 }
@@ -149,7 +291,7 @@ static u32 OotPspAudioBackend_FreeFrames(void) {
 static u32 OotPspAudioBackend_RestFrames(void) {
     s32 rest;
 
-    if (sAudioOutputChannel < 0) {
+    if (!sAudioSrcReserved) {
         return 0;
     }
 
@@ -172,31 +314,24 @@ static u32 OotPspAudioBackend_ReportableFrames(void) {
     return buffered - targetFrames;
 }
 
-static s16 OotPspAudioBackend_LerpSample(s16 current, s16 next, u32 frac) {
-    s32 scaledFrac = frac >> (OOT_PSP_AUDIO_RESAMPLE_FRAC_BITS - OOT_PSP_AUDIO_LERP_FRAC_BITS);
-    s32 delta = ((s32)next - current) * scaledFrac;
-
-    if (delta >= 0) {
-        delta += 1 << (OOT_PSP_AUDIO_LERP_FRAC_BITS - 1);
-    } else {
-        delta -= 1 << (OOT_PSP_AUDIO_LERP_FRAC_BITS - 1);
-    }
-
-    return current + (delta >> OOT_PSP_AUDIO_LERP_FRAC_BITS);
-}
-
 static void OotPspAudioBackend_OutputMix(u32 sourceFrames) {
+    s32 ret;
+
     sceKernelDcacheWritebackRange(sAudioMix, sizeof(sAudioMix));
     sAudioOutputFrames = sourceFrames;
-    sceAudioOutputBlocking(sAudioOutputChannel, PSP_AUDIO_VOLUME_MAX, sAudioMix);
+    ret = sceAudioSRCOutputBlocking(PSP_AUDIO_VOLUME_MAX, sAudioMix);
     sAudioOutputFrames = 0;
+
+    if (ret < 0) {
+        sAudioPlaybackPrimed = false;
+        sceKernelDelayThread(OOT_PSP_AUDIO_OUTPUT_RETRY_USEC);
+    }
 }
 
 static void OotPspAudioBackend_OutputSilence(void) {
     memset(sAudioMix, 0, sizeof(sAudioMix));
     sAudioLastLeft = 0;
     sAudioLastRight = 0;
-    sAudioResampleFrac = 0;
     OotPspAudioBackend_OutputMix(0);
 }
 
@@ -214,7 +349,6 @@ static void OotPspAudioBackend_FadeChunkToSilence(s16** outPtr, u32 frames, s16 
     *outPtr = out;
     sAudioLastLeft = 0;
     sAudioLastRight = 0;
-    sAudioResampleFrac = 0;
 }
 
 static s32 OotPspAudioBackend_CanRunUpdate(void) {
@@ -233,6 +367,7 @@ static s32 OotPspAudioBackend_TryRunUpdate(void) {
     }
 
     AudioThread_Update();
+    sceKernelRotateThreadReadyQueue(OOT_PSP_AUDIO_PRODUCER_THREAD_PRIORITY);
     return true;
 }
 
@@ -259,60 +394,41 @@ static void OotPspAudioBackend_RunUpdates(u32 maxUpdates, s32 forceRefill) {
 static u32 OotPspAudioBackend_RenderOutputChunk(void) {
     u32 buffered = OotPspAudioBackend_BufferedFrames();
     u32 readPos = sAudioReadPos;
-    u32 sourceFrames = 0;
+    u32 sourceFrames;
+    u32 firstFrames;
     s16* out = sAudioMix;
-    u32 i;
 
-    if (buffered <= 1) {
+    if (buffered == 0) {
         return 0;
     }
 
-    for (i = 0; i < OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES; i++) {
-        u32 ringOffset;
-        u32 nextRingOffset;
-        u32 advance;
-        s16 left;
-        s16 right;
-
-        if (buffered <= 1) {
-            break;
-        }
-
-        ringOffset = readPos * OOT_PSP_AUDIO_CHANNELS;
-        nextRingOffset = ((readPos + 1) & OOT_PSP_AUDIO_RING_MASK) * OOT_PSP_AUDIO_CHANNELS;
-
-        /*
-         * Linear interpolation avoids the imaging from zero-order hold. Q24
-         * phase keeps N64 AI pacing accurate, while Q15 interpolation needs
-         * only one 32-bit multiply per channel on Allegrex.
-         */
-        left = OotPspAudioBackend_LerpSample(sAudioRing[ringOffset + 0], sAudioRing[nextRingOffset + 0],
-                                             sAudioResampleFrac);
-        right = OotPspAudioBackend_LerpSample(sAudioRing[ringOffset + 1], sAudioRing[nextRingOffset + 1],
-                                              sAudioResampleFrac);
-
-        *out++ = left;
-        *out++ = right;
-        sAudioLastLeft = left;
-        sAudioLastRight = right;
-
-        sAudioResampleFrac += sAudioResampleStep;
-        advance = sAudioResampleFrac >> OOT_PSP_AUDIO_RESAMPLE_FRAC_BITS;
-        sAudioResampleFrac &= OOT_PSP_AUDIO_RESAMPLE_FRAC_MASK;
-
-        if (advance > (buffered - 1)) {
-            advance = buffered - 1;
-        }
-
-        readPos = (readPos + advance) & OOT_PSP_AUDIO_RING_MASK;
-        sourceFrames += advance;
-        buffered -= advance;
+    sourceFrames = buffered;
+    if (sourceFrames > OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES) {
+        sourceFrames = OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES;
     }
 
-    sAudioReadPos = readPos;
+    firstFrames = sourceFrames;
+    if (firstFrames > (OOT_PSP_AUDIO_RING_FRAMES - readPos)) {
+        firstFrames = OOT_PSP_AUDIO_RING_FRAMES - readPos;
+    }
 
-    if (i < OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES) {
-        OotPspAudioBackend_FadeChunkToSilence(&out, OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES - i, sAudioLastLeft,
+    memcpy(out, &sAudioRing[readPos * OOT_PSP_AUDIO_CHANNELS],
+           firstFrames * OOT_PSP_AUDIO_CHANNELS * sizeof(s16));
+    out += firstFrames * OOT_PSP_AUDIO_CHANNELS;
+
+    if (sourceFrames > firstFrames) {
+        u32 wrappedFrames = sourceFrames - firstFrames;
+
+        memcpy(out, sAudioRing, wrappedFrames * OOT_PSP_AUDIO_CHANNELS * sizeof(s16));
+        out += wrappedFrames * OOT_PSP_AUDIO_CHANNELS;
+    }
+
+    sAudioReadPos = (readPos + sourceFrames) & OOT_PSP_AUDIO_RING_MASK;
+    sAudioLastLeft = out[-2];
+    sAudioLastRight = out[-1];
+
+    if (sourceFrames < OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES) {
+        OotPspAudioBackend_FadeChunkToSilence(&out, OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES - sourceFrames, sAudioLastLeft,
                                               sAudioLastRight);
         sAudioPlaybackPrimed = false;
     }
@@ -320,7 +436,7 @@ static u32 OotPspAudioBackend_RenderOutputChunk(void) {
     return sourceFrames;
 }
 
-static void OotPspAudioBackend_PumpBeforeOutput(void) {
+static void OotPspAudioBackend_PumpProducer(void) {
     u32 buffered = OotPspAudioBackend_TotalBufferedFrames();
     u32 maxUpdates = OOT_PSP_AUDIO_MAX_UPDATES_NORMAL;
 
@@ -333,14 +449,11 @@ static void OotPspAudioBackend_PumpBeforeOutput(void) {
     }
 }
 
-static int OotPspAudioBackend_Thread(UNUSED SceSize args, UNUSED void* argp) {
-    OotPspAudioBackend_RunUpdates(OOT_PSP_AUDIO_MAX_UPDATES_PRIME, true);
-
-    while (sAudioThreadRunning) {
+static int OotPspAudioBackend_OutputThread(UNUSED SceSize args, UNUSED void* argp) {
+    while (sAudioOutputThreadRunning) {
         u32 buffered;
         u32 sourceFrames;
 
-        OotPspAudioBackend_PumpBeforeOutput();
         buffered = OotPspAudioBackend_BufferedFrames();
 
         if (!sAudioPlaybackPrimed) {
@@ -351,7 +464,7 @@ static int OotPspAudioBackend_Thread(UNUSED SceSize args, UNUSED void* argp) {
             sAudioPlaybackPrimed = true;
         }
 
-        if (buffered <= 1) {
+        if (buffered < OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES) {
             sAudioPlaybackPrimed = false;
             OotPspAudioBackend_OutputSilence();
             continue;
@@ -367,15 +480,45 @@ static int OotPspAudioBackend_Thread(UNUSED SceSize args, UNUSED void* argp) {
         OotPspAudioBackend_OutputMix(sourceFrames);
     }
 
-    sAudioThreadRunning = false;
-    sAudioThreadId = -1;
+    sAudioOutputThreadRunning = false;
+    sAudioOutputThreadId = -1;
+
+    sceKernelExitDeleteThread(0);
+    return 0;
+}
+
+static int OotPspAudioBackend_ProducerThread(UNUSED SceSize args, UNUSED void* argp) {
+    u32 nextUpdateUsec;
+
+    OotPspAudioBackend_RunUpdates(OOT_PSP_AUDIO_MAX_UPDATES_PRIME, true);
+    nextUpdateUsec = sceKernelGetSystemTimeLow();
+
+    while (sAudioProducerThreadRunning) {
+        s32 delayUsec;
+        u32 now;
+
+        OotPspAudioBackend_PumpProducer();
+
+        nextUpdateUsec += OOT_PSP_AUDIO_UPDATE_USEC;
+        now = sceKernelGetSystemTimeLow();
+        delayUsec = (s32)(nextUpdateUsec - now);
+        if (delayUsec > 0) {
+            sceKernelDelayThread(delayUsec);
+        } else {
+            nextUpdateUsec = now;
+            sceKernelDelayThread(1000);
+        }
+    }
+
+    sAudioProducerThreadRunning = false;
+    sAudioProducerThreadId = -1;
 
     sceKernelExitDeleteThread(0);
     return 0;
 }
 
 s32 OotPspAudioBackend_Init(void) {
-    if (sAudioOutputChannel >= 0) {
+    if (sAudioSrcReserved) {
         return 0;
     }
 
@@ -387,64 +530,74 @@ s32 OotPspAudioBackend_Init(void) {
     sAudioPlaybackPrimed = false;
     sAudioLastLeft = 0;
     sAudioLastRight = 0;
-    sAudioResampleFrac = 0;
-    sAudioSourceFrequency = OOT_PSP_AUDIO_DEFAULT_SOURCE_FREQUENCY;
-    sAudioResampleStep = OotPspAudioBackend_CalculateResampleStep(sAudioSourceFrequency);
 
     sceAudioOutput2Release();
     sceAudioSRCChRelease();
-    if (sAudioOutputChannel >= 0) {
-        sceAudioChRelease(sAudioOutputChannel);
-        sAudioOutputChannel = -1;
-    }
-
-    sAudioOutputChannel =
-        sceAudioChReserve(PSP_AUDIO_NEXT_CHANNEL, OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES, PSP_AUDIO_FORMAT_STEREO);
-    if (sAudioOutputChannel < 0) {
+    if (sceAudioSRCChReserve(OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES, OOT_PSP_AUDIO_FREQUENCY,
+                             OOT_PSP_AUDIO_CHANNELS) < 0) {
         return -1;
     }
+    sAudioSrcReserved = true;
 
     return 0;
 }
 
-static s32 OotPspAudioBackend_StartThread(void) {
+static s32 OotPspAudioBackend_StartThreads(void) {
     SceUID threadId;
     s32 ret;
 
-    if (sAudioThreadId >= 0 || sAudioThreadRunning) {
-        return 0;
-    }
-
-    if (sAudioOutputChannel < 0) {
+    if (!sAudioSrcReserved) {
         return -1;
     }
 
-    sAudioThreadRunning = true;
+    if ((sAudioOutputThreadId < 0) && !sAudioOutputThreadRunning) {
+        sAudioOutputThreadRunning = true;
+        threadId = sceKernelCreateThread(
+            "OOT PSP AudioOut",
+            OotPspAudioBackend_OutputThread,
+            OOT_PSP_AUDIO_OUTPUT_THREAD_PRIORITY,
+            0x10000,
+            PSP_THREAD_ATTR_USER,
+            NULL
+        );
+        if (threadId < 0) {
+            sAudioOutputThreadRunning = false;
+            return threadId;
+        }
 
-    threadId = sceKernelCreateThread(
-        "OOT PSP AudioPump",
-        OotPspAudioBackend_Thread,
-        OOT_PSP_AUDIO_THREAD_PRIORITY,
-        0x20000,
-        PSP_THREAD_ATTR_USER | PSP_THREAD_ATTR_VFPU,
-        NULL
-    );
-
-    if (threadId < 0) {
-        sAudioThreadRunning = false;
-        sAudioThreadId = -1;
-        return threadId;
+        ret = sceKernelStartThread(threadId, 0, NULL);
+        if (ret < 0) {
+            sceKernelDeleteThread(threadId);
+            sAudioOutputThreadRunning = false;
+            return ret;
+        }
+        sAudioOutputThreadId = threadId;
     }
 
-    ret = sceKernelStartThread(threadId, 0, NULL);
-    if (ret < 0) {
-        sceKernelDeleteThread(threadId);
-        sAudioThreadRunning = false;
-        sAudioThreadId = -1;
-        return ret;
+    if ((sAudioProducerThreadId < 0) && !sAudioProducerThreadRunning) {
+        sAudioProducerThreadRunning = true;
+        threadId = sceKernelCreateThread(
+            "OOT PSP AudioGen",
+            OotPspAudioBackend_ProducerThread,
+            OOT_PSP_AUDIO_PRODUCER_THREAD_PRIORITY,
+            0x20000,
+            PSP_THREAD_ATTR_USER | PSP_THREAD_ATTR_VFPU,
+            NULL
+        );
+        if (threadId < 0) {
+            sAudioProducerThreadRunning = false;
+            return threadId;
+        }
+
+        ret = sceKernelStartThread(threadId, 0, NULL);
+        if (ret < 0) {
+            sceKernelDeleteThread(threadId);
+            sAudioProducerThreadRunning = false;
+            return ret;
+        }
+        sAudioProducerThreadId = threadId;
     }
 
-    sAudioThreadId = threadId;
     return 0;
 }
 
@@ -483,20 +636,12 @@ s32 OotPspAudioBackend_Queue(const void* buf, u32 size) {
     return 0;
 }
 
-s32 OotPspAudioBackend_SetFrequency(u32 frequency) {
-    s32 actualFrequency = OotPspAudioBackend_CalculateAiFrequency(frequency);
-
-    if (actualFrequency < 0) {
+s32 OotPspAudioBackend_SetFrequency(UNUSED u32 frequency) {
+    if (!sAudioSrcReserved) {
         return -1;
     }
 
-    if (sAudioSourceFrequency != (u32)actualFrequency) {
-        sAudioSourceFrequency = (u32)actualFrequency;
-        sAudioResampleStep = OotPspAudioBackend_CalculateResampleStep(sAudioSourceFrequency);
-        sAudioResampleFrac = 0;
-    }
-
-    return actualFrequency;
+    return OOT_PSP_AUDIO_FREQUENCY;
 }
 
 u32 OotPspAudioBackend_GetLength(void) {
@@ -509,7 +654,7 @@ s32 OotPspAudioBackend_NeedsRefillUrgently(void) {
 
 void OotPspAudio_Init(void) {
     if (sOotPspAudioInitialized) {
-        OotPspAudioBackend_StartThread();
+        OotPspAudioBackend_StartThreads();
         return;
     }
 
@@ -527,18 +672,15 @@ void OotPspAudio_Init(void) {
     AudioThread_InitExternalPool(sAudioExternalPool, sizeof(sAudioExternalPool));
     Audio_Init();
     Audio_InitSound();
+    OotPspAudioBackend_InitMe();
 
     sOotPspAudioInitialized = true;
 
-    OotPspAudioBackend_StartThread();
+    OotPspAudioBackend_StartThreads();
 }
 
 void OotPspAudio_Update(void) {
-    /*
-     * The merged audio pump owns AudioThread_Update(). Keep this free so the
-     * render/game thread does not pay for audio work.
-     */
-    if (!sAudioThreadRunning) {
+    if (!sAudioProducerThreadRunning) {
         OotPspAudioBackend_RunUpdates(OOT_PSP_AUDIO_MAX_UPDATES_NORMAL, true);
     }
 }

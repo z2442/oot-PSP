@@ -8,6 +8,7 @@ s32 OotPspAudioBackend_Queue(const void* buf, u32 size);
 s32 OotPspAudioBackend_SetFrequency(u32 frequency);
 u32 OotPspAudioBackend_GetLength(void);
 s32 OotPspAudioBackend_NeedsRefillUrgently(void);
+void OotPspAudioBackend_ExecuteCommands(const Acmd* cmdList, s32 cmdCount);
 
 void OotPspAudio_Init(void);
 void OotPspAudio_Update(void);

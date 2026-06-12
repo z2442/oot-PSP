@@ -4,10 +4,6 @@
 #include "alignment.h"
 #include "ultra64.h"
 #include "audio.h"
-#if defined(TARGET_PSP)
-#define OOT_PSP_MIXER_INLINE
-#include "oot_psp_mixer.h"
-#endif
 
 // DMEM Addresses for the RSP
 #define DMEM_TEMP 0x3C0
@@ -454,13 +450,8 @@ void AudioSynth_Stub_800DBC5C(void) {
 
 // possible fake match?
 void AudioSynth_DMemMove(Acmd* cmd, s32 dmemIn, s32 dmemOut, u32 size) {
-#if defined(TARGET_PSP)
-    OOT_PSP_MIXER_EVAL(cmd);
-    OotPspMixer_DMEMMove(dmemIn, dmemOut, size);
-#else
     cmd->words.w0 = _SHIFTL(A_DMEMMOVE, 24, 8) | _SHIFTL(dmemIn, 0, 24);
     cmd->words.w1 = _SHIFTL(dmemOut, 16, 16) | _SHIFTL(size, 0, 16);
-#endif
 }
 
 void AudioSynth_Stub_800DBC90(void) {
@@ -476,13 +467,8 @@ void AudioSynth_Stub_800DBCA8(void) {
 }
 
 void AudioSynth_InterL(Acmd* cmd, s32 dmemIn, s32 dmemOut, s32 numSamples) {
-#if defined(TARGET_PSP)
-    OOT_PSP_MIXER_EVAL(cmd);
-    OotPspMixer_Interl(dmemIn, dmemOut, numSamples);
-#else
     cmd->words.w0 = _SHIFTL(A_INTERL, 24, 8) | _SHIFTL(numSamples, 0, 16);
     cmd->words.w1 = _SHIFTL(dmemIn, 16, 16) | _SHIFTL(dmemOut, 0, 16);
-#endif
 }
 
 void AudioSynth_EnvSetup1(Acmd* cmd, s32 arg1, s32 arg2, s32 arg3, s32 arg4) {
@@ -501,13 +487,8 @@ void AudioSynth_SaveBuffer(Acmd* cmd, s32 dmemSrc, s32 size, void* addrDest) {
 }
 
 void AudioSynth_EnvSetup2(Acmd* cmd, s32 volLeft, s32 volRight) {
-#if defined(TARGET_PSP)
-    OOT_PSP_MIXER_EVAL(cmd);
-    OotPspMixer_EnvSetup2(volLeft, volRight);
-#else
     cmd->words.w0 = _SHIFTL(A_ENVSETUP2, 24, 8);
     cmd->words.w1 = _SHIFTL(volLeft, 16, 16) | _SHIFTL(volRight, 0, 16);
-#endif
 }
 
 void AudioSynth_Stub_800DBD7C(void) {
@@ -524,23 +505,13 @@ void AudioSynth_S8Dec(Acmd* cmd, s32 flags, s16* state) {
 }
 
 void AudioSynth_HiLoGain(Acmd* cmd, s32 gain, s32 dmemIn, s32 dmemOut, s32 size) {
-#if defined(TARGET_PSP)
-    OOT_PSP_MIXER_EVAL(cmd);
-    OotPspMixer_HiLoGain(gain, dmemIn, dmemOut, size);
-#else
     cmd->words.w0 = _SHIFTL(A_HILOGAIN, 24, 8) | _SHIFTL(gain, 16, 8) | _SHIFTL(size, 0, 16);
     cmd->words.w1 = _SHIFTL(dmemIn, 16, 16) | _SHIFTL(dmemOut, 0, 16);
-#endif
 }
 
 void AudioSynth_UnkCmd19(Acmd* cmd, s32 arg1, s32 arg2, s32 size, s32 arg4) {
-#if defined(TARGET_PSP)
-    OOT_PSP_MIXER_EVAL(cmd);
-    OotPspMixer_UnkCmd19(arg1, arg2, size, arg4);
-#else
     cmd->words.w0 = _SHIFTL(A_UNK19, 24, 8) | _SHIFTL(arg4, 16, 8) | _SHIFTL(size, 0, 16);
     cmd->words.w1 = _SHIFTL(arg1, 16, 16) | _SHIFTL(arg2, 0, 16);
-#endif
 }
 
 void AudioSynth_Stub_800DBE18(void) {
@@ -556,13 +527,8 @@ void AudioSynth_Stub_800DBE30(void) {
 }
 
 void AudioSynth_UnkCmd3(Acmd* cmd, s32 arg1, s32 arg2, s32 size) {
-#if defined(TARGET_PSP)
-    OOT_PSP_MIXER_EVAL(cmd);
-    OotPspMixer_UnkCmd3(arg1, arg2, size);
-#else
     cmd->words.w0 = _SHIFTL(A_UNK3, 24, 8) | _SHIFTL(size, 0, 16);
     cmd->words.w1 = _SHIFTL(arg1, 16, 16) | _SHIFTL(arg2, 0, 16);
-#endif
 }
 
 void AudioSynth_Stub_800DBE5C(void) {

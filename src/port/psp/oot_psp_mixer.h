@@ -29,6 +29,7 @@ void OotPspMixer_HiLoGain(s32 gain, u16 dmemIn, u16 dmemOut, s32 nbytes);
 void OotPspMixer_UnkCmd3(s32 arg1, s32 arg2, s32 size);
 void OotPspMixer_UnkCmd19(s32 arg1, s32 arg2, s32 size, s32 arg4);
 void OotPspMixer_ExecuteCommandList(const Acmd* cmdList, s32 cmdCount);
+void OotPspMixer_InvalidateStateCache(void);
 
 #if defined(OOT_PSP_MIXER_INLINE)
 #undef aSegment

@@ -2,6 +2,9 @@
 
 #include "attributes.h"
 
+#if defined(TARGET_PSP)
+#include <pspkernel.h>
+#endif
 #include <string.h>
 
 #define OOT_PSP_DMEM_SIZE 0x2000
@@ -40,7 +43,7 @@ typedef struct {
     } dmem;
 } OotPspMixerState;
 
-static OotPspMixerState sMixer;
+static OotPspMixerState sMixer __attribute__((aligned(64)));
 
 static s16 sResampleTable[64][4] = {
     { 0x0C39, 0x66AD, 0x0D46, 0xFFDF }, { 0x0B39, 0x6696, 0x0E5F, 0xFFD8 },
@@ -785,4 +788,10 @@ void OotPspMixer_ExecuteCommandList(const Acmd* cmdList, s32 cmdCount) {
                 break;
         }
     }
+}
+
+void OotPspMixer_InvalidateStateCache(void) {
+#if defined(TARGET_PSP)
+    sceKernelDcacheInvalidateRange(&sMixer, ROUND_UP_64(sizeof(sMixer)));
+#endif
 }

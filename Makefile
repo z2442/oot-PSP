@@ -1531,7 +1531,7 @@ ifneq ($(PSP_PORT_GPROF_ENABLED),)
 PSP_PORT_CFLAGS += -pg -g -fno-omit-frame-pointer -fno-optimize-sibling-calls
 endif
 
-PSP_PORT_LIBS := -L$(PSP_PORT_PSPSDK)/lib -L$(PSP_PORT_PREFIX)/lib -lpspgu -lpspgum -lpspjpeg \
+PSP_PORT_LIBS := -L$(PSP_PORT_PSPSDK)/lib -L$(PSP_PORT_PREFIX)/lib -lme-core -lpspgu -lpspgum -lpspjpeg \
 	-lpspdisplay -lpspge -lpspfpu -lpspctrl -lpsppower -lpspaudio -lpspdebug
 
 ifneq ($(PSP_PORT_GPROF_ENABLED),)
