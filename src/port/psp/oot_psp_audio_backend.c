@@ -20,9 +20,9 @@
 
 static volatile s32 sOotPspAudioInitialized = false;
 
-#define OOT_PSP_AUDIO_TARGET_CHUNKS 3
-#define OOT_PSP_AUDIO_REFILL_CHUNKS 2
-#define OOT_PSP_AUDIO_URGENT_CHUNKS 1
+#define OOT_PSP_AUDIO_TARGET_CHUNKS 6
+#define OOT_PSP_AUDIO_REFILL_CHUNKS 5
+#define OOT_PSP_AUDIO_URGENT_CHUNKS 2
 
 /*
  * Output only copies a prepared block and sleeps in sceAudioSRCOutputBlocking,
@@ -33,8 +33,12 @@ static volatile s32 sOotPspAudioInitialized = false;
 #define OOT_PSP_AUDIO_PRODUCER_THREAD_PRIORITY 0x20
 
 #define OOT_PSP_AUDIO_MAX_UPDATES_NORMAL 1
-#define OOT_PSP_AUDIO_MAX_UPDATES_URGENT 2
-#define OOT_PSP_AUDIO_MAX_UPDATES_PRIME 3
+/*
+ * AudioThread_Update submits a buffer synthesized two updates earlier. The
+ * first two submissions are only the 160-frame initialization buffers, so
+ * prime those plus enough real buffers to reach the playback high-water mark.
+ */
+#define OOT_PSP_AUDIO_MAX_UPDATES_PRIME (OOT_PSP_AUDIO_TARGET_CHUNKS + 2)
 #define OOT_PSP_AUDIO_UPDATE_USEC (1000000U / 60U)
 #define OOT_PSP_AUDIO_EXTERNAL_POOL_SIZE (2 * 1024 * 1024)
 #define OOT_PSP_AUDIO_ME_TIMEOUT_US 250000
@@ -436,19 +440,6 @@ static u32 OotPspAudioBackend_RenderOutputChunk(void) {
     return sourceFrames;
 }
 
-static void OotPspAudioBackend_PumpProducer(void) {
-    u32 buffered = OotPspAudioBackend_TotalBufferedFrames();
-    u32 maxUpdates = OOT_PSP_AUDIO_MAX_UPDATES_NORMAL;
-
-    if (buffered < OotPspAudioBackend_UrgentBufferFrames()) {
-        maxUpdates = OOT_PSP_AUDIO_MAX_UPDATES_URGENT;
-    }
-
-    if (buffered < OotPspAudioBackend_TargetBufferFrames()) {
-        OotPspAudioBackend_RunUpdates(maxUpdates, true);
-    }
-}
-
 static int OotPspAudioBackend_OutputThread(UNUSED SceSize args, UNUSED void* argp) {
     while (sAudioOutputThreadRunning) {
         u32 buffered;
@@ -497,17 +488,16 @@ static int OotPspAudioBackend_ProducerThread(UNUSED SceSize args, UNUSED void* a
         s32 delayUsec;
         u32 now;
 
-        OotPspAudioBackend_PumpProducer();
-
         nextUpdateUsec += OOT_PSP_AUDIO_UPDATE_USEC;
         now = sceKernelGetSystemTimeLow();
         delayUsec = (s32)(nextUpdateUsec - now);
         if (delayUsec > 0) {
             sceKernelDelayThread(delayUsec);
-        } else {
+        } else if (delayUsec < -(s32)OOT_PSP_AUDIO_UPDATE_USEC) {
             nextUpdateUsec = now;
-            sceKernelDelayThread(1000);
         }
+
+        OotPspAudioBackend_TryRunUpdate();
     }
 
     sAudioProducerThreadRunning = false;
