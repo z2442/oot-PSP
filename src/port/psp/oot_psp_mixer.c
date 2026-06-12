@@ -77,7 +77,7 @@ static s16 sResampleTable[64][4] = {
     { 0xFFD8, 0x0E5F, 0x6696, 0x0B39 }, { 0xFFDF, 0x0D46, 0x66AD, 0x0C39 },
 };
 
-static s16 OotPspMixer_Clamp16(s64 value) {
+static s16 OotPspMixer_Clamp16(s32 value) {
     if (value < -0x8000) {
         return -0x8000;
     }
@@ -88,7 +88,9 @@ static s16 OotPspMixer_Clamp16(s64 value) {
 }
 
 static s16 OotPspMixer_Vmulf(s16 left, s16 right) {
-    return OotPspMixer_Clamp16((((s64)left * right * 2) + 0x8000) >> 16);
+    s32 product = (s32)left * right;
+
+    return OotPspMixer_Clamp16((product + 0x4000) >> 15);
 }
 
 static s16 OotPspMixer_Vadd(s16 left, s16 right) {
@@ -343,7 +345,7 @@ void OotPspMixer_EnvSetup2(s32 volLeft, s32 volRight) {
 }
 
 static s16 OotPspMixer_MulHighSignedUnsigned(s16 sample, u16 volume) {
-    return (s16)(((s64)sample * volume) >> 16);
+    return (s16)(((s32)sample * volume) >> 16);
 }
 
 void OotPspMixer_EnvMixer(u16 dmemSrc, s32 aiBufLen, s32 swapLR, s32 x0, s32 x1, s32 x2, s32 x3, u32 dmemDests,
@@ -424,10 +426,22 @@ void OotPspMixer_Mix(s32 countQuads, s16 gain, u16 dmemIn, u16 dmemOut) {
     s32 i;
 
     for (i = 0; i < samples; i++) {
-        s64 accumulator = ((s64)out[i] * 0x7FFF * 2) + 0x8000;
+        s32 outProduct = (s32)out[i] * 0x7FFF;
+        s32 inProduct = (s32)in[i] * gain;
+        s32 accumulator;
 
-        accumulator += (s64)in[i] * gain * 2;
-        out[i] = OotPspMixer_Clamp16(accumulator >> 16);
+        if ((inProduct > 0) && (outProduct > (0x7FFFFFFF - inProduct))) {
+            out[i] = 0x7FFF;
+        } else if ((inProduct < 0) && (outProduct < ((-0x7FFFFFFF - 1) - inProduct))) {
+            out[i] = -0x8000;
+        } else {
+            accumulator = outProduct + inProduct;
+            if (accumulator > (0x7FFFFFFF - 0x4000)) {
+                out[i] = 0x7FFF;
+            } else {
+                out[i] = OotPspMixer_Clamp16((accumulator + 0x4000) >> 15);
+            }
+        }
     }
 }
 
@@ -515,7 +529,8 @@ void OotPspMixer_Filter(u8 flags, s32 countOrBuf, void* state) {
 
     while (count > 0) {
         s16 blockInput[OOT_PSP_FILTER_TAP_COUNT];
-        s64 out1[OOT_PSP_FILTER_TAP_COUNT];
+        /* OoT's filter tables have an L1 gain below 1.0, so all eight products fit in s32. */
+        s32 out1[OOT_PSP_FILTER_TAP_COUNT];
 
         memcpy(blockInput, input, sizeof(blockInput));
 
@@ -631,16 +646,15 @@ void OotPspMixer_UnkCmd3(s32 arg1, s32 arg2, s32 size) {
         s32 lane;
 
         for (lane = 0; lane < 8; lane++) {
-            s64 product = (u16)src[i + 8 + lane] * (s64)src[i + lane];
-            s64 doubled = product * 2;
+            s32 product = (u16)src[i + 8 + lane] * (s32)src[i + lane];
             u16 highResult;
 
-            if (doubled < -0x80000000LL) {
+            if (product < -0x40000000) {
                 highResult = 0;
-            } else if (doubled > 0x7FFFFFFFLL) {
+            } else if (product > 0x3FFFFFFF) {
                 highResult = 0xFFFF;
             } else {
-                highResult = (u16)doubled;
+                highResult = (u16)((u16)product << 1);
             }
 
             dst[i + lane] = (s16)highResult;

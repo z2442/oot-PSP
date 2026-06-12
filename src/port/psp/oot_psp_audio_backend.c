@@ -89,7 +89,21 @@ static u32 OotPspAudioBackend_UrgentBufferFrames(void) {
 }
 
 static u32 OotPspAudioBackend_CalculateResampleStep(u32 frequency) {
-    return (u32)(((u64)frequency << OOT_PSP_AUDIO_RESAMPLE_FRAC_BITS) / OOT_PSP_AUDIO_OUTPUT_FREQUENCY);
+    u32 whole = frequency / OOT_PSP_AUDIO_OUTPUT_FREQUENCY;
+    u32 remainder = frequency % OOT_PSP_AUDIO_OUTPUT_FREQUENCY;
+    u32 fraction = 0;
+    s32 i;
+
+    for (i = 0; i < OOT_PSP_AUDIO_RESAMPLE_FRAC_BITS; i++) {
+        remainder <<= 1;
+        fraction <<= 1;
+        if (remainder >= OOT_PSP_AUDIO_OUTPUT_FREQUENCY) {
+            remainder -= OOT_PSP_AUDIO_OUTPUT_FREQUENCY;
+            fraction++;
+        }
+    }
+
+    return (whole << OOT_PSP_AUDIO_RESAMPLE_FRAC_BITS) | fraction;
 }
 
 static u32 OotPspAudioBackend_ViClock(void) {
@@ -113,7 +127,10 @@ static s32 OotPspAudioBackend_CalculateAiFrequency(u32 frequency) {
     }
 
     clock = OotPspAudioBackend_ViClock();
-    dacRate = (u32)(((u64)clock + (frequency / 2)) / frequency);
+    dacRate = clock / frequency;
+    if ((clock % frequency) >= ((frequency >> 1) + (frequency & 1))) {
+        dacRate++;
+    }
     if (dacRate < AI_MIN_DAC_RATE) {
         return -1;
     }

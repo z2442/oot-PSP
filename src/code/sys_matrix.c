@@ -10,6 +10,10 @@
 #include "game.h"
 #include "skin_matrix.h"
 
+#if PLATFORM_PSP
+#include "port/psp/oot_psp_vfpu_matrix.h"
+#endif
+
 // clang-format off
 Mtx gIdentityMtx = gdSPDefMtx(
     1.0f, 0.0f, 0.0f, 0.0f,
@@ -72,6 +76,9 @@ void Matrix_Translate(f32 x, f32 y, f32 z, u8 mode) {
     f32 ty;
 
     if (mode == MTXMODE_APPLY) {
+#if PLATFORM_PSP
+        OotPspVfpu_MtxFTranslate(cmf, x, y, z);
+#else
         tx = cmf->xx;
         ty = cmf->xy;
         cmf->xw += tx * x + ty * y + cmf->xz * z;
@@ -84,6 +91,7 @@ void Matrix_Translate(f32 x, f32 y, f32 z, u8 mode) {
         tx = cmf->wx;
         ty = cmf->wy;
         cmf->ww += tx * x + ty * y + cmf->wz * z;
+#endif
     } else {
         SkinMatrix_SetTranslate(cmf, x, y, z);
     }
@@ -93,6 +101,9 @@ void Matrix_Scale(f32 x, f32 y, f32 z, u8 mode) {
     MtxF* cmf = sCurrentMatrix;
 
     if (mode == MTXMODE_APPLY) {
+#if PLATFORM_PSP
+        OotPspVfpu_MtxFScale(cmf, x, y, z);
+#else
         cmf->xx *= x;
         cmf->yx *= x;
         cmf->zx *= x;
@@ -105,6 +116,7 @@ void Matrix_Scale(f32 x, f32 y, f32 z, u8 mode) {
         cmf->wx *= x;
         cmf->wy *= y;
         cmf->wz *= z;
+#endif
     } else {
         SkinMatrix_SetScale(cmf, x, y, z);
     }
@@ -124,6 +136,9 @@ void Matrix_RotateX(f32 x, u8 mode) {
             sin = sinf(x);
             cos = cosf(x);
 
+#if PLATFORM_PSP
+            OotPspVfpu_MtxFRotateX(cmf, sin, cos);
+#else
             temp1 = cmf->xy;
             temp2 = cmf->xz;
             cmf->xy = temp1 * cos + temp2 * sin;
@@ -143,6 +158,7 @@ void Matrix_RotateX(f32 x, u8 mode) {
             temp2 = cmf->wz;
             cmf->wy = temp1 * cos + temp2 * sin;
             cmf->wz = temp2 * cos - temp1 * sin;
+#endif
         }
     } else {
         cmf = sCurrentMatrix;
@@ -188,6 +204,9 @@ void Matrix_RotateY(f32 y, u8 mode) {
             sin = sinf(y);
             cos = cosf(y);
 
+#if PLATFORM_PSP
+            OotPspVfpu_MtxFRotateY(cmf, sin, cos);
+#else
             temp1 = cmf->xx;
             temp2 = cmf->xz;
             cmf->xx = temp1 * cos - temp2 * sin;
@@ -207,6 +226,7 @@ void Matrix_RotateY(f32 y, u8 mode) {
             temp2 = cmf->wz;
             cmf->wx = temp1 * cos - temp2 * sin;
             cmf->wz = temp1 * sin + temp2 * cos;
+#endif
         }
     } else {
         cmf = sCurrentMatrix;
@@ -252,6 +272,9 @@ void Matrix_RotateZ(f32 z, u8 mode) {
             sin = sinf(z);
             cos = cosf(z);
 
+#if PLATFORM_PSP
+            OotPspVfpu_MtxFRotateZ(cmf, sin, cos);
+#else
             temp1 = cmf->xx;
             temp2 = cmf->xy;
             cmf->xx = temp1 * cos + temp2 * sin;
@@ -271,6 +294,7 @@ void Matrix_RotateZ(f32 z, u8 mode) {
             temp2 = cmf->wy;
             cmf->wx = temp1 * cos + temp2 * sin;
             cmf->wy = temp2 * cos - temp1 * sin;
+#endif
         }
     } else {
         cmf = sCurrentMatrix;
@@ -319,6 +343,9 @@ void Matrix_RotateZYX(s16 x, s16 y, s16 z, u8 mode) {
         sin = Math_SinS(z);
         cos = Math_CosS(z);
 
+#if PLATFORM_PSP
+        OotPspVfpu_MtxFRotateZ(cmf, sin, cos);
+#else
         temp1 = cmf->xx;
         temp2 = cmf->xy;
         cmf->xx = temp1 * cos + temp2 * sin;
@@ -338,11 +365,15 @@ void Matrix_RotateZYX(s16 x, s16 y, s16 z, u8 mode) {
         temp2 = cmf->wy;
         cmf->wx = temp1 * cos + temp2 * sin;
         cmf->wy = temp2 * cos - temp1 * sin;
+#endif
 
         if (y != 0) {
             sin = Math_SinS(y);
             cos = Math_CosS(y);
 
+#if PLATFORM_PSP
+            OotPspVfpu_MtxFRotateY(cmf, sin, cos);
+#else
             temp1 = cmf->xx;
             temp2 = cmf->xz;
             cmf->xx = temp1 * cos - temp2 * sin;
@@ -362,12 +393,16 @@ void Matrix_RotateZYX(s16 x, s16 y, s16 z, u8 mode) {
             temp2 = cmf->wz;
             cmf->wx = temp1 * cos - temp2 * sin;
             cmf->wz = temp1 * sin + temp2 * cos;
+#endif
         }
 
         if (x != 0) {
             sin = Math_SinS(x);
             cos = Math_CosS(x);
 
+#if PLATFORM_PSP
+            OotPspVfpu_MtxFRotateX(cmf, sin, cos);
+#else
             temp1 = cmf->xy;
             temp2 = cmf->xz;
             cmf->xy = temp1 * cos + temp2 * sin;
@@ -387,6 +422,7 @@ void Matrix_RotateZYX(s16 x, s16 y, s16 z, u8 mode) {
             temp2 = cmf->wz;
             cmf->wy = temp1 * cos + temp2 * sin;
             cmf->wz = temp2 * cos - temp1 * sin;
+#endif
         }
     } else {
         SkinMatrix_SetRotateZYX(cmf, x, y, z);
@@ -405,6 +441,18 @@ void Matrix_TranslateRotateZYX(Vec3f* translation, Vec3s* rotation) {
     f32 temp1;
     f32 temp2;
 
+#if PLATFORM_PSP
+    OotPspVfpu_MtxFTranslate(cmf, translation->x, translation->y, translation->z);
+    OotPspVfpu_MtxFRotateZ(cmf, sin, cos);
+
+    if (rotation->y != 0) {
+        OotPspVfpu_MtxFRotateY(cmf, Math_SinS(rotation->y), Math_CosS(rotation->y));
+    }
+
+    if (rotation->x != 0) {
+        OotPspVfpu_MtxFRotateX(cmf, Math_SinS(rotation->x), Math_CosS(rotation->x));
+    }
+#else
     temp1 = cmf->xx;
     temp2 = cmf->xy;
     cmf->xw += temp1 * translation->x + temp2 * translation->y + cmf->xz * translation->z;
@@ -478,6 +526,7 @@ void Matrix_TranslateRotateZYX(Vec3f* translation, Vec3s* rotation) {
         cmf->wy = temp1 * cos + temp2 * sin;
         cmf->wz = temp2 * cos - temp1 * sin;
     }
+#endif
 }
 
 /**
@@ -647,12 +696,19 @@ Mtx* Matrix_MtxFToNewMtx(MtxF* src, GraphicsContext* gfxCtx) {
 void Matrix_MultVec3f(Vec3f* src, Vec3f* dest) {
     MtxF* cmf = sCurrentMatrix;
 
+#if PLATFORM_PSP
+    OotPspVfpu_MtxFMultVec3f(cmf, src, dest);
+#else
     dest->x = cmf->xw + (cmf->xx * src->x + cmf->xy * src->y + cmf->xz * src->z);
     dest->y = cmf->yw + (cmf->yx * src->x + cmf->yy * src->y + cmf->yz * src->z);
     dest->z = cmf->zw + (cmf->zx * src->x + cmf->zy * src->y + cmf->zz * src->z);
+#endif
 }
 
 void Matrix_MtxFCopy(MtxF* dest, MtxF* src) {
+#if PLATFORM_PSP
+    OotPspVfpu_MtxFCopy(dest, src);
+#else
     dest->xx = src->xx;
     dest->yx = src->yx;
     dest->zx = src->zx;
@@ -685,6 +741,7 @@ void Matrix_MtxFCopy(MtxF* dest, MtxF* src) {
     dest->yw = src->yw;
     dest->zw = src->zw;
     dest->ww = src->ww;
+#endif
 }
 
 void Matrix_MtxToMtxF(Mtx* src, MtxF* dest) {
@@ -714,9 +771,13 @@ void Matrix_MtxToMtxF(Mtx* src, MtxF* dest) {
 }
 
 void Matrix_MultVec3fExt(Vec3f* src, Vec3f* dest, MtxF* mf) {
+#if PLATFORM_PSP
+    OotPspVfpu_MtxFMultVec3f(mf, src, dest);
+#else
     dest->x = mf->xw + (mf->xx * src->x + mf->xy * src->y + mf->xz * src->z);
     dest->y = mf->yw + (mf->yx * src->x + mf->yy * src->y + mf->yz * src->z);
     dest->z = mf->zw + (mf->zx * src->x + mf->zy * src->y + mf->zz * src->z);
+#endif
 }
 
 void Matrix_Transpose(MtxF* mf) {
@@ -745,6 +806,9 @@ void Matrix_Transpose(MtxF* mf) {
  */
 void Matrix_ReplaceRotation(MtxF* mf) {
     MtxF* cmf = sCurrentMatrix;
+#if PLATFORM_PSP
+    OotPspVfpu_MtxFReplaceRotation(cmf, mf);
+#else
     f32 acc;
     f32 temp;
     f32 curColNorm;
@@ -787,6 +851,7 @@ void Matrix_ReplaceRotation(MtxF* mf) {
     cmf->xz = mf->xz * curColNorm;
     cmf->yz = mf->yz * curColNorm;
     cmf->zz = mf->zz * curColNorm;
+#endif
 }
 
 /**
