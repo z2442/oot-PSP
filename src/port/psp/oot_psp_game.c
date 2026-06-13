@@ -294,32 +294,11 @@ static void OotPsp_UpdateCurrentThreadStackRange(void) {
     }
 }
 
-static __attribute__((noinline)) int OotPsp_IsCurrentThreadStackRange(const void* ptr, size_t size) {
+int OotPsp_IsRuntimeByteRangeSlow(uintptr_t start, uintptr_t end) {
     OotPsp_UpdateCurrentThreadStackRange();
 
-    return OotPsp_IsContainedRange(ptr, size, sPspStackStart, sPspStackEnd) ||
-           OotPsp_IsContainedRange(ptr, size, sPspStackAltStart, sPspStackAltEnd);
-}
-
-int OotPsp_IsRuntimeByteRange(const void* ptr, size_t size) {
-    uintptr_t start = (uintptr_t)ptr;
-    uintptr_t end;
-
-    if ((ptr == NULL) || (size == 0) || (start > UINTPTR_MAX - size)) {
-        return false;
-    }
-
-    end = start + size;
-
-    /*
-     * The system heap and graphics pools both live in BSS. Check that range
-     * before querying the PSP kernel for the current thread's stack.
-     */
-    if ((start >= (uintptr_t)__bss_start) && (end <= (uintptr_t)_end)) {
-        return true;
-    }
-
-    return OotPsp_IsCurrentThreadStackRange(ptr, size);
+    return ((start >= sPspStackStart) && (end <= sPspStackEnd)) ||
+           ((start >= sPspStackAltStart) && (end <= sPspStackAltEnd));
 }
 
 static s32 OotPsp_AddressLooksSegmented(uintptr_t addr, u32 segment) {

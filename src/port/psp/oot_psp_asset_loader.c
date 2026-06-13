@@ -48,9 +48,14 @@ typedef struct OotPspLoadedAssetRange {
     u32 serial;
 } OotPspLoadedAssetRange;
 
-typedef struct OotPspAssetRangeSerialCacheEntry {
+typedef struct OotPspLoadedAssetSerialRange {
     uintptr_t ramStart;
     uintptr_t ramEnd;
+    u32 serial;
+} OotPspLoadedAssetSerialRange;
+
+typedef struct OotPspAssetRangeSerialCacheEntry {
+    uintptr_t ramStart;
     u32 serial;
     u32 generation;
 } OotPspAssetRangeSerialCacheEntry;
@@ -95,11 +100,14 @@ static size_t sOotPspPackedCacheBlockCount;
 static s32 sOotPspPackedCacheInitTried = false;
 static OotPspPackedAssetCacheBlock sOotPspPackedCacheBlocks[OOT_PSP_PACKED_CACHE_MAX_BLOCK_COUNT];
 static OotPspLoadedAssetRange sOotPspLoadedAssetRanges[OOT_PSP_LOADED_ASSET_RANGE_COUNT];
+static OotPspLoadedAssetSerialRange sOotPspLoadedAssetSerialRanges[OOT_PSP_LOADED_ASSET_RANGE_COUNT];
 static const OotPspLoadedAssetRange* sOotPspNativeTextureRangeCache[OOT_PSP_NATIVE_TEXTURE_RANGE_CACHE_COUNT];
 static OotPspAssetRangeSerialCacheEntry sOotPspAssetRangeSerialCache[OOT_PSP_ASSET_RANGE_SERIAL_CACHE_SET_COUNT]
                                                                 [OOT_PSP_ASSET_RANGE_SERIAL_CACHE_WAYS];
 static u8 sOotPspAssetRangeSerialCacheNext[OOT_PSP_ASSET_RANGE_SERIAL_CACHE_SET_COUNT];
 static u32 sOotPspAssetRangeSerialCacheGeneration = 1;
+static size_t sOotPspLoadedAssetSerialRangeCount;
+static s32 sOotPspLoadedAssetSerialRangeIndexComplete = true;
 static size_t sOotPspNativeTextureRangeCacheNext;
 static size_t sOotPspLoadedAssetRangeNext;
 static u32 sOotPspLoadedAssetSerial = 1;
@@ -145,8 +153,8 @@ static void OotPsp_UnlockAssetLoader(void) {
     }
 }
 
-static size_t OotPsp_AssetRangeSerialCacheIndex(uintptr_t ramStart, uintptr_t ramEnd) {
-    uintptr_t key = (ramStart >> 4) ^ (ramEnd >> 4) ^ (ramStart >> 12) ^ (ramEnd << 5);
+static size_t OotPsp_AssetRangeSerialCacheIndex(uintptr_t ramStart) {
+    uintptr_t key = (ramStart >> 4) ^ (ramStart >> 12) ^ (ramStart >> 20);
 
     return (size_t)(key & (OOT_PSP_ASSET_RANGE_SERIAL_CACHE_SET_COUNT - 1));
 }
@@ -159,16 +167,15 @@ static void OotPsp_ClearAssetRangeSerialCache(void) {
     }
 }
 
-static s32 OotPsp_GetCachedAssetRangeSerial(uintptr_t ramStart, uintptr_t ramEnd, u32* serial) {
+static s32 OotPsp_GetCachedAssetRangeSerial(uintptr_t ramStart, u32* serial) {
     const OotPspAssetRangeSerialCacheEntry* set =
-        sOotPspAssetRangeSerialCache[OotPsp_AssetRangeSerialCacheIndex(ramStart, ramEnd)];
+        sOotPspAssetRangeSerialCache[OotPsp_AssetRangeSerialCacheIndex(ramStart)];
     size_t way;
 
     for (way = 0; way < OOT_PSP_ASSET_RANGE_SERIAL_CACHE_WAYS; way++) {
         const OotPspAssetRangeSerialCacheEntry* entry = &set[way];
 
-        if ((entry->generation == sOotPspAssetRangeSerialCacheGeneration) && (entry->ramStart == ramStart) &&
-            (entry->ramEnd == ramEnd)) {
+        if ((entry->generation == sOotPspAssetRangeSerialCacheGeneration) && (entry->ramStart == ramStart)) {
             *serial = entry->serial;
             return true;
         }
@@ -177,13 +184,12 @@ static s32 OotPsp_GetCachedAssetRangeSerial(uintptr_t ramStart, uintptr_t ramEnd
     return false;
 }
 
-static void OotPsp_RememberAssetRangeSerial(uintptr_t ramStart, uintptr_t ramEnd, u32 serial) {
-    size_t setIndex = OotPsp_AssetRangeSerialCacheIndex(ramStart, ramEnd);
+static void OotPsp_RememberAssetRangeSerial(uintptr_t ramStart, u32 serial) {
+    size_t setIndex = OotPsp_AssetRangeSerialCacheIndex(ramStart);
     size_t way = sOotPspAssetRangeSerialCacheNext[setIndex];
     OotPspAssetRangeSerialCacheEntry* entry = &sOotPspAssetRangeSerialCache[setIndex][way];
 
     entry->ramStart = ramStart;
-    entry->ramEnd = ramEnd;
     entry->serial = serial;
     entry->generation = sOotPspAssetRangeSerialCacheGeneration;
     sOotPspAssetRangeSerialCacheNext[setIndex] =
@@ -1037,15 +1043,108 @@ static s32 OotPsp_RamRangeFromPtr(const void* ptr, size_t size, uintptr_t* ramSt
     return true;
 }
 
+static s32 OotPsp_ClearLoadedAssetSerialRanges(uintptr_t ramStart, uintptr_t ramEnd) {
+    size_t left = 0;
+    size_t right = sOotPspLoadedAssetSerialRangeCount;
+    size_t first;
+    size_t last;
+
+    while (left < right) {
+        size_t mid = left + ((right - left) / 2);
+
+        if (sOotPspLoadedAssetSerialRanges[mid].ramEnd <= ramStart) {
+            left = mid + 1;
+        } else {
+            right = mid;
+        }
+    }
+
+    first = left;
+    last = first;
+    while ((last < sOotPspLoadedAssetSerialRangeCount) &&
+           (sOotPspLoadedAssetSerialRanges[last].ramStart < ramEnd)) {
+        last++;
+    }
+
+    if (first == last) {
+        return false;
+    }
+
+    if (last < sOotPspLoadedAssetSerialRangeCount) {
+        memmove(&sOotPspLoadedAssetSerialRanges[first], &sOotPspLoadedAssetSerialRanges[last],
+                (sOotPspLoadedAssetSerialRangeCount - last) * sizeof(sOotPspLoadedAssetSerialRanges[0]));
+    }
+    sOotPspLoadedAssetSerialRangeCount -= last - first;
+    return true;
+}
+
+static void OotPsp_StoreLoadedAssetSerialRange(uintptr_t ramStart, uintptr_t ramEnd, u32 serial) {
+    size_t left = 0;
+    size_t right = sOotPspLoadedAssetSerialRangeCount;
+    size_t insertIndex;
+
+    if (sOotPspLoadedAssetSerialRangeCount >= OOT_PSP_LOADED_ASSET_RANGE_COUNT) {
+        sOotPspLoadedAssetSerialRangeIndexComplete = false;
+        return;
+    }
+
+    while (left < right) {
+        size_t mid = left + ((right - left) / 2);
+
+        if (sOotPspLoadedAssetSerialRanges[mid].ramStart < ramStart) {
+            left = mid + 1;
+        } else {
+            right = mid;
+        }
+    }
+
+    insertIndex = left;
+    if (insertIndex < sOotPspLoadedAssetSerialRangeCount) {
+        memmove(&sOotPspLoadedAssetSerialRanges[insertIndex + 1],
+                &sOotPspLoadedAssetSerialRanges[insertIndex],
+                (sOotPspLoadedAssetSerialRangeCount - insertIndex) * sizeof(sOotPspLoadedAssetSerialRanges[0]));
+    }
+
+    sOotPspLoadedAssetSerialRanges[insertIndex].ramStart = ramStart;
+    sOotPspLoadedAssetSerialRanges[insertIndex].ramEnd = ramEnd;
+    sOotPspLoadedAssetSerialRanges[insertIndex].serial = serial;
+    sOotPspLoadedAssetSerialRangeCount++;
+}
+
+static u32 OotPsp_FindLoadedAssetRangeSerial(uintptr_t ramStart) {
+    size_t left = 0;
+    size_t right = sOotPspLoadedAssetSerialRangeCount;
+    const OotPspLoadedAssetSerialRange* range;
+
+    while (left < right) {
+        size_t mid = left + ((right - left) / 2);
+
+        if (sOotPspLoadedAssetSerialRanges[mid].ramStart <= ramStart) {
+            left = mid + 1;
+        } else {
+            right = mid;
+        }
+    }
+
+    if (left == 0) {
+        return 0;
+    }
+
+    range = &sOotPspLoadedAssetSerialRanges[left - 1];
+    return (ramStart < range->ramEnd) ? range->serial : 0;
+}
+
 static void OotPsp_ClearLoadedAssetRange(void* ram, size_t size) {
     uintptr_t ramStart;
     uintptr_t ramEnd;
     size_t i;
-    s32 cleared = false;
+    s32 cleared;
 
     if (!OotPsp_RamRangeFromPtr(ram, size, &ramStart, &ramEnd)) {
         return;
     }
+
+    cleared = OotPsp_ClearLoadedAssetSerialRanges(ramStart, ramEnd);
 
     for (i = 0; i < OOT_PSP_LOADED_ASSET_RANGE_COUNT; i++) {
         OotPspLoadedAssetRange* range = &sOotPspLoadedAssetRanges[i];
@@ -1096,7 +1195,6 @@ static void OotPsp_StoreLoadedAssetRange(void* ram, size_t size, uintptr_t asset
     range->assetOffsetStart = assetOffsetStart;
     range->flags = flags;
     range->serial = serial;
-    OotPsp_ClearAssetRangeSerialCache();
 }
 
 static void OotPsp_ForgetNativeTextureRangeCache(const OotPspLoadedAssetRange* range) {
@@ -1191,6 +1289,8 @@ static void OotPsp_RegisterLoadedAssetRanges(void* ram, size_t size, uintptr_t v
     OotPsp_ClearLoadedAssetRange(ram, size);
     OotPsp_StoreLoadedAssetRange((void*)ramStart, size, vromStart, asset->flags & ~OOT_PSP_EXTERNAL_ASSET_TEXTURE_WORDS,
                                  serial);
+    OotPsp_StoreLoadedAssetSerialRange(ramStart, ramEnd, serial);
+    OotPsp_ClearAssetRangeSerialCache();
 
     if ((asset->flags & (OOT_PSP_EXTERNAL_ASSET_NATIVE | OOT_PSP_EXTERNAL_ASSET_TEXTURE_WORDS)) !=
         (OOT_PSP_EXTERNAL_ASSET_NATIVE | OOT_PSP_EXTERNAL_ASSET_TEXTURE_WORDS)) {
@@ -1554,37 +1654,32 @@ s32 OotPsp_IsNativeExternalTextureByte(const void* ptr) {
 u32 OotPsp_GetExternalAssetRangeSerial(const void* ptr, size_t size) {
     uintptr_t ramStart;
     uintptr_t ramEnd;
-    size_t i;
     u32 serial;
 
     if (!OotPsp_RamRangeFromPtr(ptr, size, &ramStart, &ramEnd)) {
         return 0;
     }
 
-    if (OotPsp_GetCachedAssetRangeSerial(ramStart, ramEnd, &serial)) {
+    if (OotPsp_GetCachedAssetRangeSerial(ramStart, &serial)) {
         return serial;
     }
 
-    for (i = 0; i < OOT_PSP_LOADED_ASSET_RANGE_COUNT; i++) {
-        const OotPspLoadedAssetRange* range = &sOotPspLoadedAssetRanges[i];
+    serial = OotPsp_FindLoadedAssetRangeSerial(ramStart);
+    if ((serial == 0) && !sOotPspLoadedAssetSerialRangeIndexComplete) {
+        size_t i;
 
-        if ((range->serial != 0) && OotPsp_RangeContains(range->ramStart, range->ramEnd, ramStart, ramEnd)) {
-            OotPsp_RememberAssetRangeSerial(ramStart, ramEnd, range->serial);
-            return range->serial;
+        for (i = 0; i < OOT_PSP_LOADED_ASSET_RANGE_COUNT; i++) {
+            const OotPspLoadedAssetRange* range = &sOotPspLoadedAssetRanges[i];
+
+            if ((range->serial != 0) && (ramStart >= range->ramStart) && (ramStart < range->ramEnd)) {
+                serial = range->serial;
+                break;
+            }
         }
     }
 
-    for (i = 0; i < OOT_PSP_LOADED_ASSET_RANGE_COUNT; i++) {
-        const OotPspLoadedAssetRange* range = &sOotPspLoadedAssetRanges[i];
-
-        if ((range->serial != 0) && (ramStart >= range->ramStart) && (ramStart < range->ramEnd)) {
-            OotPsp_RememberAssetRangeSerial(ramStart, ramEnd, range->serial);
-            return range->serial;
-        }
-    }
-
-    OotPsp_RememberAssetRangeSerial(ramStart, ramEnd, 0);
-    return 0;
+    OotPsp_RememberAssetRangeSerial(ramStart, serial);
+    return serial;
 }
 
 s32 OotPsp_MapNativeExternalTextureByte(const void* ptr, const void** mapped) {

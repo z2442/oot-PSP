@@ -3424,7 +3424,8 @@ static inline bool gfx_addr_looks_segmented(uintptr_t addr) {
     return offset < PSP_SEGMENTED_COLLISION_OFFSET_MAX;
 }
 
-static inline bool gfx_try_normalize_prx_relocated_segmented_addr(uintptr_t addr, uintptr_t* normalizedAddr) {
+static inline __attribute__((always_inline)) bool gfx_try_normalize_prx_relocated_segmented_addr(
+    uintptr_t addr, uintptr_t* normalizedAddr) {
     uintptr_t candidate;
     uint8_t segment;
 
