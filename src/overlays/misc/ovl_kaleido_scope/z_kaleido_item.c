@@ -4,6 +4,7 @@
 #include "controller.h"
 #include "gfx.h"
 #include "gfx_setupdl.h"
+#include "interface.h"
 #include "printf.h"
 #include "regs.h"
 #include "sfx.h"
@@ -12,6 +13,12 @@
 #include "save.h"
 
 #include "assets/textures/parameter_static/parameter_static.h"
+
+#if PLATFORM_PSP
+#define AMMO_DIGIT_TEXTURE(digit) gAmmoDigitTextures[(digit)]
+#else
+#define AMMO_DIGIT_TEXTURE(digit) ((u8*)gAmmoDigit0Tex + (8 * 8 * (digit)))
+#endif
 
 u8 gAmmoItems[] = {
     ITEM_DEKU_STICK, // SLOT_DEKU_STICK
@@ -92,16 +99,16 @@ void KaleidoScope_DrawAmmoCount(PauseContext* pauseCtx, GraphicsContext* gfxCtx,
     if (ammoTens != 0) {
         gSPVertex(POLY_OPA_DISP++, &pauseCtx->itemVtx[(ITEM_QUAD_AMMO_FIRST + sAmmoVtxOffset[item] + 0) * 4], 4, 0);
 
-        gDPLoadTextureBlock(POLY_OPA_DISP++, ((u8*)gAmmoDigit0Tex + (8 * 8 * ammoTens)), G_IM_FMT_IA, G_IM_SIZ_8b, 8, 8,
-                            0, G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMASK, G_TX_NOMASK,
-                            G_TX_NOLOD, G_TX_NOLOD);
+        gDPLoadTextureBlock(POLY_OPA_DISP++, AMMO_DIGIT_TEXTURE(ammoTens), G_IM_FMT_IA, G_IM_SIZ_8b, 8, 8, 0,
+                            G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD,
+                            G_TX_NOLOD);
 
         gSP1Quadrangle(POLY_OPA_DISP++, 0, 2, 3, 1, 0);
     }
 
     gSPVertex(POLY_OPA_DISP++, &pauseCtx->itemVtx[(ITEM_QUAD_AMMO_FIRST + sAmmoVtxOffset[item] + 1) * 4], 4, 0);
 
-    gDPLoadTextureBlock(POLY_OPA_DISP++, ((u8*)gAmmoDigit0Tex + (8 * 8 * ammo)), G_IM_FMT_IA, G_IM_SIZ_8b, 8, 8, 0,
+    gDPLoadTextureBlock(POLY_OPA_DISP++, AMMO_DIGIT_TEXTURE(ammo), G_IM_FMT_IA, G_IM_SIZ_8b, 8, 8, 0,
                         G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD,
                         G_TX_NOLOD);
 

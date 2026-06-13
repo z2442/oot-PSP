@@ -55,6 +55,24 @@ static void* sCounterDigitTextures[] = {
 #define COUNTER_DIGIT_TEXTURE(digit) ((u8*)gCounterDigit0Tex + (8 * 16 * (digit)))
 #endif
 
+#if PLATFORM_PSP
+void* gAmmoDigitTextures[] = {
+    gAmmoDigit0Tex,
+    gAmmoDigit1Tex,
+    gAmmoDigit2Tex,
+    gAmmoDigit3Tex,
+    gAmmoDigit4Tex,
+    gAmmoDigit5Tex,
+    gAmmoDigit6Tex,
+    gAmmoDigit7Tex,
+    gAmmoDigit8Tex,
+    gAmmoDigit9Tex,
+};
+#define AMMO_DIGIT_TEXTURE(digit) gAmmoDigitTextures[(digit)]
+#else
+#define AMMO_DIGIT_TEXTURE(digit) ((u8*)gAmmoDigit0Tex + (8 * 8 * (digit)))
+#endif
+
 typedef struct RestrictionFlags {
     /* 0x00 */ u8 sceneId;
     /* 0x01 */ u8 flags1;
@@ -3177,11 +3195,11 @@ void Interface_DrawAmmoCount(PlayState* play, s16 button, s16 alpha) {
         }
 
         if (i != 0) {
-            OVERLAY_DISP = Gfx_TextureIA8(OVERLAY_DISP, ((u8*)gAmmoDigit0Tex + ((8 * 8) * i)), 8, 8,
+            OVERLAY_DISP = Gfx_TextureIA8(OVERLAY_DISP, AMMO_DIGIT_TEXTURE(i), 8, 8,
                                           R_ITEM_AMMO_X(button), R_ITEM_AMMO_Y(button), 8, 8, 1 << 10, 1 << 10);
         }
 
-        OVERLAY_DISP = Gfx_TextureIA8(OVERLAY_DISP, ((u8*)gAmmoDigit0Tex + ((8 * 8) * ammo)), 8, 8,
+        OVERLAY_DISP = Gfx_TextureIA8(OVERLAY_DISP, AMMO_DIGIT_TEXTURE(ammo), 8, 8,
                                       R_ITEM_AMMO_X(button) + 6, R_ITEM_AMMO_Y(button), 8, 8, 1 << 10, 1 << 10);
     }
 
