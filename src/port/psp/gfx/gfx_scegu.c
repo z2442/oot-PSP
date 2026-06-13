@@ -339,6 +339,11 @@ static inline int texenv_set_texture(UNUSED struct ShaderProgram *prg) {
 
 static inline int texenv_set_texture_color(struct ShaderProgram *prg) {
     int mode;
+
+    if (prg->cc.opt_texture_blend) {
+        return GU_TFX_BLEND;
+    }
+
     /*@Hack: lord forgive me for this, but this is easier */
     switch (prg->shader_id) {
         case 0x0000038D: // mario's eyes
@@ -550,6 +555,12 @@ static void gfx_scegu_set_sampler_parameters(const int tile, const bool linear_f
     if (active_texture_tile == tile) {
         gfx_scegu_apply_tmu_state(tile);
     }
+}
+
+static void gfx_scegu_set_texture_env_color(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+    uint32_t color = (uint32_t)r | ((uint32_t)g << 8) | ((uint32_t)b << 16) | ((uint32_t)a << 24);
+
+    sceGuTexEnvColor(color);
 }
 
 static void gfx_scegu_select_texture(int tile, uint32_t texture_id) {
@@ -883,6 +894,7 @@ struct GfxRenderingAPI gfx_scegu_api = {
     gfx_scegu_select_texture,
     gfx_scegu_upload_texture,
     gfx_scegu_set_sampler_parameters,
+    gfx_scegu_set_texture_env_color,
     gfx_scegu_set_depth_test,
     gfx_scegu_set_depth_mask,
     gfx_scegu_set_zmode_decal,

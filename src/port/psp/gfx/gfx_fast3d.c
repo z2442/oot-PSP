@@ -151,6 +151,7 @@ struct ColorCombiner {
     uint8_t used_textures[2];
     int8_t active_texture;
     uint8_t vertex_color_source[2];
+    bool texture_blend;
 } __attribute__((packed, aligned(4)));
 
 static struct ColorCombiner color_combiner_pool[64];
@@ -1120,6 +1121,10 @@ static void gfx_generate_cc(struct ColorCombiner *comb, uint32_t cc_id) {
         gfx_cc_pick_vertex_color_source(c[0], shader_input_mapping[0], shader_input_count[0]);
     comb->vertex_color_source[1] =
         gfx_cc_pick_vertex_color_source(c[1], shader_input_mapping[1], shader_input_count[1]);
+    comb->texture_blend = cc_features.opt_texture_blend;
+    if (cc_features.opt_texture_blend) {
+        comb->vertex_color_source[0] = CC_ENV;
+    }
 }
 
 static inline struct RGBA gfx_get_vertex_color(const struct ColorCombiner *comb, bool use_alpha, const struct RGBA *shade_color, float lod_w, bool allow_lod) {
@@ -1939,6 +1944,10 @@ static void gfx_prepare_tri_pipeline_state(void) {
         gfx_flush();
         gfx_rapi->set_use_alpha(alpha_blend);
         rendering_state.alpha_blend = alpha_blend;
+    }
+    if (comb->texture_blend) {
+        gfx_flush();
+        gfx_rapi->set_texture_env_color(rdp.prim_color.r, rdp.prim_color.g, rdp.prim_color.b, rdp.prim_color.a);
     }
 
     const bool used_textures[2] = {comb->used_textures[0], comb->used_textures[1]};
@@ -3115,8 +3124,17 @@ static bool gfx_cc_is_two_cycle_texture_tint(uint32_t a0, uint32_t b0, uint32_t 
            (d1 == G_CCMUX_ENVIRONMENT);
 }
 
-static void gfx_dp_set_combine_mode(uint32_t rgb, uint32_t alpha, bool color_mul_env, bool color_mul_prim) {
+static bool gfx_cc_is_texture_prim_env_blend(uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
+    return (a == G_CCMUX_PRIMITIVE) && (b == G_CCMUX_ENVIRONMENT) && (c == G_CCMUX_TEXEL0) &&
+           (d == G_CCMUX_ENVIRONMENT);
+}
+
+static void gfx_dp_set_combine_mode(uint32_t rgb, uint32_t alpha, bool color_mul_env, bool color_mul_prim,
+                                    bool texture_blend) {
     rdp.combine_mode = rgb | (alpha << 12);
+    if (texture_blend) {
+        rdp.combine_mode |= SHADER_OPT_TEXTURE_BLEND;
+    }
     rdp.combine_color_mul_env = color_mul_env;
     rdp.combine_color_mul_prim = color_mul_prim;
     gfx_mark_tri_pipeline_dirty();
@@ -3130,10 +3148,16 @@ static void gfx_dp_set_env_color(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
 }
 
 static void gfx_dp_set_prim_color(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+    if ((rdp.prim_color.r == r) && (rdp.prim_color.g == g) && (rdp.prim_color.b == b) &&
+        (rdp.prim_color.a == a)) {
+        return;
+    }
+
     rdp.prim_color.r = r;
     rdp.prim_color.g = g;
     rdp.prim_color.b = b;
     rdp.prim_color.a = a;
+    gfx_mark_tri_pipeline_dirty();
 }
 
 static void gfx_dp_set_fog_color(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
@@ -3256,7 +3280,7 @@ static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int3
         
         // Color combiner is turned off in copy mode
         gfx_dp_set_combine_mode(color_comb(0, 0, 0, G_CCMUX_TEXEL0), color_comb(0, 0, 0, G_ACMUX_TEXEL0),
-                                false, false);
+                                false, false, false);
         
         // Per documentation one extra pixel is added in this modes to each edge
         lrx += 1 << 2;
@@ -3327,7 +3351,8 @@ static void gfx_dp_fill_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t
     bool saved_combine_color_mul_env = rdp.combine_color_mul_env;
     bool saved_combine_color_mul_prim = rdp.combine_color_mul_prim;
     if (use_fill_color) {
-        gfx_dp_set_combine_mode(color_comb(0, 0, 0, G_CCMUX_SHADE), color_comb(0, 0, 0, G_ACMUX_SHADE), false, false);
+        gfx_dp_set_combine_mode(color_comb(0, 0, 0, G_CCMUX_SHADE), color_comb(0, 0, 0, G_ACMUX_SHADE), false, false,
+                                false);
     }
     gfx_draw_rectangle(ulx, uly, lrx, lry, gfx_rectangle_covers_screen(ulx, uly, lrx, lry),
                        gfx_rectangle_covers_width(ulx, lrx));
@@ -3839,7 +3864,7 @@ static void gfx_sp_s2dex_bg_rect(uint32_t opcode, const void* bgAddr) {
     savedColorMulPrim = rdp.combine_color_mul_prim;
     if ((rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_COPY) {
         gfx_dp_set_combine_mode(color_comb(0, 0, 0, G_CCMUX_TEXEL0), color_comb(0, 0, 0, G_ACMUX_TEXEL0), false,
-                                false);
+                                false, false);
     }
 
     gfx_draw_rectangle(frameX, frameY, frameX + frameW, frameY + frameH, false, false);
@@ -4108,6 +4133,7 @@ static void gfx_run_dl(Gfx* cmd) {
                     colorMulTexelShade &&
                     (rgbA1 == G_CCMUX_COMBINED) && (rgbB1 == (G_CCMUX_0 & 0xF)) &&
                     (rgbC1 == G_CCMUX_PRIMITIVE) && (rgbD1 == (G_CCMUX_0 & 0x7));
+                bool textureBlend = gfx_cc_is_texture_prim_env_blend(rgbA0, rgbB0, rgbC0, rgbD0);
                 uint32_t rgbComb = color_comb(rgbA0, rgbB0, rgbC0, rgbD0);
                 uint32_t alphaComb = color_comb(alphaA0, alphaB0, alphaC0, alphaD0);
 
@@ -4118,7 +4144,7 @@ static void gfx_run_dl(Gfx* cmd) {
                 }
 #endif
 
-                gfx_dp_set_combine_mode(rgbComb, alphaComb, colorMulEnv, colorMulPrim);
+                gfx_dp_set_combine_mode(rgbComb, alphaComb, colorMulEnv, colorMulPrim, textureBlend);
                     /*color_comb(C0(5, 4), C1(24, 4), C0(0, 5), C1(6, 3)),
                     color_comb(C1(21, 3), C1(3, 3), C1(18, 3), C1(0, 3)));*/
                 break;
