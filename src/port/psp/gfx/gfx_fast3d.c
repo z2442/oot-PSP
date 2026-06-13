@@ -414,6 +414,22 @@ static bool gfx_is_valid_native_dl_range(uintptr_t value, size_t size) {
     return false;
 }
 
+static bool gfx_is_valid_native_read_range(uintptr_t value, size_t size) {
+    if (!gfx_native_range_contains(value, size)) {
+        return false;
+    }
+
+    if (gfx_is_static_prx_range(value, size) || gfx_is_graph_pool_range(value, size)) {
+        return true;
+    }
+
+    if (OotPsp_IsRuntimeByteRange((const void*)value, size)) {
+        return true;
+    }
+
+    return OotPsp_IsLoadedNativeExternalAssetRange((const void*)value, size);
+}
+
 static void gfx_log_bad_data_source(const char* context, const void* addr, size_t sizeBytes) {
     static s32 sBadDataSourceLogCount = 0;
     uintptr_t value = (uintptr_t)addr;
@@ -451,7 +467,8 @@ static void gfx_log_bad_data_source(const char* context, const void* addr, size_
 static bool gfx_normalize_read_source(const void* addr, size_t sizeBytes, const char* context, const void** normalized) {
     uintptr_t normalizedValue;
 
-    if (gfx_normalize_native_range((uintptr_t)addr, sizeBytes, &normalizedValue)) {
+    if (gfx_normalize_native_range((uintptr_t)addr, sizeBytes, &normalizedValue) &&
+        gfx_is_valid_native_read_range(normalizedValue, sizeBytes)) {
         *normalized = (const void*)normalizedValue;
         return true;
     }
@@ -501,7 +518,8 @@ static void gfx_log_bad_texture_source(int tile, const char* context, const uint
 static bool gfx_normalize_texture_source(const uint8_t** addr, uint32_t sizeBytes) {
     uintptr_t normalized;
 
-    if (gfx_normalize_native_range((uintptr_t)*addr, sizeBytes, &normalized)) {
+    if (gfx_normalize_native_range((uintptr_t)*addr, sizeBytes, &normalized) &&
+        gfx_is_valid_native_read_range(normalized, sizeBytes)) {
         *addr = (const uint8_t*)normalized;
         return true;
     }

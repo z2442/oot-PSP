@@ -24,6 +24,13 @@
 
 #define FLAGS ACTOR_FLAG_UPDATE_CULLING_DISABLED
 
+#if PLATFORM_PSP
+#define ENPART_DISPLAY_LIST_MATCHES(this, dList) \
+    (((this)->displayList == (dList)) || ((this)->displayList == SEGMENTED_TO_VIRTUAL(dList)))
+#else
+#define ENPART_DISPLAY_LIST_MATCHES(this, dList) ((this)->displayList == (dList))
+#endif
+
 void EnPart_Init(Actor* thisx, PlayState* play);
 void EnPart_Destroy(Actor* thisx, PlayState* play);
 void EnPart_Update(Actor* thisx, PlayState* play);
@@ -101,7 +108,7 @@ void func_80ACDDE8(EnPart* this, PlayState* play) {
         case 7:
         case 8:
             this->actor.world.rot.y = this->actor.parent->shape.rot.y;
-            if (this->displayList == object_ik_DL_015380) {
+            if (ENPART_DISPLAY_LIST_MATCHES(this, object_ik_DL_015380)) {
                 sign = -1.0f;
             }
             this->actor.velocity.y = 0.0f;
@@ -317,11 +324,11 @@ void EnPart_Draw(Actor* thisx, PlayState* play) {
         gSPSegment(POLY_OPA_DISP++, 0x08, func_80ACEAC0(play->state.gfxCtx, 255, 255, 255, 180, 180, 180));
         gSPSegment(POLY_OPA_DISP++, 0x09, func_80ACEAC0(play->state.gfxCtx, 225, 205, 115, 25, 20, 0));
         gSPSegment(POLY_OPA_DISP++, 0x0A, func_80ACEAC0(play->state.gfxCtx, 225, 205, 115, 25, 20, 0));
-    } else if ((thisx->params == 9) && (this->displayList == object_tite_DL_002FF0)) {
+    } else if ((thisx->params == 9) && ENPART_DISPLAY_LIST_MATCHES(this, object_tite_DL_002FF0)) {
         gSPSegment(POLY_OPA_DISP++, 0x08, SEGMENTED_TO_VIRTUAL(object_tite_Tex_001300));
         gSPSegment(POLY_OPA_DISP++, 0x09, SEGMENTED_TO_VIRTUAL(object_tite_Tex_001700));
         gSPSegment(POLY_OPA_DISP++, 0x0A, SEGMENTED_TO_VIRTUAL(object_tite_Tex_001900));
-    } else if ((thisx->params == 10) && (this->displayList == object_tite_DL_002FF0)) {
+    } else if ((thisx->params == 10) && ENPART_DISPLAY_LIST_MATCHES(this, object_tite_DL_002FF0)) {
         gSPSegment(POLY_OPA_DISP++, 0x08, SEGMENTED_TO_VIRTUAL(object_tite_Tex_001B00));
         gSPSegment(POLY_OPA_DISP++, 0x09, SEGMENTED_TO_VIRTUAL(object_tite_Tex_001F00));
         gSPSegment(POLY_OPA_DISP++, 0x0A, SEGMENTED_TO_VIRTUAL(object_tite_Tex_002100));
