@@ -3306,7 +3306,12 @@ void Message_DrawMain(PlayState* play, Gfx** p) {
                     SFX_PLAY_CENTERED(NA_SE_SY_OCARINA_ERROR);
                     msgCtx->stateTimer = 10;
                     msgCtx->msgMode = MSGMODE_OCARINA_FAIL;
-                } else if (CHECK_BTN_ALL(input->press.button, BTN_B)) {
+                } else if (CHECK_BTN_ALL(input->press.button, BTN_B)
+#if PLATFORM_PSP
+                           || (msgCtx->ocarinaAction == OCARINA_ACTION_FREE_PLAY &&
+                               CHECK_BTN_ALL(input->cur.button, BTN_B))
+#endif
+                ) {
                     AudioOcarina_SetInstrument(OCARINA_INSTRUMENT_OFF);
                     play->msgCtx.ocarinaMode = OCARINA_MODE_04;
                     Message_CloseTextbox(play);
