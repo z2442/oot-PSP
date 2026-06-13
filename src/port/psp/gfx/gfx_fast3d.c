@@ -3164,6 +3164,15 @@ static bool gfx_cc_is_texture_prim_env_blend(uint32_t a, uint32_t b, uint32_t c,
            (d == G_CCMUX_ENVIRONMENT);
 }
 
+static bool gfx_cc_is_one(uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
+    return (a == G_ACMUX_0) && (b == G_ACMUX_0) && (c == G_ACMUX_0) && (d == G_ACMUX_1);
+}
+
+static bool gfx_cc_is_combined_mul_primitive(uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
+    return (a == G_ACMUX_COMBINED) && (b == G_ACMUX_0) && (c == G_ACMUX_PRIMITIVE) &&
+           (d == G_ACMUX_0);
+}
+
 static void gfx_dp_set_combine_mode(uint32_t rgb, uint32_t alpha, bool color_mul_env, bool color_mul_prim,
                                     bool texture_blend) {
     rdp.combine_mode = rgb | (alpha << 12);
@@ -4158,6 +4167,10 @@ static void gfx_run_dl(Gfx* cmd) {
                 uint32_t rgbB1 = C1(24, 4);
                 uint32_t rgbC1 = C0(0, 5);
                 uint32_t rgbD1 = C1(6, 3);
+                uint32_t alphaA1 = C1(21, 3);
+                uint32_t alphaB1 = C1(3, 3);
+                uint32_t alphaC1 = C1(18, 3);
+                uint32_t alphaD1 = C1(0, 3);
                 bool colorMulTexelShade =
                     (rgbA0 == G_CCMUX_TEXEL0) && (rgbB0 == (G_CCMUX_0 & 0xF)) &&
                     (rgbC0 == G_CCMUX_SHADE) && (rgbD0 == (G_CCMUX_0 & 0x7));
@@ -4174,6 +4187,12 @@ static void gfx_run_dl(Gfx* cmd) {
                 uint32_t alphaComb = color_comb(alphaA0, alphaB0, alphaC0, alphaD0);
 
 #if defined(TARGET_PSP)
+                if (((rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE) &&
+                    gfx_cc_is_one(alphaA0, alphaB0, alphaC0, alphaD0) &&
+                    gfx_cc_is_combined_mul_primitive(alphaA1, alphaB1, alphaC1, alphaD1)) {
+                    alphaComb = color_comb(G_ACMUX_0, G_ACMUX_0, G_ACMUX_0, G_ACMUX_PRIMITIVE);
+                }
+
                 if (gfx_cc_is_two_cycle_texture_tint(rgbA0, rgbB0, rgbC0, rgbD0, rgbA1, rgbB1, rgbC1, rgbD1)) {
                     rgbComb = color_comb(G_CCMUX_TEXEL0, G_CCMUX_0, G_CCMUX_PRIMITIVE, G_CCMUX_0);
                     alphaComb = color_comb(G_ACMUX_TEXEL0, G_ACMUX_0, G_ACMUX_PRIMITIVE, G_ACMUX_0);
