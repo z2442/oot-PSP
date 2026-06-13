@@ -3155,12 +3155,16 @@ static void gfx_dp_set_fill_color(uint32_t packed_color) {
     rdp.fill_color.a = a * 255;
 }
 
-static bool gfx_rectangle_covers_screen(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry) {
-    return (ulx <= 0) && (uly <= 0) && (lrx >= ((SCREEN_WIDTH - 1) << 2)) &&
-           (lry >= ((SCREEN_HEIGHT - 1) << 2));
+static bool gfx_rectangle_covers_width(int32_t ulx, int32_t lrx) {
+    return (ulx <= 0) && (lrx >= ((SCREEN_WIDTH - 1) << 2));
 }
 
-static void gfx_draw_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, bool force_fullscreen) {
+static bool gfx_rectangle_covers_screen(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry) {
+    return gfx_rectangle_covers_width(ulx, lrx) && (uly <= 0) && (lry >= ((SCREEN_HEIGHT - 1) << 2));
+}
+
+static void gfx_draw_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, bool force_fullscreen,
+                               bool force_full_width) {
     uint32_t saved_other_mode_h = rdp.other_mode_h;
     uint32_t cycle_type = (rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE));
     
@@ -3185,16 +3189,20 @@ static void gfx_draw_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lr
         const float halfHeight = (float)gfx_current_dimensions.height * 0.5f;
         const float hudOffset = gfx_hud_anchor_offset_pixels();
 
-        ulxf = ulxf / (4.0f * HALF_SCREEN_WIDTH) - 1.0f;
         ulyf = (ulyf / (4.0f * HALF_SCREEN_HEIGHT)) - 1.0f;
-        lrxf = lrxf / (4.0f * HALF_SCREEN_WIDTH) - 1.0f;
         lryf = (lryf / (4.0f * HALF_SCREEN_HEIGHT)) - 1.0f;
 
-        ulxf = gfx_adjust_x_for_aspect_ratio(ulxf);
-        lrxf = gfx_adjust_x_for_aspect_ratio(lrxf);
-
-        ulxf = (ulxf * halfWidth) + halfWidth + hudOffset;
-        lrxf = (lrxf * halfWidth) + halfWidth + hudOffset;
+        if (force_full_width) {
+            ulxf = 0.0f;
+            lrxf = gfx_current_dimensions.width;
+        } else {
+            ulxf = ulxf / (4.0f * HALF_SCREEN_WIDTH) - 1.0f;
+            lrxf = lrxf / (4.0f * HALF_SCREEN_WIDTH) - 1.0f;
+            ulxf = gfx_adjust_x_for_aspect_ratio(ulxf);
+            lrxf = gfx_adjust_x_for_aspect_ratio(lrxf);
+            ulxf = (ulxf * halfWidth) + halfWidth + hudOffset;
+            lrxf = (lrxf * halfWidth) + halfWidth + hudOffset;
+        }
 
         ulyf = (ulyf * halfHeight) + halfHeight;
         lryf = (lryf * halfHeight) + halfHeight;
@@ -3289,7 +3297,7 @@ static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int3
     }
     #endif
     
-    gfx_draw_rectangle(ulx, uly, lrx, lry, false);
+    gfx_draw_rectangle(ulx, uly, lrx, lry, false, false);
     rdp.combine_mode = saved_combine_mode;
     rdp.combine_color_mul_env = saved_combine_color_mul_env;
     rdp.combine_color_mul_prim = saved_combine_color_mul_prim;
@@ -3321,7 +3329,8 @@ static void gfx_dp_fill_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t
     if (use_fill_color) {
         gfx_dp_set_combine_mode(color_comb(0, 0, 0, G_CCMUX_SHADE), color_comb(0, 0, 0, G_ACMUX_SHADE), false, false);
     }
-    gfx_draw_rectangle(ulx, uly, lrx, lry, gfx_rectangle_covers_screen(ulx, uly, lrx, lry));
+    gfx_draw_rectangle(ulx, uly, lrx, lry, gfx_rectangle_covers_screen(ulx, uly, lrx, lry),
+                       gfx_rectangle_covers_width(ulx, lrx));
     if (use_fill_color) {
         rdp.combine_mode = saved_combine_mode;
         rdp.combine_color_mul_env = saved_combine_color_mul_env;
@@ -3833,7 +3842,7 @@ static void gfx_sp_s2dex_bg_rect(uint32_t opcode, const void* bgAddr) {
                                 false);
     }
 
-    gfx_draw_rectangle(frameX, frameY, frameX + frameW, frameY + frameH, false);
+    gfx_draw_rectangle(frameX, frameY, frameX + frameW, frameY + frameH, false, false);
 
     rdp.combine_mode = savedCombineMode;
     rdp.combine_color_mul_env = savedColorMulEnv;
