@@ -680,17 +680,15 @@ static void gfx_upload_gu_matrix(int type, const float matrix[4][4]);
 #if defined(TARGET_PSP)
 static uint8_t psp_texture_stage_buf[256 * 256 * 4] __attribute__((aligned(16)));
 
-static uint32_t gfx_next_power_of_two(uint32_t value) {
-    uint32_t result = 1;
-
-    while (result < value) {
-        result <<= 1;
+static inline uint32_t gfx_next_power_of_two(uint32_t value) {
+    if (value <= 1) {
+        return 1;
     }
 
-    return result;
+    return 1U << (32 - __builtin_clz(value - 1));
 }
 
-static size_t gfx_gu_texture_bytes_per_pixel(unsigned int type) {
+static inline size_t gfx_gu_texture_bytes_per_pixel(unsigned int type) {
     if (type == GU_PSM_T8) {
         return 1;
     }
@@ -700,6 +698,39 @@ static size_t gfx_gu_texture_bytes_per_pixel(unsigned int type) {
     }
 
     return 4;
+}
+
+static inline void gfx_copy_psp_mirrored_row(uint8_t *dst, const uint8_t *src, uint32_t width,
+                                             size_t bytes_per_pixel) {
+    src += (size_t)width * bytes_per_pixel;
+
+    switch (bytes_per_pixel) {
+        case 1:
+            while (width-- != 0) {
+                *dst++ = *--src;
+            }
+            break;
+
+        case 2:
+            while (width-- != 0) {
+                src -= 2;
+                dst[0] = src[0];
+                dst[1] = src[1];
+                dst += 2;
+            }
+            break;
+
+        default:
+            while (width-- != 0) {
+                src -= 4;
+                dst[0] = src[0];
+                dst[1] = src[1];
+                dst[2] = src[2];
+                dst[3] = src[3];
+                dst += 4;
+            }
+            break;
+    }
 }
 
 static const uint8_t *gfx_prepare_psp_texture_for_upload(const uint8_t *src, uint32_t width, uint32_t height, unsigned int type, bool mirror_s, bool mirror_t, uint32_t *upload_width, uint32_t *upload_height, bool *applied_mirror_s, bool *applied_mirror_t) {
@@ -742,32 +773,27 @@ static const uint8_t *gfx_prepare_psp_texture_for_upload(const uint8_t *src, uin
     const size_t src_row_bytes = (size_t)width * bytes_per_pixel;
     const size_t dst_row_bytes = (size_t)(*upload_width) * bytes_per_pixel;
 
-    memset(psp_texture_stage_buf, 0, (size_t)(*upload_width) * (*upload_height) * bytes_per_pixel);
+    if (pot_width != width || pot_height != height) {
+        memset(psp_texture_stage_buf, 0, (size_t)(*upload_width) * (*upload_height) * bytes_per_pixel);
+    }
 
     for (uint32_t y = 0; y < height; y++) {
         const uint8_t *src_row = src + (size_t)y * src_row_bytes;
-        uint8_t *dst_row = psp_texture_stage_buf + (size_t)(source_y_offset + y) * dst_row_bytes + (size_t)source_x_offset * bytes_per_pixel;
+        uint8_t *dst_base = psp_texture_stage_buf + (size_t)(source_y_offset + y) * dst_row_bytes;
+        uint8_t *dst_row = dst_base + (size_t)source_x_offset * bytes_per_pixel;
 
         memcpy(dst_row, src_row, src_row_bytes);
 
         if (use_mirror_s) {
-            uint8_t *dst_mirror_row = psp_texture_stage_buf + (size_t)(source_y_offset + y) * dst_row_bytes;
-            const uint8_t *src_mirror_row = psp_texture_stage_buf + (size_t)(source_y_offset + y) * dst_row_bytes +
-                                            (size_t)source_x_offset * bytes_per_pixel;
-
-            for (uint32_t x = 0; x < pot_width; x++) {
-                memcpy(dst_mirror_row + (size_t)x * bytes_per_pixel,
-                       src_mirror_row + (size_t)(pot_width - 1 - x) * bytes_per_pixel,
-                       bytes_per_pixel);
-            }
+            gfx_copy_psp_mirrored_row(dst_base + (size_t)(pot_width - width) * bytes_per_pixel,
+                                      src_row, width, bytes_per_pixel);
         }
     }
 
     if (use_mirror_t) {
-        const uint32_t mirror_y_offset = source_y_offset ? 0 : pot_height;
-        for (uint32_t y = 0; y < pot_height; y++) {
-            memcpy(psp_texture_stage_buf + (size_t)(mirror_y_offset + y) * dst_row_bytes,
-                   psp_texture_stage_buf + (size_t)(source_y_offset + pot_height - 1 - y) * dst_row_bytes,
+        for (uint32_t y = 0; y < height; y++) {
+            memcpy(psp_texture_stage_buf + (size_t)(pot_height - 1 - y) * dst_row_bytes,
+                   psp_texture_stage_buf + (size_t)(source_y_offset + y) * dst_row_bytes,
                    dst_row_bytes);
         }
     }

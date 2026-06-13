@@ -29,6 +29,7 @@ static int sIntensityClutInited = 0;
 
 #define PSP_NATIVE_ADDR_START 0x08800000U
 #define PSP_NATIVE_ADDR_END 0x0C000000U
+#define PSP_UNCACHED_ADDR_MASK 0x40000000U
 
 static int texman_buffer_is_readable(const void *buffer, unsigned int size) {
     uintptr_t addr = (uintptr_t)buffer;
@@ -258,6 +259,12 @@ static void texman_ensure_intensity_clut(void) {
     sIntensityClutInited = 1;
 }
 
+static inline void texman_writeback_if_cached(void *buffer, unsigned int size) {
+    if (((uintptr_t)buffer & PSP_UNCACHED_ADDR_MASK) == 0) {
+        sceKernelDcacheWritebackRange(buffer, size);
+    }
+}
+
 unsigned int texman_create(void) {
     if (!texman_texture_slot_available()) {
         texman_clear();
@@ -296,7 +303,6 @@ void texman_upload_swizzle(int width, int height, unsigned int type, const void 
 
     tex_num = texman_active_texture_id();
     current = texman_reserve_memory(width, height, type);
-    sceKernelDcacheWritebackRange(buffer, size);
     current->width = width;
     current->height = height;
     current->type = type;
@@ -306,8 +312,7 @@ void texman_upload_swizzle(int width, int height, unsigned int type, const void 
 #ifdef DEBUG
     printf("TEX_MAN upload swizzled [%d]\n", tex_num);
 #endif
-    sceKernelDcacheWritebackRange(current->location, size);
-    sceKernelDcacheInvalidateRange(current->location, size);
+    texman_writeback_if_cached(current->location, size);
     texman_bind_tex(tex_num);
 }
 
@@ -323,7 +328,6 @@ void texman_upload(int width, int height, unsigned int type, const void *buffer)
 
     tex_num = texman_active_texture_id();
     current = texman_reserve_memory(width, height, type);
-    sceKernelDcacheWritebackRange(buffer, size);
     current->width = width;
     current->height = height;
     current->type = type;
@@ -332,8 +336,7 @@ void texman_upload(int width, int height, unsigned int type, const void *buffer)
 #ifdef DEBUG
     // printf("TEX_MAN upload plain [%d]\n", psp_tex_number);
 #endif
-    sceKernelDcacheWritebackRange(current->location, size);
-    sceKernelDcacheInvalidateRange(current->location, size);
+    texman_writeback_if_cached(current->location, size);
     texman_bind_tex(tex_num);
 }
 
