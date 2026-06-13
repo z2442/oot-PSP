@@ -27,7 +27,8 @@
 #define OOT_PSP_PACKED_CACHE_MAX_BLOCK_COUNT \
     (OOT_PSP_PACKED_CACHE_TARGET_SIZE / OOT_PSP_PACKED_CACHE_BLOCK_SIZE)
 #define OOT_PSP_NATIVE_TEXTURE_RANGE_CACHE_COUNT 8
-#define OOT_PSP_ASSET_RANGE_SERIAL_CACHE_COUNT 128
+#define OOT_PSP_ASSET_RANGE_SERIAL_CACHE_SET_COUNT 128
+#define OOT_PSP_ASSET_RANGE_SERIAL_CACHE_WAYS      4
 #define OOT_PSP_PACKED_ASSET_PATH           "data/segments/oot_psp_assets.bin"
 #define OOT_PSP_AUDIOBANK_ASSET_PATH        "data/segments/Audiobank.bin"
 #define OOT_PSP_AUDIOSEQ_ASSET_PATH         "data/segments/Audioseq.bin"
@@ -51,7 +52,7 @@ typedef struct OotPspAssetRangeSerialCacheEntry {
     uintptr_t ramStart;
     uintptr_t ramEnd;
     u32 serial;
-    s32 valid;
+    u32 generation;
 } OotPspAssetRangeSerialCacheEntry;
 
 typedef struct OotPspAssetCache {
@@ -95,8 +96,10 @@ static s32 sOotPspPackedCacheInitTried = false;
 static OotPspPackedAssetCacheBlock sOotPspPackedCacheBlocks[OOT_PSP_PACKED_CACHE_MAX_BLOCK_COUNT];
 static OotPspLoadedAssetRange sOotPspLoadedAssetRanges[OOT_PSP_LOADED_ASSET_RANGE_COUNT];
 static const OotPspLoadedAssetRange* sOotPspNativeTextureRangeCache[OOT_PSP_NATIVE_TEXTURE_RANGE_CACHE_COUNT];
-static OotPspAssetRangeSerialCacheEntry
-    sOotPspAssetRangeSerialCache[OOT_PSP_ASSET_RANGE_SERIAL_CACHE_COUNT];
+static OotPspAssetRangeSerialCacheEntry sOotPspAssetRangeSerialCache[OOT_PSP_ASSET_RANGE_SERIAL_CACHE_SET_COUNT]
+                                                                [OOT_PSP_ASSET_RANGE_SERIAL_CACHE_WAYS];
+static u8 sOotPspAssetRangeSerialCacheNext[OOT_PSP_ASSET_RANGE_SERIAL_CACHE_SET_COUNT];
+static u32 sOotPspAssetRangeSerialCacheGeneration = 1;
 static size_t sOotPspNativeTextureRangeCacheNext;
 static size_t sOotPspLoadedAssetRangeNext;
 static u32 sOotPspLoadedAssetSerial = 1;
@@ -145,33 +148,46 @@ static void OotPsp_UnlockAssetLoader(void) {
 static size_t OotPsp_AssetRangeSerialCacheIndex(uintptr_t ramStart, uintptr_t ramEnd) {
     uintptr_t key = (ramStart >> 4) ^ (ramEnd >> 4) ^ (ramStart >> 12) ^ (ramEnd << 5);
 
-    return (size_t)(key & (OOT_PSP_ASSET_RANGE_SERIAL_CACHE_COUNT - 1));
+    return (size_t)(key & (OOT_PSP_ASSET_RANGE_SERIAL_CACHE_SET_COUNT - 1));
 }
 
 static void OotPsp_ClearAssetRangeSerialCache(void) {
-    memset(sOotPspAssetRangeSerialCache, 0, sizeof(sOotPspAssetRangeSerialCache));
+    sOotPspAssetRangeSerialCacheGeneration++;
+    if (sOotPspAssetRangeSerialCacheGeneration == 0) {
+        memset(sOotPspAssetRangeSerialCache, 0, sizeof(sOotPspAssetRangeSerialCache));
+        sOotPspAssetRangeSerialCacheGeneration = 1;
+    }
 }
 
 static s32 OotPsp_GetCachedAssetRangeSerial(uintptr_t ramStart, uintptr_t ramEnd, u32* serial) {
-    const OotPspAssetRangeSerialCacheEntry* entry =
-        &sOotPspAssetRangeSerialCache[OotPsp_AssetRangeSerialCacheIndex(ramStart, ramEnd)];
+    const OotPspAssetRangeSerialCacheEntry* set =
+        sOotPspAssetRangeSerialCache[OotPsp_AssetRangeSerialCacheIndex(ramStart, ramEnd)];
+    size_t way;
 
-    if (entry->valid && (entry->ramStart == ramStart) && (entry->ramEnd == ramEnd)) {
-        *serial = entry->serial;
-        return true;
+    for (way = 0; way < OOT_PSP_ASSET_RANGE_SERIAL_CACHE_WAYS; way++) {
+        const OotPspAssetRangeSerialCacheEntry* entry = &set[way];
+
+        if ((entry->generation == sOotPspAssetRangeSerialCacheGeneration) && (entry->ramStart == ramStart) &&
+            (entry->ramEnd == ramEnd)) {
+            *serial = entry->serial;
+            return true;
+        }
     }
 
     return false;
 }
 
 static void OotPsp_RememberAssetRangeSerial(uintptr_t ramStart, uintptr_t ramEnd, u32 serial) {
-    OotPspAssetRangeSerialCacheEntry* entry =
-        &sOotPspAssetRangeSerialCache[OotPsp_AssetRangeSerialCacheIndex(ramStart, ramEnd)];
+    size_t setIndex = OotPsp_AssetRangeSerialCacheIndex(ramStart, ramEnd);
+    size_t way = sOotPspAssetRangeSerialCacheNext[setIndex];
+    OotPspAssetRangeSerialCacheEntry* entry = &sOotPspAssetRangeSerialCache[setIndex][way];
 
     entry->ramStart = ramStart;
     entry->ramEnd = ramEnd;
     entry->serial = serial;
-    entry->valid = true;
+    entry->generation = sOotPspAssetRangeSerialCacheGeneration;
+    sOotPspAssetRangeSerialCacheNext[setIndex] =
+        (way + 1) & (OOT_PSP_ASSET_RANGE_SERIAL_CACHE_WAYS - 1);
 }
 
 void OotPsp_AssetInit(const char* executablePath) {
