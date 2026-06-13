@@ -317,7 +317,9 @@ void Health_DrawMeter(PlayState* play) {
     f32 heartTexCoordPerPixel;
     InterfaceContext* interfaceCtx = &play->interfaceCtx;
     GraphicsContext* gfxCtx = play->state.gfxCtx;
+#if !PLATFORM_PSP
     Vtx* beatingHeartVtx = interfaceCtx->beatingHeartVtx;
+#endif
     s32 curHeartFraction = gSaveContext.save.info.playerData.health % 0x10;
     s16 totalHeartCount = gSaveContext.save.info.playerData.healthCapacity / 0x10;
     s16 fullHeartCount = gSaveContext.save.info.playerData.health / 0x10;
@@ -483,6 +485,18 @@ void Health_DrawMeter(PlayState* play) {
                 }
             }
 
+#if PLATFORM_PSP
+            heartCenterY = 25.5f + offsetY;
+            heartCenterX = 30.0f + offsetX;
+            heartTexCoordPerPixel = 1.0f - (0.32f * beatingHeartPulsingSize);
+            halfHeartLength = 8.0f * heartTexCoordPerPixel;
+            heartTexCoordPerPixel = (1.0f / heartTexCoordPerPixel) * (1 << 10);
+            gSPTextureRectangle(OVERLAY_DISP++, (s32)((heartCenterX - halfHeartLength) * 4),
+                                (s32)((heartCenterY - halfHeartLength) * 4),
+                                (s32)((heartCenterX + halfHeartLength) * 4),
+                                (s32)((heartCenterY + halfHeartLength) * 4), G_TX_RENDERTILE, 0, 0,
+                                (s32)heartTexCoordPerPixel, (s32)heartTexCoordPerPixel);
+#else
             {
                 Mtx* matrix = GRAPH_ALLOC(gfxCtx, sizeof(Mtx));
                 Matrix_SetTranslateScaleMtx2(
@@ -492,6 +506,7 @@ void Health_DrawMeter(PlayState* play) {
                 gSPVertex(OVERLAY_DISP++, beatingHeartVtx, 4, 0);
                 gSP1Quadrangle(OVERLAY_DISP++, 0, 2, 3, 1, 0);
             }
+#endif
         }
 
         // Move offset to next heart
