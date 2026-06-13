@@ -32,6 +32,7 @@
 #include "oot_port_macros.h"
 #include "oot_psp_asset_loader.h"
 #include "oot_psp_compat.h"
+#include "oot_psp_gfx_ext.h"
 #include "segmented_address.h"
 #include "sys_matrix.h"
 
@@ -263,6 +264,8 @@ struct GfxDimensions gfx_current_dimensions __attribute__((aligned(4)));
 
 static bool dropped_frame;
 static const struct RGBA white_color = {0xff, 0xff, 0xff, 0xff};
+static OotPspHudAnchor sHudAnchor;
+static bool sHudViewportFullscreen = true;
 
 #if defined(TARGET_PSP)
 static uint8_t sInvalidTextureBuf[256] __attribute__((aligned(16))) = { 0xff, 0xff, 0xff, 0xff };
@@ -2106,8 +2109,23 @@ static void gfx_upload_gu_matrix(int type, const float matrix[4][4]) {
     sceGuSetMatrix(type, (const ScePspFMatrix4 *)matrix_inline);
 }
 
+static bool gfx_hud_anchor_enabled(void);
+static float gfx_hud_anchor_offset_ndc(void);
+
 static void gfx_apply_projection_matrix(void) {
-    gfx_upload_gu_matrix(GU_PROJECTION, rsp.P_matrix);
+    float projection[4][4];
+
+    memcpy(projection, rsp.P_matrix, sizeof(projection));
+    if (gfx_hud_anchor_enabled() && sHudViewportFullscreen) {
+        const float aspectScale = (4.0f / 3.0f) / gfx_current_dimensions.aspect_ratio;
+        const float offset = gfx_hud_anchor_offset_ndc();
+
+        for (size_t i = 0; i < 4; i++) {
+            projection[i][0] = (projection[i][0] * aspectScale) + (projection[i][3] * offset);
+        }
+    }
+
+    gfx_upload_gu_matrix(GU_PROJECTION, projection);
     gfx_matrix_mul(rsp.MP_matrix, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], rsp.P_matrix);
 }
 
@@ -2189,6 +2207,42 @@ static float gfx_adjust_x_for_aspect_ratio(float x) {
     return x * (4.0f / 3.0f) / ((float)gfx_current_dimensions.width / (float)gfx_current_dimensions.height);
 }
 
+static float gfx_hud_anchor_direction(void) {
+    if (sHudAnchor == OOT_PSP_HUD_ANCHOR_LEFT) {
+        return -1.0f;
+    }
+    if (sHudAnchor == OOT_PSP_HUD_ANCHOR_RIGHT) {
+        return 1.0f;
+    }
+    return 0.0f;
+}
+
+static bool gfx_hud_anchor_enabled(void) {
+    return sHudAnchor != OOT_PSP_HUD_ANCHOR_NONE;
+}
+
+static float gfx_widescreen_margin_pixels(void) {
+    float margin = ((float)gfx_current_dimensions.width -
+                    ((float)gfx_current_dimensions.height * (4.0f / 3.0f))) *
+                   0.5f;
+
+    if (margin < 0.0f) {
+        margin = 0.0f;
+    }
+    return margin;
+}
+
+static float gfx_hud_anchor_offset_pixels(void) {
+    return gfx_hud_anchor_direction() * gfx_widescreen_margin_pixels();
+}
+
+static float gfx_hud_anchor_offset_ndc(void) {
+    if (gfx_current_dimensions.width == 0) {
+        return 0.0f;
+    }
+    return 2.0f * gfx_hud_anchor_offset_pixels() / (float)gfx_current_dimensions.width;
+}
+
 static void gfx_apply_unmasked_texture_axis(const struct LoadedVertex *const vertices[], size_t n_vertices,
                                             bool use_u, float nominal_span, float *scale, float *bias) {
     float min_coord;
@@ -2267,11 +2321,14 @@ static bool gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
         gfx_transform_vec4(model_vec, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], temp_vec);
         gfx_transform_vec4(proj_vec, rsp.P_matrix, model_vec);
 
-        //const float x = proj_vec[0];
-        const float x = gfx_adjust_x_for_aspect_ratio(proj_vec[0]);
+        float w = proj_vec[3];
+        float x = gfx_adjust_x_for_aspect_ratio(proj_vec[0]);
         const float y = proj_vec[1];
         const float z = proj_vec[2];
-        float w = proj_vec[3];
+
+        if (sHudViewportFullscreen) {
+            x += gfx_hud_anchor_offset_ndc() * w;
+        }
 
         short U = v->tc[0] * rsp.texture_scaling_factor.s >> 16;
         short V = v->tc[1] * rsp.texture_scaling_factor.t >> 16;
@@ -2662,6 +2719,7 @@ static void gfx_calc_and_set_viewport(const Vp_t *viewport) {
         rdp.viewport.y = 0;
         rdp.viewport.width = gfx_current_dimensions.width;
         rdp.viewport.height = gfx_current_dimensions.height;
+        sHudViewportFullscreen = true;
         rdp.viewport_or_scissor_changed = true;
         gfx_mark_tri_pipeline_dirty();
         return;
@@ -2674,10 +2732,18 @@ static void gfx_calc_and_set_viewport(const Vp_t *viewport) {
     float height = 2.0f * viewport->vscale[1] / 4.0f;
     float x = (viewport->vtrans[0] / 4.0f) - width / 2.0f;
     float y = SCREEN_HEIGHT - ((viewport->vtrans[1] / 4.0f) + height / 2.0f);
+
+    sHudViewportFullscreen =
+        (x <= 0.0f) && (y <= 0.0f) && (width >= SCREEN_WIDTH) && (height >= SCREEN_HEIGHT);
     
-    width *= RATIO_X;
+    if (gfx_hud_anchor_enabled() && !sHudViewportFullscreen) {
+        width *= RATIO_Y;
+        x = (x * RATIO_Y) + gfx_widescreen_margin_pixels() + gfx_hud_anchor_offset_pixels();
+    } else {
+        width *= RATIO_X;
+        x *= RATIO_X;
+    }
     height *= RATIO_Y;
-    x *= RATIO_X;
     y *= RATIO_Y;
     
     rdp.viewport.x = x;
@@ -3115,6 +3181,10 @@ static void gfx_draw_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lr
         lrxf = gfx_current_dimensions.width;
         lryf = gfx_current_dimensions.height;
     } else {
+        const float halfWidth = (float)gfx_current_dimensions.width * 0.5f;
+        const float halfHeight = (float)gfx_current_dimensions.height * 0.5f;
+        const float hudOffset = gfx_hud_anchor_offset_pixels();
+
         ulxf = ulxf / (4.0f * HALF_SCREEN_WIDTH) - 1.0f;
         ulyf = (ulyf / (4.0f * HALF_SCREEN_HEIGHT)) - 1.0f;
         lrxf = lrxf / (4.0f * HALF_SCREEN_WIDTH) - 1.0f;
@@ -3123,11 +3193,11 @@ static void gfx_draw_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lr
         ulxf = gfx_adjust_x_for_aspect_ratio(ulxf);
         lrxf = gfx_adjust_x_for_aspect_ratio(lrxf);
 
-        ulxf = (ulxf * 240) + 240;
-        lrxf = (lrxf * 240) + 240;
+        ulxf = (ulxf * halfWidth) + halfWidth + hudOffset;
+        lrxf = (lrxf * halfWidth) + halfWidth + hudOffset;
 
-        ulyf = (ulyf * 136) + 136;
-        lryf = (lryf * 136) + 136;
+        ulyf = (ulyf * halfHeight) + halfHeight;
+        lryf = (lryf * halfHeight) + halfHeight;
     }
     
     struct VertexColor* ul = &rsp.loaded_vertices_2D[0];
@@ -3285,6 +3355,18 @@ static void gfx_dp_set_other_mode(uint32_t mode_h, uint32_t mode_l) {
     rdp.other_mode_h = mode_h;
     rdp.other_mode_l = mode_l;
     gfx_mark_tri_pipeline_dirty();
+}
+
+static void gfx_dp_noop(uint32_t tag) {
+    if ((tag & 0xFFFFFF00U) == OOT_PSP_HUD_ANCHOR_TAG) {
+        OotPspHudAnchor anchor = tag & 0xFF;
+
+        if (anchor <= OOT_PSP_HUD_ANCHOR_RIGHT) {
+            gfx_flush();
+            sHudAnchor = anchor;
+            gfx_apply_projection_matrix();
+        }
+    }
 }
 
 static inline bool gfx_addr_looks_segmented(uintptr_t addr) {
@@ -3956,6 +4038,9 @@ static void gfx_run_dl(Gfx* cmd) {
                 break;
             
             // RDP Commands:
+            case G_NOOP:
+                gfx_dp_noop(cmd->words.w1);
+                break;
             case G_RDPSETOTHERMODE:
                 gfx_dp_set_other_mode(cmd->words.w0 & 0x00FFFFFFU, cmd->words.w1);
                 break;
@@ -4098,6 +4183,8 @@ static void gfx_sp_reset() {
     rsp.current_num_lights = 2;
     rsp.lights_changed = true;
     rsp.rdp_half_1 = 0;
+    sHudAnchor = OOT_PSP_HUD_ANCHOR_NONE;
+    sHudViewportFullscreen = true;
     memset(rsp.segments, 0, sizeof(rsp.segments));
 #if defined(TARGET_PSP)
     memset(rsp.segment_cmd, 0, sizeof(rsp.segment_cmd));

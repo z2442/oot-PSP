@@ -27,6 +27,7 @@
 #if PLATFORM_PSP
 #include "oot_psp_asset_loader.h"
 #include "oot_psp_compat.h"
+#include "oot_psp_gfx_ext.h"
 #endif
 
 #include "assets/textures/parameter_static/parameter_static.h"
@@ -2977,6 +2978,9 @@ void Interface_DrawItemButtons(PlayState* play) {
 
     if (!IS_PAUSE_STATE_GAMEOVER(pauseCtx)) {
         if (IS_PAUSED(&play->pauseCtx)) {
+#if PLATFORM_PSP
+            gOotPspSetHudAnchor(OVERLAY_DISP++, OOT_PSP_HUD_ANCHOR_NONE);
+#endif
             // Start Button Texture, Color & Label
             gDPPipeSync(OVERLAY_DISP++);
             gDPSetPrimColor(OVERLAY_DISP++, 0, 0, START_BUTTON_R, START_BUTTON_G, START_BUTTON_B,
@@ -3023,6 +3027,9 @@ void Interface_DrawItemButtons(PlayState* play) {
                                 (R_START_LABEL_X(gSaveContext.language) + width) << 2,
                                 (R_START_LABEL_Y(gSaveContext.language) + height) << 2, G_TX_RENDERTILE, 0, 0,
                                 texCoordScale, texCoordScale);
+#endif
+#if PLATFORM_PSP
+            gOotPspSetHudAnchor(OVERLAY_DISP++, OOT_PSP_HUD_ANCHOR_RIGHT);
 #endif
         }
     }
@@ -3347,6 +3354,9 @@ void Interface_Draw(PlayState* play) {
     if (pauseCtx->debugState == PAUSE_DEBUG_STATE_CLOSED) {
         Interface_InitVertices(play);
         func_8008A994(interfaceCtx);
+#if PLATFORM_PSP
+        gOotPspSetHudAnchor(OVERLAY_DISP++, OOT_PSP_HUD_ANCHOR_LEFT);
+#endif
         Health_DrawMeter(play);
 
         Gfx_SetupDL_39Overlay(play->state.gfxCtx);
@@ -3450,8 +3460,14 @@ void Interface_Draw(PlayState* play) {
         }
 
         Magic_DrawMeter(play);
+#if PLATFORM_PSP
+        gOotPspSetHudAnchor(OVERLAY_DISP++, OOT_PSP_HUD_ANCHOR_RIGHT);
+#endif
         Minimap_Draw(play);
 
+#if PLATFORM_PSP
+        gOotPspSetHudAnchor(OVERLAY_DISP++, OOT_PSP_HUD_ANCHOR_CENTER);
+#endif
         if ((R_PAUSE_BG_PRERENDER_STATE != PAUSE_BG_PRERENDER_PROCESS) &&
             (R_PAUSE_BG_PRERENDER_STATE != PAUSE_BG_PRERENDER_READY)) {
             Attention_Draw(&play->actorCtx.attention, play);
@@ -3459,6 +3475,9 @@ void Interface_Draw(PlayState* play) {
 
         Gfx_SetupDL_39Overlay(play->state.gfxCtx);
 
+#if PLATFORM_PSP
+        gOotPspSetHudAnchor(OVERLAY_DISP++, OOT_PSP_HUD_ANCHOR_RIGHT);
+#endif
         Interface_DrawItemButtons(play);
 
         gDPPipeSync(OVERLAY_DISP++);
@@ -3566,6 +3585,9 @@ void Interface_Draw(PlayState* play) {
         gDPPipeSync(OVERLAY_DISP++);
 
         func_8008A994(interfaceCtx);
+#if PLATFORM_PSP
+        gOotPspSetHudAnchor(OVERLAY_DISP++, OOT_PSP_HUD_ANCHOR_NONE);
+#endif
 
         if ((pauseCtx->state == PAUSE_STATE_MAIN) && (pauseCtx->mainState == PAUSE_MAIN_STATE_3)) {
             // Inventory Equip Effects
