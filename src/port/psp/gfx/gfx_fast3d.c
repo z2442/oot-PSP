@@ -173,7 +173,6 @@ struct TriPipelineState {
 static struct RSP {
     float modelview_matrix_stack[MODELVIEW_STACK_SIZE][4][4]__attribute__((aligned(16)));
 
-    float MP_matrix[4][4] __attribute__((aligned(16)));
     float P_matrix[4][4] __attribute__((aligned(16)));
     uint8_t modelview_matrix_stack_size;
     
@@ -2092,23 +2091,61 @@ static void calculate_normal_dir(const Light_t *light, float coeffs[3]) {
 }
 
 static void gfx_matrix_mul(float res[4][4], const float a[4][4], const float b[4][4]) {
-    float tmp[4][4];
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            tmp[i][j] = a[i][0] * b[0][j] +
-                        a[i][1] * b[1][j] +
-                        a[i][2] * b[2][j] +
-                        a[i][3] * b[3][j];
-        }
-    }
-    memcpy(res, tmp, sizeof(tmp));
+    __asm__ volatile(
+        "lv.q C000, 0(%[b])\n"
+        "lv.q C010, 16(%[b])\n"
+        "lv.q C020, 32(%[b])\n"
+        "lv.q C030, 48(%[b])\n"
+        "lv.q C100, 0(%[a])\n"
+        "lv.q C110, 16(%[a])\n"
+        "lv.q C120, 32(%[a])\n"
+        "lv.q C130, 48(%[a])\n"
+        "vscl.q C200, C000, S100\n"
+        "vscl.q C210, C010, S101\n"
+        "vadd.q C200, C200, C210\n"
+        "vscl.q C210, C020, S102\n"
+        "vadd.q C200, C200, C210\n"
+        "vscl.q C210, C030, S103\n"
+        "vadd.q C200, C200, C210\n"
+        "sv.q C200, 0(%[res])\n"
+        "vscl.q C200, C000, S110\n"
+        "vscl.q C210, C010, S111\n"
+        "vadd.q C200, C200, C210\n"
+        "vscl.q C210, C020, S112\n"
+        "vadd.q C200, C200, C210\n"
+        "vscl.q C210, C030, S113\n"
+        "vadd.q C200, C200, C210\n"
+        "sv.q C200, 16(%[res])\n"
+        "vscl.q C200, C000, S120\n"
+        "vscl.q C210, C010, S121\n"
+        "vadd.q C200, C200, C210\n"
+        "vscl.q C210, C020, S122\n"
+        "vadd.q C200, C200, C210\n"
+        "vscl.q C210, C030, S123\n"
+        "vadd.q C200, C200, C210\n"
+        "sv.q C200, 32(%[res])\n"
+        "vscl.q C200, C000, S130\n"
+        "vscl.q C210, C010, S131\n"
+        "vadd.q C200, C200, C210\n"
+        "vscl.q C210, C020, S132\n"
+        "vadd.q C200, C200, C210\n"
+        "vscl.q C210, C030, S133\n"
+        "vadd.q C200, C200, C210\n"
+        "sv.q C200, 48(%[res])\n"
+        :
+        : [res] "r"(res), [a] "r"(a), [b] "r"(b)
+        : "memory");
 }
 
 static inline void gfx_transform_vec4(float out[4], const float matrix[4][4], const float in[4]) {
-    out[0] = (in[0] * matrix[0][0]) + (in[1] * matrix[1][0]) + (in[2] * matrix[2][0]) + (in[3] * matrix[3][0]);
-    out[1] = (in[0] * matrix[0][1]) + (in[1] * matrix[1][1]) + (in[2] * matrix[2][1]) + (in[3] * matrix[3][1]);
-    out[2] = (in[0] * matrix[0][2]) + (in[1] * matrix[1][2]) + (in[2] * matrix[2][2]) + (in[3] * matrix[3][2]);
-    out[3] = (in[0] * matrix[0][3]) + (in[1] * matrix[1][3]) + (in[2] * matrix[2][3]) + (in[3] * matrix[3][3]);
+    out[0] = (in[0] * matrix[0][0]) + (in[1] * matrix[1][0]) + (in[2] * matrix[2][0]) +
+             (in[3] * matrix[3][0]);
+    out[1] = (in[0] * matrix[0][1]) + (in[1] * matrix[1][1]) + (in[2] * matrix[2][1]) +
+             (in[3] * matrix[3][1]);
+    out[2] = (in[0] * matrix[0][2]) + (in[1] * matrix[1][2]) + (in[2] * matrix[2][2]) +
+             (in[3] * matrix[3][2]);
+    out[3] = (in[0] * matrix[0][3]) + (in[1] * matrix[1][3]) + (in[2] * matrix[2][3]) +
+             (in[3] * matrix[3][3]);
 }
 
 static void gfx_upload_gu_matrix(int type, const float matrix[4][4]) {
@@ -2135,7 +2172,6 @@ static void gfx_apply_projection_matrix(void) {
     }
 
     gfx_upload_gu_matrix(GU_PROJECTION, projection);
-    gfx_matrix_mul(rsp.MP_matrix, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], rsp.P_matrix);
 }
 
 static void gfx_apply_modelview_matrix(void) {
@@ -2147,7 +2183,6 @@ static void gfx_apply_modelview_matrix(void) {
      * loaded vertex so later matrix commands cannot retarget old vertices.
      */
     gfx_upload_gu_matrix(GU_MODEL, identity_matrix);
-    gfx_matrix_mul(rsp.MP_matrix, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], rsp.P_matrix);
     rsp.lights_changed = true;
 }
 
