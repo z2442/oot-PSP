@@ -3185,6 +3185,13 @@ static bool gfx_cc_is_two_cycle_texture_tint(uint32_t a0, uint32_t b0, uint32_t 
            (d1 == G_CCMUX_ENVIRONMENT);
 }
 
+static bool gfx_cc_is_two_cycle_texture_blend_mul_shade(uint32_t a0, uint32_t b0, uint32_t c0, uint32_t d0,
+                                                        uint32_t a1, uint32_t b1, uint32_t c1, uint32_t d1) {
+    return (a0 == G_CCMUX_TEXEL1) && (b0 == G_CCMUX_TEXEL0) && (c0 == G_CCMUX_ENV_ALPHA) &&
+           (d0 == G_CCMUX_TEXEL0) && (a1 == G_CCMUX_COMBINED) && (b1 == (G_CCMUX_0 & 0xF)) &&
+           (c1 == G_CCMUX_SHADE) && (d1 == (G_CCMUX_0 & 0x7));
+}
+
 static bool gfx_cc_is_texture_prim_env_blend(uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
     return (a == G_CCMUX_PRIMITIVE) && (b == G_CCMUX_ENVIRONMENT) && (c == G_CCMUX_TEXEL0) &&
            (d == G_CCMUX_ENVIRONMENT);
@@ -4217,6 +4224,12 @@ static void gfx_run_dl(Gfx* cmd) {
                     gfx_cc_is_one(alphaA0, alphaB0, alphaC0, alphaD0) &&
                     gfx_cc_is_combined_mul_primitive(alphaA1, alphaB1, alphaC1, alphaD1)) {
                     alphaComb = color_comb(G_ACMUX_0, G_ACMUX_0, G_ACMUX_0, G_ACMUX_PRIMITIVE);
+                }
+
+                if (gfx_cc_is_two_cycle_texture_blend_mul_shade(rgbA0, rgbB0, rgbC0, rgbD0, rgbA1, rgbB1, rgbC1,
+                                                               rgbD1)) {
+                    // The GU cannot blend two independently sampled textures; retain the baked vertex lighting.
+                    rgbComb = color_comb(G_CCMUX_TEXEL0, G_CCMUX_0, G_CCMUX_SHADE, G_CCMUX_0);
                 }
 
                 if (gfx_cc_is_two_cycle_texture_tint(rgbA0, rgbB0, rgbC0, rgbD0, rgbA1, rgbB1, rgbC1, rgbD1)) {
