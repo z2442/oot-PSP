@@ -32,7 +32,7 @@ static volatile s32 sOotPspAudioInitialized = false;
 #define OOT_PSP_AUDIO_OUTPUT_THREAD_PRIORITY 0x1F
 #define OOT_PSP_AUDIO_PRODUCER_THREAD_PRIORITY 0x20
 
-#define OOT_PSP_AUDIO_MAX_UPDATES_NORMAL 1
+#define OOT_PSP_AUDIO_MAX_UPDATES_NORMAL 8
 /*
  * AudioThread_Update submits a buffer synthesized two updates earlier. The
  * first two submissions are only the 160-frame initialization buffers, so
