@@ -4039,10 +4039,6 @@ static void gfx_run_dl(Gfx* cmd) {
     }
 
     for (;;) {
-        if (!gfx_translate_dl_cursor(&cmd)) {
-            return;
-        }
-
         uint32_t opcode = cmd->words.w0 >> 24;
 #if defined(TARGET_PSP)
         sCurrentCmd.addr = (uintptr_t)cmd;
@@ -4098,7 +4094,13 @@ static void gfx_run_dl(Gfx* cmd) {
                  * rendered instead of falling through to an empty display list.
                  */
                 if (rsp.rdp_half_1 != 0) {
-                    cmd = (Gfx *)seg_addr(rsp.rdp_half_1);
+                    Gfx* branchTarget = (Gfx*)seg_addr(rsp.rdp_half_1);
+
+                    if (!gfx_translate_dl_cursor(&branchTarget)) {
+                        return;
+                    }
+
+                    cmd = branchTarget;
                     --cmd;
                 }
                 break;
@@ -4131,7 +4133,13 @@ static void gfx_run_dl(Gfx* cmd) {
                     // Push return address
                     gfx_run_dl((Gfx *)target);
                 } else {
-                    cmd = (Gfx *)target;
+                    Gfx* jumpTarget = (Gfx*)target;
+
+                    if (!gfx_translate_dl_cursor(&jumpTarget)) {
+                        return;
+                    }
+
+                    cmd = jumpTarget;
                     --cmd; // increase after break
                 }
                 break;
