@@ -263,6 +263,10 @@ static bool dropped_frame;
 static const struct RGBA white_color = {0xff, 0xff, 0xff, 0xff};
 static OotPspHudAnchor sHudAnchor;
 static bool sHudViewportFullscreen = true;
+static float sNdcAspectScale = 1.0f;
+static float sWidescreenMarginPixels;
+static float sHudAnchorOffsetPixels;
+static float sHudAnchorOffsetNdc;
 static float sUploadedProjection[4][4] __attribute__((aligned(16)));
 static bool sUploadedProjectionValid;
 
@@ -2220,7 +2224,6 @@ static inline void gfx_upload_projection_matrix(const float matrix[4][4]) {
 }
 
 static bool gfx_hud_anchor_enabled(void);
-static float gfx_hud_anchor_offset_ndc(void);
 
 static inline __attribute__((always_inline)) void gfx_apply_projection_matrix(void) {
     float projection[4][4];
@@ -2232,11 +2235,9 @@ static inline __attribute__((always_inline)) void gfx_apply_projection_matrix(vo
 
     memcpy(projection, rsp.P_matrix, sizeof(projection));
     {
-        const float aspectScale = (4.0f / 3.0f) / gfx_current_dimensions.aspect_ratio;
-        const float offset = gfx_hud_anchor_offset_ndc();
-
         for (size_t i = 0; i < 4; i++) {
-            projection[i][0] = (projection[i][0] * aspectScale) + (projection[i][3] * offset);
+            projection[i][0] = (projection[i][0] * sNdcAspectScale) +
+                               (projection[i][3] * sHudAnchorOffsetNdc);
         }
     }
 
@@ -2317,7 +2318,7 @@ static void gfx_sp_pop_matrix(uint32_t count) {
 }
 
 static float gfx_adjust_x_for_aspect_ratio(float x) {
-    return x * (4.0f / 3.0f) / ((float)gfx_current_dimensions.width / (float)gfx_current_dimensions.height);
+    return x * sNdcAspectScale;
 }
 
 static float gfx_hud_anchor_direction(void) {
@@ -2334,26 +2335,28 @@ static bool gfx_hud_anchor_enabled(void) {
     return sHudAnchor != OOT_PSP_HUD_ANCHOR_NONE;
 }
 
-static float gfx_widescreen_margin_pixels(void) {
-    float margin = ((float)gfx_current_dimensions.width -
-                    ((float)gfx_current_dimensions.height * (4.0f / 3.0f))) *
-                   0.5f;
+static void gfx_update_screen_metrics(void) {
+    const float width = (float)gfx_current_dimensions.width;
+    const float height = gfx_current_dimensions.height != 0 ? (float)gfx_current_dimensions.height : 1.0f;
+    float margin = (width - (height * (4.0f / 3.0f))) * 0.5f;
+
+    gfx_current_dimensions.aspect_ratio = width / height;
+    sNdcAspectScale = width != 0.0f ? (height * (4.0f / 3.0f)) / width : 1.0f;
 
     if (margin < 0.0f) {
         margin = 0.0f;
     }
-    return margin;
+    sWidescreenMarginPixels = margin;
+    sHudAnchorOffsetPixels = gfx_hud_anchor_direction() * sWidescreenMarginPixels;
+    sHudAnchorOffsetNdc = width != 0.0f ? 2.0f * sHudAnchorOffsetPixels / width : 0.0f;
+}
+
+static float gfx_widescreen_margin_pixels(void) {
+    return sWidescreenMarginPixels;
 }
 
 static float gfx_hud_anchor_offset_pixels(void) {
-    return gfx_hud_anchor_direction() * gfx_widescreen_margin_pixels();
-}
-
-static float gfx_hud_anchor_offset_ndc(void) {
-    if (gfx_current_dimensions.width == 0) {
-        return 0.0f;
-    }
-    return 2.0f * gfx_hud_anchor_offset_pixels() / (float)gfx_current_dimensions.width;
+    return sHudAnchorOffsetPixels;
 }
 
 static void gfx_apply_unmasked_texture_axis(const struct LoadedVertex *const vertices[], size_t n_vertices,
@@ -2404,6 +2407,7 @@ static bool gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
     float temp_vec[4] __attribute__((aligned(16)));
     float model_vec[4] __attribute__((aligned(16)));
     float proj_vec[4] __attribute__((aligned(16)));
+    const float hudAnchorOffsetNdc = sHudViewportFullscreen ? sHudAnchorOffsetNdc : 0.0f;
 #if defined(TARGET_PSP)
     const void* normalizedSource;
 
@@ -2439,8 +2443,8 @@ static bool gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
         const float y = proj_vec[1];
         const float z = proj_vec[2];
 
-        if (sHudViewportFullscreen) {
-            x += gfx_hud_anchor_offset_ndc() * w;
+        if (hudAnchorOffsetNdc != 0.0f) {
+            x += hudAnchorOffsetNdc * w;
         }
 
         short U = v->tc[0] * rsp.texture_scaling_factor.s >> 16;
@@ -3518,6 +3522,7 @@ static void gfx_dp_noop(uint32_t tag) {
         if ((anchor <= OOT_PSP_HUD_ANCHOR_RIGHT) && (anchor != sHudAnchor)) {
             gfx_flush();
             sHudAnchor = anchor;
+            gfx_update_screen_metrics();
             gfx_apply_projection_matrix();
         }
     }
@@ -4365,6 +4370,7 @@ static void gfx_sp_reset() {
     rsp.rdp_half_1 = 0;
     sHudAnchor = OOT_PSP_HUD_ANCHOR_NONE;
     sHudViewportFullscreen = true;
+    gfx_update_screen_metrics();
     memset(rsp.segments, 0, sizeof(rsp.segments));
 #if defined(TARGET_PSP)
     memset(rsp.segment_cmd, 0, sizeof(rsp.segment_cmd));
@@ -4441,7 +4447,7 @@ void gfx_init(struct GfxWindowManagerAPI *wapi, struct GfxRenderingAPI *rapi, co
         // Avoid division by zero
         gfx_current_dimensions.height = 1;
     }
-    gfx_current_dimensions.aspect_ratio = (float)gfx_current_dimensions.width / (float)gfx_current_dimensions.height;
+    gfx_update_screen_metrics();
 }
 
 struct GfxRenderingAPI *gfx_get_current_rendering_api(void) {
