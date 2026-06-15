@@ -900,14 +900,25 @@ static inline float vec3_dot(const float *lhs, const float *rhs){
 }
 
 static inline float vec4_dot(const float *lhs, const float *rhs){
-    return (lhs[0]*rhs[0]) + (lhs[1]*rhs[1]) + (lhs[2]*rhs[2])+ (lhs[3]*rhs[3]);
-}
+#if defined(TARGET_PSP)
+    float out;
 
-static inline void vec4_sub(float *out, const float* lhs, const float*rhs){
-    out[0] = lhs[0]-rhs[0];
-    out[1] = lhs[1]-rhs[1];
-    out[2] = lhs[2]-rhs[2];
-    out[3] = lhs[3]-rhs[3];
+    __asm__ volatile(
+        ".set push\n"
+        ".set noreorder\n"
+        "lv.q C000, 0(%[lhs])\n"
+        "lv.q C010, 0(%[rhs])\n"
+        "vdot.q S020, C000, C010\n"
+        "sv.s S020, 0(%[out])\n"
+        ".set pop\n"
+        :
+        : [lhs] "r"(lhs), [rhs] "r"(rhs), [out] "r"(&out)
+        : "memory");
+
+    return out;
+#else
+    return (lhs[0]*rhs[0]) + (lhs[1]*rhs[1]) + (lhs[2]*rhs[2])+ (lhs[3]*rhs[3]);
+#endif
 }
 
 void gfx_clip_interpolate_vert(struct LoadedVertex* out, const struct  LoadedVertex* lhs, const struct LoadedVertex* rhs, const float factor )
@@ -940,7 +951,7 @@ void gfx_clip_interpolate_vert(struct LoadedVertex* out, const struct  LoadedVer
 //	Copyright (C) 2002-2006 Nikolaus Gebhardt/Alten Thomas
 //
 //*****************************************************************************
-static const float NDCPlane[6][4] =
+static const float NDCPlane[6][4] __attribute__((aligned(16))) =
 {
 	{  0.f,  0.f,  1.f, -1.f },	// near
 	{  1.f,  0.f,  0.f, -1.f },	// left
@@ -960,7 +971,6 @@ static uint32_t clipToHyperPlane( struct LoadedVertex *dest, const struct Loaded
 
 	float aDotPlane;
 	float bDotPlane;
-    float temp_vec[4];
 
 	out = dest;
 	outCount = 0;
@@ -981,9 +991,7 @@ static uint32_t clipToHyperPlane( struct LoadedVertex *dest, const struct Loaded
 			if ( bDotPlane > EPSILON )
 			{
 				// intersect line segment with plane
-                // Next 2 lines are "(b->ProjectedPos - a->ProjectedPos).Dot( plane )"
-                vec4_sub(temp_vec, &b->_x, &a->_x);
-                const float dot_projected = vec4_dot(temp_vec, plane);
+                const float dot_projected = bDotPlane - aDotPlane;
 				gfx_clip_interpolate_vert(out, b, a, bDotPlane / dot_projected );
 				out += 1;
 				outCount += 1;
@@ -1003,9 +1011,7 @@ static uint32_t clipToHyperPlane( struct LoadedVertex *dest, const struct Loaded
 			{
 				// previous was inside
 				// intersect line segment with plane
-                // Next 2 lines are "(b->ProjectedPos - a->ProjectedPos).Dot( plane )"
-                vec4_sub(temp_vec, &b->_x, &a->_x);
-                const float dot_projected = vec4_dot(temp_vec, plane);
+                const float dot_projected = bDotPlane - aDotPlane;
 				gfx_clip_interpolate_vert(out, b, a, bDotPlane / dot_projected );
 
 				out += 1;
@@ -1014,7 +1020,7 @@ static uint32_t clipToHyperPlane( struct LoadedVertex *dest, const struct Loaded
 			b = a;
 		}
 
-        bDotPlane = vec4_dot(&b->_x, plane);
+        bDotPlane = aDotPlane;
 	}
 
 	return outCount;
