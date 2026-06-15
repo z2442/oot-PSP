@@ -65,6 +65,8 @@ static SceUID sMesgQueueLockSema = OOT_PSP_INVALID_UID;
 static SceUID sTimerServiceThreadId = OOT_PSP_INVALID_UID;
 static SceUID sTimerLockSema = OOT_PSP_INVALID_UID;
 static volatile s32 sTimerServiceRunning;
+static volatile u32 sFastCount;
+static volatile s32 sFastCountInitialized;
 
 s32 osRomType = 0;
 void* osRomBase = NULL;
@@ -769,7 +771,17 @@ void osSetTime(UNUSED OSTime time) {
 }
 
 u32 osGetCount(void) {
-    return sceKernelGetSystemTimeLow();
+    if (!sFastCountInitialized) {
+        sFastCount = sceKernelGetSystemTimeLow();
+        sFastCountInitialized = true;
+    }
+
+    /*
+     * PSP timing and OSTimer services use their own microsecond clock. The game
+     * calls osGetCount only as a changing entropy source, so avoid a kernel
+     * syscall on every audio random update.
+     */
+    return __atomic_add_fetch(&sFastCount, 0x9E3779B9U, __ATOMIC_RELAXED);
 }
 
 s32 osSetTimer(OSTimer* timer, OSTime countdown, OSTime interval, OSMesgQueue* mq, OSMesg msg) {

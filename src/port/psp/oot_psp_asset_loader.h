@@ -65,6 +65,7 @@ s32 OotPsp_IsLoadedExternalAssetRange(const void* ptr, size_t size);
 s32 OotPsp_IsLoadedNativeExternalAssetRange(const void* ptr, size_t size);
 s32 OotPsp_GetLoadedExternalAssetRangeFlags(const void* ptr, size_t size, u32* flags);
 u32 OotPsp_GetExternalAssetRangeSerial(const void* ptr, size_t size);
+s32 OotPsp_GetNativeExternalTextureRangeStart(const void* ptr, size_t size, uintptr_t* ramStart);
 s32 OotPsp_MapNativeExternalTextureByte(const void* ptr, const void** mapped);
 s32 OotPsp_AssetRead(void* ram, uintptr_t vrom, size_t size);
 s32 OotPsp_AssetReadAudio(void* ram, uintptr_t vrom, size_t size);

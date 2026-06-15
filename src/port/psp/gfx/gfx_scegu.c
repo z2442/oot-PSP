@@ -840,7 +840,7 @@ static void gfx_scegu_start_frame(void) {
     // Identity every frame? unsure.
     //sceGuSetMatrix(GU_PROJECTION, (const ScePspFMatrix4 *) identity_matrix);
     sceGuSetMatrix(GU_VIEW, (const ScePspFMatrix4 *) identity_matrix);
-    //sceGuSetMatrix(GU_MODEL, (const ScePspFMatrix4 *) identity_matrix);
+    sceGuSetMatrix(GU_MODEL, (const ScePspFMatrix4 *) identity_matrix);
 
 #if 0
     const int DitherMatrix[2][16] = { { 0, 8, 0, 8,
