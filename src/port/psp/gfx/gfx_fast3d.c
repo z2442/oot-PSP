@@ -754,6 +754,12 @@ static inline void gfx_copy_psp_mirrored_row(uint8_t *dst, const uint8_t *src, u
     }
 }
 
+static inline void gfx_zero_psp_texture_rows(uint32_t first_row, uint32_t row_count, size_t row_bytes) {
+    if (row_count != 0) {
+        memset(psp_texture_stage_buf + (size_t)first_row * row_bytes, 0, (size_t)row_count * row_bytes);
+    }
+}
+
 static const uint8_t *gfx_prepare_psp_texture_for_upload(const uint8_t *src, uint32_t width, uint32_t height, unsigned int type, bool mirror_s, bool mirror_t, uint32_t *upload_width, uint32_t *upload_height, bool *applied_mirror_s, bool *applied_mirror_t) {
     const size_t bytes_per_pixel = gfx_gu_texture_bytes_per_pixel(type);
     const uint32_t pot_width = gfx_next_power_of_two(width);
@@ -793,21 +799,33 @@ static const uint8_t *gfx_prepare_psp_texture_for_upload(const uint8_t *src, uin
 
     const size_t src_row_bytes = (size_t)width * bytes_per_pixel;
     const size_t dst_row_bytes = (size_t)(*upload_width) * bytes_per_pixel;
+    const uint32_t top_empty_rows = use_mirror_t ? (pot_height - height) : 0;
+    const uint32_t bottom_empty_row = source_y_offset + height;
+    const uint32_t bottom_empty_rows = *upload_height - bottom_empty_row;
+    const size_t left_empty_bytes = use_mirror_s ? (size_t)(pot_width - width) * bytes_per_pixel : 0;
+    const size_t right_empty_bytes =
+        ((size_t)(*upload_width) - (source_x_offset + width)) * bytes_per_pixel;
 
-    if (pot_width != width || pot_height != height) {
-        memset(psp_texture_stage_buf, 0, (size_t)(*upload_width) * (*upload_height) * bytes_per_pixel);
-    }
+    gfx_zero_psp_texture_rows(0, top_empty_rows, dst_row_bytes);
 
     for (uint32_t y = 0; y < height; y++) {
         const uint8_t *src_row = src + (size_t)y * src_row_bytes;
         uint8_t *dst_base = psp_texture_stage_buf + (size_t)(source_y_offset + y) * dst_row_bytes;
         uint8_t *dst_row = dst_base + (size_t)source_x_offset * bytes_per_pixel;
 
+        if (left_empty_bytes != 0) {
+            memset(dst_base, 0, left_empty_bytes);
+        }
+
         memcpy(dst_row, src_row, src_row_bytes);
 
         if (use_mirror_s) {
             gfx_copy_psp_mirrored_row(dst_base + (size_t)(pot_width - width) * bytes_per_pixel,
                                       src_row, width, bytes_per_pixel);
+        }
+
+        if (right_empty_bytes != 0) {
+            memset(dst_row + src_row_bytes, 0, right_empty_bytes);
         }
     }
 
@@ -818,6 +836,8 @@ static const uint8_t *gfx_prepare_psp_texture_for_upload(const uint8_t *src, uin
                    dst_row_bytes);
         }
     }
+
+    gfx_zero_psp_texture_rows(bottom_empty_row, bottom_empty_rows, dst_row_bytes);
 
     return psp_texture_stage_buf;
 }
