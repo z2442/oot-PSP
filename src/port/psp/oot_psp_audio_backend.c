@@ -64,10 +64,10 @@ enum {
     OOT_PSP_AUDIO_ME_SHARED_COUNT,
 };
 
-meLibMakeUncachedMem(sAudioMeSharedStorage, OOT_PSP_AUDIO_ME_SHARED_COUNT, u32Me);
+static volatile u32 sAudioMeSharedStorage[OOT_PSP_AUDIO_ME_SHARED_COUNT] __attribute__((aligned(64), section(".uncached")));
 
 #define sAudioMeShared \
-    ((volatile u32Me*)(UNCACHED_USER_MASK | (u32Me)(uintptr_t)sAudioMeSharedStorage))
+    ((volatile u32*)(UNCACHED_USER_MASK | (u32)(uintptr_t)sAudioMeSharedStorage))
 #define sAudioMeState    sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_STATE]
 #define sAudioMeCmdList  sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_CMD_LIST]
 #define sAudioMeCmdCount sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_CMD_COUNT]
@@ -123,6 +123,8 @@ __attribute__((noinline, aligned(4))) void meLibOnProcess(void) {
         meLibDelayPipeline();
     } while (sAudioMeState == OOT_PSP_AUDIO_ME_STATE_BOOTING);
 
+    OotPspMixer_InitVme();
+
     while (sAudioMeState != OOT_PSP_AUDIO_ME_STATE_STOP) {
         if (sAudioMeState == OOT_PSP_AUDIO_ME_STATE_RUN) {
             const Acmd* cmdList = (const Acmd*)(uintptr_t)sAudioMeCmdList;
@@ -141,6 +143,7 @@ __attribute__((noinline, aligned(4))) void meLibOnProcess(void) {
         }
     }
 
+    OotPspMixer_ShutdownVme();
     sAudioMeState = OOT_PSP_AUDIO_ME_STATE_HALTED;
     meLibSync();
     meLibHalt();

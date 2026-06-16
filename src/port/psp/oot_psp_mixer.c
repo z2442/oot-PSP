@@ -2,7 +2,22 @@
 
 #include "attributes.h"
 
+#ifndef OOT_PSP_AUDIO_MIXER_VME
+#define OOT_PSP_AUDIO_MIXER_VME 1
+#endif
+
+#ifndef OOT_PSP_AUDIO_MIXER_FAST
+#define OOT_PSP_AUDIO_MIXER_FAST 1
+#endif
+
+#ifndef OOT_PSP_AUDIO_MIXER_VERIFY
+#define OOT_PSP_AUDIO_MIXER_VERIFY 0
+#endif
+
 #if defined(TARGET_PSP)
+#if OOT_PSP_AUDIO_MIXER_VME
+#include <me-core-mapper/me-lib.h>
+#endif
 #include <pspkernel.h>
 #endif
 #include <string.h>
@@ -15,6 +30,12 @@
 #define ROUND_DOWN_16(v) ((v) & ~15)
 #define OOT_PSP_FILTER_TAP_COUNT 8
 #define OOT_PSP_A_COPYBLOCKS 16
+#define OOT_PSP_MIXER_VME_MAX_SAMPLES 1024
+#define OOT_PSP_MIXER_VME_PROLOGUE 0x10
+#define OOT_PSP_MIXER_VME_LANE_STRIDE 0x2000
+#define OOT_PSP_ENVMIXER_VME_HALF_SAMPLES 8
+#define OOT_PSP_ENVMIXER_VME_BLOCK_SAMPLES (2 * OOT_PSP_ENVMIXER_VME_HALF_SAMPLES)
+#define OOT_PSP_MIXER_VME_MUL_OP 0x00204000
 
 #define DMEM_U8(addr) (&sMixer.dmem.u8[(u16)(addr)])
 #define DMEM_S16(addr) (&sMixer.dmem.s16[(u16)(addr) / sizeof(s16)])
@@ -44,6 +65,19 @@ typedef struct {
 } OotPspMixerState;
 
 static OotPspMixerState sMixer __attribute__((aligned(64)));
+
+#if defined(TARGET_PSP) && OOT_PSP_AUDIO_MIXER_VME
+static volatile s32 sMixerVmeReady;
+static volatile u32 sMixerVmeRuns;
+static volatile u32 sMixerVmeFallbacks;
+static volatile u32 sMixerEnvVmeRuns;
+static volatile u32 sMixerEnvVmeFallbacks;
+#endif
+
+#if (OOT_PSP_AUDIO_MIXER_FAST || OOT_PSP_AUDIO_MIXER_VME) && OOT_PSP_AUDIO_MIXER_VERIFY
+static volatile u32 sMixerMixVerifyMismatches;
+static volatile u32 sMixerEnvVerifyMismatches;
+#endif
 
 static s16 sResampleTable[64][4] = {
     { 0x0C39, 0x66AD, 0x0D46, 0xFFDF }, { 0x0B39, 0x6696, 0x0E5F, 0xFFD8 },
@@ -98,6 +132,27 @@ static s16 OotPspMixer_Vmulf(s16 left, s16 right) {
 
 static s16 OotPspMixer_Vadd(s16 left, s16 right) {
     return OotPspMixer_Clamp16((s32)left + right);
+}
+
+void OotPspMixer_InitVme(void) {
+#if defined(TARGET_PSP) && OOT_PSP_AUDIO_MIXER_VME
+    if (meLibGetCpuId() == 1) {
+        vmeLibEnable();
+        vmeLibWipe();
+        meLibSync();
+        sMixerVmeReady = 1;
+    }
+#endif
+}
+
+void OotPspMixer_ShutdownVme(void) {
+#if defined(TARGET_PSP) && OOT_PSP_AUDIO_MIXER_VME
+    if ((meLibGetCpuId() == 1) && sMixerVmeReady) {
+        sMixerVmeReady = 0;
+        meLibSync();
+        vmeLibDisable();
+    }
+#endif
 }
 
 static s16 OotPspMixer_SignExtendShift2(u8 value, s32 shift) {
@@ -351,8 +406,217 @@ static s16 OotPspMixer_MulHighSignedUnsigned(s16 sample, u16 volume) {
     return (s16)(((s32)sample * volume) >> 16);
 }
 
-void OotPspMixer_EnvMixer(u16 dmemSrc, s32 aiBufLen, s32 swapLR, s32 x0, s32 x1, s32 x2, s32 x3, u32 dmemDests,
-                          UNUSED u32 bits) {
+static void OotPspMixer_EnvMixerProducts(s16 sample, u16 volLeft, u16 volRight, u16 reverb, s16 dryLeftMask,
+                                         s16 dryRightMask, s16 wetLeftMask, s16 wetRightMask, s16* leftOut,
+                                         s16* rightOut, s16* wetLeftOut, s16* wetRightOut) {
+    s16 left = OotPspMixer_MulHighSignedUnsigned(sample, volLeft);
+    s16 right = OotPspMixer_MulHighSignedUnsigned(sample, volRight);
+    s16 wetLeft;
+    s16 wetRight;
+
+    left ^= dryLeftMask;
+    right ^= dryRightMask;
+
+    wetLeft = OotPspMixer_MulHighSignedUnsigned(left, reverb);
+    wetRight = OotPspMixer_MulHighSignedUnsigned(right, reverb);
+    wetLeft ^= wetLeftMask;
+    wetRight ^= wetRightMask;
+
+    *leftOut = left;
+    *rightOut = right;
+    *wetLeftOut = wetLeft;
+    *wetRightOut = wetRight;
+}
+
+#if !OOT_PSP_AUDIO_MIXER_FAST || OOT_PSP_AUDIO_MIXER_VERIFY
+static s16 OotPspMixer_MixSampleReference(s16 in, s16 out, s16 gain) {
+    s32 outProduct = (s32)out * 0x7FFF;
+    s32 inProduct = (s32)in * gain;
+    s32 accumulator;
+
+    if ((inProduct > 0) && (outProduct > (0x7FFFFFFF - inProduct))) {
+        return 0x7FFF;
+    }
+    if ((inProduct < 0) && (outProduct < ((-0x7FFFFFFF - 1) - inProduct))) {
+        return -0x8000;
+    }
+
+    accumulator = outProduct + inProduct;
+    if (accumulator > (0x7FFFFFFF - 0x4000)) {
+        return 0x7FFF;
+    }
+
+    return OotPspMixer_Clamp16((accumulator + 0x4000) >> 15);
+}
+#endif
+
+#if OOT_PSP_AUDIO_MIXER_FAST
+static s16 OotPspMixer_MixSampleFast(s16 in, s16 out, s16 gain) {
+    s32 accumulator = ((s32)out * 0x7FFF) + ((s32)in * gain);
+
+    return OotPspMixer_Clamp16((accumulator + 0x4000) >> 15);
+}
+#endif
+
+#if OOT_PSP_AUDIO_MIXER_FAST && OOT_PSP_AUDIO_MIXER_VERIFY
+static s16 OotPspMixer_MixSampleFastVerified(s16 in, s16 out, s16 gain) {
+    s16 mixed = OotPspMixer_MixSampleFast(in, out, gain);
+    s16 reference = OotPspMixer_MixSampleReference(in, out, gain);
+
+    if (mixed != reference) {
+        sMixerMixVerifyMismatches++;
+        return reference;
+    }
+
+    return mixed;
+}
+#endif
+
+#if defined(TARGET_PSP) && OOT_PSP_AUDIO_MIXER_VME
+static s32 OotPspMixer_IsVmeAvailable(void) {
+    return sMixerVmeReady && (meLibGetCpuId() == 1);
+}
+
+static volatile s32* OotPspMixer_VmeTopLane(s32 lane) {
+    return (volatile s32*)(VME_TOP_BUFFERS + (lane * OOT_PSP_MIXER_VME_LANE_STRIDE));
+}
+
+static volatile s32* OotPspMixer_VmeBaseLane(s32 lane) {
+    return (volatile s32*)(VME_BASE_BUFFERS + (lane * OOT_PSP_MIXER_VME_LANE_STRIDE));
+}
+
+static void OotPspMixer_VmeClearTail(volatile s32* lane, s32 count, s32 vmeCount) {
+    s32 i;
+
+    for (i = count; i < vmeCount; i++) {
+        lane[i] = 0;
+    }
+}
+
+static void OotPspMixer_VmeMul4(s32 count, s32 factor0, s32 factor1, s32 factor2, s32 factor3) {
+    s32 vmeCount = count + OOT_PSP_MIXER_VME_PROLOGUE;
+
+    meLibSync();
+    vmeLibStart();
+
+    vme_icn(FLOW, 0);
+    vme_icn(ARCH, VME_DEF_MAPPER);
+
+    vme_pe0(vme_fu(PRIMARY), vme_mux(TOP_0), OOT_PSP_MIXER_VME_MUL_OP, 0);
+    vme_pe0(fu_reg(PRIMARY, B), (u32)factor0);
+    vme_pe0(agu_top(MODE), VME_DEF_MODE);
+    vme_pe0(agu_top(COUNT), VME_DEF_STEP, vmeCount - 1);
+    vme_pe0(agu_base(MODE), VME_DEF_MODE);
+    vme_pe0(agu_base(COUNT), VME_DEF_STEP, vmeCount - 1);
+    vme_pe0(agu_write(MODE), VME_DEF_MODE, VME_CYCLE_6);
+    vme_pe0(agu_write(COUNT), VME_DEF_STEP, vmeCount - 1);
+    vme_pe0(agu_write(FORMAT_0), OOT_PSP_MIXER_VME_PROLOGUE);
+    vme_pe0(agu_write(FORMAT_1), VME_END_TOKEN);
+
+    vme_pe1(vme_fu(PRIMARY), vme_mux(TOP_1), OOT_PSP_MIXER_VME_MUL_OP, 0);
+    vme_pe1(fu_reg(PRIMARY, B), (u32)factor1);
+    vme_pe1(agu_top(MODE), VME_DEF_MODE);
+    vme_pe1(agu_top(COUNT), VME_DEF_STEP, vmeCount - 1);
+    vme_pe1(agu_base(MODE), VME_DEF_MODE);
+    vme_pe1(agu_base(COUNT), VME_DEF_STEP, vmeCount - 1);
+    vme_pe1(agu_write(MODE), VME_DEF_MODE, VME_CYCLE_6);
+    vme_pe1(agu_write(COUNT), VME_DEF_STEP, vmeCount - 1);
+    vme_pe1(agu_write(FORMAT_0), OOT_PSP_MIXER_VME_PROLOGUE);
+    vme_pe1(agu_write(FORMAT_1), VME_END_TOKEN);
+
+    vme_pe2(vme_fu(PRIMARY), vme_mux(TOP_2), OOT_PSP_MIXER_VME_MUL_OP, 0);
+    vme_pe2(fu_reg(PRIMARY, B), (u32)factor2);
+    vme_pe2(agu_top(MODE), VME_DEF_MODE);
+    vme_pe2(agu_top(COUNT), VME_DEF_STEP, vmeCount - 1);
+    vme_pe2(agu_base(MODE), VME_DEF_MODE);
+    vme_pe2(agu_base(COUNT), VME_DEF_STEP, vmeCount - 1);
+    vme_pe2(agu_write(MODE), VME_DEF_MODE, VME_CYCLE_6);
+    vme_pe2(agu_write(COUNT), VME_DEF_STEP, vmeCount - 1);
+    vme_pe2(agu_write(FORMAT_0), OOT_PSP_MIXER_VME_PROLOGUE);
+    vme_pe2(agu_write(FORMAT_1), VME_END_TOKEN);
+
+    vme_pe3(vme_fu(PRIMARY), vme_mux(TOP_3), OOT_PSP_MIXER_VME_MUL_OP, 0);
+    vme_pe3(fu_reg(PRIMARY, B), (u32)factor3);
+    vme_pe3(agu_top(MODE), VME_DEF_MODE);
+    vme_pe3(agu_top(COUNT), VME_DEF_STEP, vmeCount - 1);
+    vme_pe3(agu_base(MODE), VME_DEF_MODE);
+    vme_pe3(agu_base(COUNT), VME_DEF_STEP, vmeCount - 1);
+    vme_pe3(agu_write(MODE), VME_DEF_MODE, VME_CYCLE_6);
+    vme_pe3(agu_write(COUNT), VME_DEF_STEP, vmeCount - 1);
+    vme_pe3(agu_write(FORMAT_0), OOT_PSP_MIXER_VME_PROLOGUE);
+    vme_pe3(agu_write(FORMAT_1), VME_END_TOKEN);
+
+    vmeLibFinish();
+    meLibSync();
+}
+
+static s32 OotPspMixer_MixVme(s16* in, s16* out, s16 gain, s32 samples) {
+    volatile s32* top = (volatile s32*)VME_TOP_BUFFERS;
+    volatile s32* products = (volatile s32*)VME_BASE_BUFFERS;
+    s32 vmeCount = samples + OOT_PSP_MIXER_VME_PROLOGUE;
+    s32 i;
+
+    if (!OotPspMixer_IsVmeAvailable() || (samples <= 0) || (samples > OOT_PSP_MIXER_VME_MAX_SAMPLES)) {
+        sMixerVmeFallbacks++;
+        return 0;
+    }
+
+    for (i = 0; i < samples; i++) {
+        top[i] = in[i];
+    }
+
+    for (; i < vmeCount; i++) {
+        top[i] = 0;
+    }
+
+    meLibSync();
+    vmeLibStart();
+
+    vme_icn(FLOW, 0);
+    vme_icn(ARCH, VME_DEF_MAPPER);
+
+    vme_pe0(vme_fu(PRIMARY), vme_mux(TOP_0), OOT_PSP_MIXER_VME_MUL_OP, 0);
+    vme_pe0(fu_reg(PRIMARY, B), (u32)(s32)gain);
+
+    vme_pe0(agu_top(MODE), VME_DEF_MODE);
+    vme_pe0(agu_top(COUNT), VME_DEF_STEP, vmeCount - 1);
+
+    vme_pe0(agu_base(MODE), VME_DEF_MODE);
+    vme_pe0(agu_base(COUNT), VME_DEF_STEP, vmeCount - 1);
+
+    vme_pe0(agu_write(MODE), VME_DEF_MODE, VME_CYCLE_6);
+    vme_pe0(agu_write(COUNT), VME_DEF_STEP, vmeCount - 1);
+    vme_pe0(agu_write(FORMAT_0), OOT_PSP_MIXER_VME_PROLOGUE);
+    vme_pe0(agu_write(FORMAT_1), VME_END_TOKEN);
+
+    vmeLibFinish();
+    meLibSync();
+
+    products += OOT_PSP_MIXER_VME_PROLOGUE;
+    for (i = 0; i < samples; i++) {
+        s16 oldOut = out[i];
+        s32 accumulator = ((s32)oldOut * 0x7FFF) + products[i];
+        s16 mixed = OotPspMixer_Clamp16((accumulator + 0x4000) >> 15);
+
+#if OOT_PSP_AUDIO_MIXER_VERIFY
+        s16 reference = OotPspMixer_MixSampleReference(in[i], oldOut, gain);
+
+        if (mixed != reference) {
+            sMixerMixVerifyMismatches++;
+            mixed = reference;
+        }
+#endif
+
+        out[i] = mixed;
+    }
+
+    sMixerVmeRuns++;
+    return 1;
+}
+#endif
+
+static void OotPspMixer_EnvMixerCpu(u16 dmemSrc, s32 aiBufLen, s32 swapLR, s32 x0, s32 x1, s32 x2, s32 x3,
+                                    u32 dmemDests) {
     s16* in = DMEM_S16(dmemSrc);
     s16* dryLeft = DMEM_S16(((dmemDests >> 24) & 0xFF) << 4);
     s16* dryRight = DMEM_S16(((dmemDests >> 16) & 0xFF) << 4);
@@ -381,23 +645,18 @@ void OotPspMixer_EnvMixer(u16 dmemSrc, s32 aiBufLen, s32 swapLR, s32 x0, s32 x1,
             u16 volLeft = (block < 8) ? volLeft0 : volLeft1;
             u16 volRight = (block < 8) ? volRight0 : volRight1;
             u16 reverb = (block < 8) ? reverb0 : reverb1;
-            s16 left = OotPspMixer_MulHighSignedUnsigned(sample, volLeft);
-            s16 right = OotPspMixer_MulHighSignedUnsigned(sample, volRight);
+            s16 left;
+            s16 right;
             s16 wetL;
             s16 wetR;
 
-            left ^= dryLeftMask;
-            right ^= dryRightMask;
+            OotPspMixer_EnvMixerProducts(sample, volLeft, volRight, reverb, dryLeftMask, dryRightMask, wetLeftMask,
+                                         wetRightMask, &left, &right, &wetL, &wetR);
 
             *dryLeft = OotPspMixer_Clamp16(*dryLeft + left);
             dryLeft++;
             *dryRight = OotPspMixer_Clamp16(*dryRight + right);
             dryRight++;
-
-            wetL = OotPspMixer_MulHighSignedUnsigned(left, reverb);
-            wetR = OotPspMixer_MulHighSignedUnsigned(right, reverb);
-            wetL ^= wetLeftMask;
-            wetR ^= wetRightMask;
 
             if (swapLR) {
                 *wetLeft = OotPspMixer_Clamp16(*wetLeft + wetR);
@@ -422,30 +681,215 @@ void OotPspMixer_EnvMixer(u16 dmemSrc, s32 aiBufLen, s32 swapLR, s32 x0, s32 x1,
     }
 }
 
+#if defined(TARGET_PSP) && OOT_PSP_AUDIO_MIXER_VME
+static s32 OotPspMixer_EnvMixerVme(u16 dmemSrc, s32 aiBufLen, s32 swapLR, s32 x0, s32 x1, s32 x2, s32 x3,
+                                   u32 dmemDests) {
+    s16* in = DMEM_S16(dmemSrc);
+    s16* dryLeft = DMEM_S16(((dmemDests >> 24) & 0xFF) << 4);
+    s16* dryRight = DMEM_S16(((dmemDests >> 16) & 0xFF) << 4);
+    s16* wetLeft = DMEM_S16(((dmemDests >> 8) & 0xFF) << 4);
+    s16* wetRight = DMEM_S16((dmemDests & 0xFF) << 4);
+    u16 volLeft0 = (u16)sMixer.env.volLeft;
+    u16 volRight0 = (u16)sMixer.env.volRight;
+    u16 reverb0 = (u16)(sMixer.env.initialReverb << 8);
+    u16 volLeft1 = (u16)(volLeft0 + (s16)sMixer.env.rampLeft);
+    u16 volRight1 = (u16)(volRight0 + (s16)sMixer.env.rampRight);
+    u16 reverb1 = (u16)(reverb0 + (s16)sMixer.env.rampReverb);
+    s16 rampLeft = (s16)(sMixer.env.rampLeft * 2);
+    s16 rampRight = (s16)(sMixer.env.rampRight * 2);
+    s16 rampReverb = (s16)(sMixer.env.rampReverb * 2);
+    s16 dryLeftMask = x2 ? -1 : 0;
+    s16 dryRightMask = x3 ? -1 : 0;
+    s16 wetLeftMask = x0 ? -4 : 0;
+    s16 wetRightMask = x1 ? -2 : 0;
+    volatile s32* top0 = OotPspMixer_VmeTopLane(0);
+    volatile s32* top1 = OotPspMixer_VmeTopLane(1);
+    volatile s32* top2 = OotPspMixer_VmeTopLane(2);
+    volatile s32* top3 = OotPspMixer_VmeTopLane(3);
+    volatile s32* product0 = OotPspMixer_VmeBaseLane(0) + OOT_PSP_MIXER_VME_PROLOGUE;
+    volatile s32* product1 = OotPspMixer_VmeBaseLane(1) + OOT_PSP_MIXER_VME_PROLOGUE;
+    volatile s32* product2 = OotPspMixer_VmeBaseLane(2) + OOT_PSP_MIXER_VME_PROLOGUE;
+    volatile s32* product3 = OotPspMixer_VmeBaseLane(3) + OOT_PSP_MIXER_VME_PROLOGUE;
+    s32 remaining = ROUND_UP_16(aiBufLen);
+    s32 vmeCount = OOT_PSP_ENVMIXER_VME_HALF_SAMPLES + OOT_PSP_MIXER_VME_PROLOGUE;
+    s16 samples[OOT_PSP_ENVMIXER_VME_BLOCK_SAMPLES];
+    s16 left[OOT_PSP_ENVMIXER_VME_BLOCK_SAMPLES];
+    s16 right[OOT_PSP_ENVMIXER_VME_BLOCK_SAMPLES];
+    s16 wetL[OOT_PSP_ENVMIXER_VME_BLOCK_SAMPLES];
+    s16 wetR[OOT_PSP_ENVMIXER_VME_BLOCK_SAMPLES];
+    s32 i;
+
+    if (!OotPspMixer_IsVmeAvailable()) {
+        sMixerEnvVmeFallbacks++;
+        return 0;
+    }
+
+    while (remaining > 0) {
+        for (i = 0; i < OOT_PSP_ENVMIXER_VME_HALF_SAMPLES; i++) {
+            samples[i] = in[i];
+            samples[i + OOT_PSP_ENVMIXER_VME_HALF_SAMPLES] = in[i + OOT_PSP_ENVMIXER_VME_HALF_SAMPLES];
+
+            top0[i] = samples[i];
+            top1[i] = samples[i];
+            top2[i] = samples[i + OOT_PSP_ENVMIXER_VME_HALF_SAMPLES];
+            top3[i] = samples[i + OOT_PSP_ENVMIXER_VME_HALF_SAMPLES];
+        }
+        OotPspMixer_VmeClearTail(top0, OOT_PSP_ENVMIXER_VME_HALF_SAMPLES, vmeCount);
+        OotPspMixer_VmeClearTail(top1, OOT_PSP_ENVMIXER_VME_HALF_SAMPLES, vmeCount);
+        OotPspMixer_VmeClearTail(top2, OOT_PSP_ENVMIXER_VME_HALF_SAMPLES, vmeCount);
+        OotPspMixer_VmeClearTail(top3, OOT_PSP_ENVMIXER_VME_HALF_SAMPLES, vmeCount);
+
+        OotPspMixer_VmeMul4(OOT_PSP_ENVMIXER_VME_HALF_SAMPLES, volLeft0, volRight0, volLeft1, volRight1);
+
+        for (i = 0; i < OOT_PSP_ENVMIXER_VME_HALF_SAMPLES; i++) {
+            left[i] = (s16)(product0[i] >> 16);
+            right[i] = (s16)(product1[i] >> 16);
+            left[i + OOT_PSP_ENVMIXER_VME_HALF_SAMPLES] = (s16)(product2[i] >> 16);
+            right[i + OOT_PSP_ENVMIXER_VME_HALF_SAMPLES] = (s16)(product3[i] >> 16);
+
+            left[i] ^= dryLeftMask;
+            right[i] ^= dryRightMask;
+            left[i + OOT_PSP_ENVMIXER_VME_HALF_SAMPLES] ^= dryLeftMask;
+            right[i + OOT_PSP_ENVMIXER_VME_HALF_SAMPLES] ^= dryRightMask;
+
+            top0[i] = left[i];
+            top1[i] = right[i];
+            top2[i] = left[i + OOT_PSP_ENVMIXER_VME_HALF_SAMPLES];
+            top3[i] = right[i + OOT_PSP_ENVMIXER_VME_HALF_SAMPLES];
+        }
+        OotPspMixer_VmeClearTail(top0, OOT_PSP_ENVMIXER_VME_HALF_SAMPLES, vmeCount);
+        OotPspMixer_VmeClearTail(top1, OOT_PSP_ENVMIXER_VME_HALF_SAMPLES, vmeCount);
+        OotPspMixer_VmeClearTail(top2, OOT_PSP_ENVMIXER_VME_HALF_SAMPLES, vmeCount);
+        OotPspMixer_VmeClearTail(top3, OOT_PSP_ENVMIXER_VME_HALF_SAMPLES, vmeCount);
+
+        OotPspMixer_VmeMul4(OOT_PSP_ENVMIXER_VME_HALF_SAMPLES, reverb0, reverb0, reverb1, reverb1);
+
+        for (i = 0; i < OOT_PSP_ENVMIXER_VME_HALF_SAMPLES; i++) {
+            wetL[i] = (s16)(product0[i] >> 16);
+            wetR[i] = (s16)(product1[i] >> 16);
+            wetL[i + OOT_PSP_ENVMIXER_VME_HALF_SAMPLES] = (s16)(product2[i] >> 16);
+            wetR[i + OOT_PSP_ENVMIXER_VME_HALF_SAMPLES] = (s16)(product3[i] >> 16);
+
+            wetL[i] ^= wetLeftMask;
+            wetR[i] ^= wetRightMask;
+            wetL[i + OOT_PSP_ENVMIXER_VME_HALF_SAMPLES] ^= wetLeftMask;
+            wetR[i + OOT_PSP_ENVMIXER_VME_HALF_SAMPLES] ^= wetRightMask;
+        }
+
+        for (i = 0; i < OOT_PSP_ENVMIXER_VME_BLOCK_SAMPLES; i++) {
+#if OOT_PSP_AUDIO_MIXER_VERIFY
+            u16 volLeft = (i < OOT_PSP_ENVMIXER_VME_HALF_SAMPLES) ? volLeft0 : volLeft1;
+            u16 volRight = (i < OOT_PSP_ENVMIXER_VME_HALF_SAMPLES) ? volRight0 : volRight1;
+            u16 reverb = (i < OOT_PSP_ENVMIXER_VME_HALF_SAMPLES) ? reverb0 : reverb1;
+            s16 refLeft;
+            s16 refRight;
+            s16 refWetL;
+            s16 refWetR;
+
+            OotPspMixer_EnvMixerProducts(samples[i], volLeft, volRight, reverb, dryLeftMask, dryRightMask,
+                                         wetLeftMask, wetRightMask, &refLeft, &refRight, &refWetL, &refWetR);
+            if ((left[i] != refLeft) || (right[i] != refRight) || (wetL[i] != refWetL) || (wetR[i] != refWetR)) {
+                sMixerEnvVerifyMismatches++;
+                left[i] = refLeft;
+                right[i] = refRight;
+                wetL[i] = refWetL;
+                wetR[i] = refWetR;
+            }
+#endif
+
+            *dryLeft = OotPspMixer_Clamp16(*dryLeft + left[i]);
+            dryLeft++;
+            *dryRight = OotPspMixer_Clamp16(*dryRight + right[i]);
+            dryRight++;
+
+            if (swapLR) {
+                *wetLeft = OotPspMixer_Clamp16(*wetLeft + wetR[i]);
+                wetLeft++;
+                *wetRight = OotPspMixer_Clamp16(*wetRight + wetL[i]);
+                wetRight++;
+            } else {
+                *wetLeft = OotPspMixer_Clamp16(*wetLeft + wetL[i]);
+                wetLeft++;
+                *wetRight = OotPspMixer_Clamp16(*wetRight + wetR[i]);
+                wetRight++;
+            }
+        }
+
+        in += OOT_PSP_ENVMIXER_VME_BLOCK_SAMPLES;
+        volLeft0 = (u16)(volLeft0 + rampLeft);
+        volLeft1 = (u16)(volLeft1 + rampLeft);
+        volRight0 = (u16)(volRight0 + rampRight);
+        volRight1 = (u16)(volRight1 + rampRight);
+        reverb0 = (u16)(reverb0 + rampReverb);
+        reverb1 = (u16)(reverb1 + rampReverb);
+        remaining -= OOT_PSP_ENVMIXER_VME_BLOCK_SAMPLES;
+    }
+
+    sMixerEnvVmeRuns++;
+    return 1;
+}
+#endif
+
+void OotPspMixer_EnvMixer(u16 dmemSrc, s32 aiBufLen, s32 swapLR, s32 x0, s32 x1, s32 x2, s32 x3, u32 dmemDests,
+                          UNUSED u32 bits) {
+#if defined(TARGET_PSP) && OOT_PSP_AUDIO_MIXER_VME
+    if (OotPspMixer_EnvMixerVme(dmemSrc, aiBufLen, swapLR, x0, x1, x2, x3, dmemDests)) {
+        return;
+    }
+#endif
+
+    OotPspMixer_EnvMixerCpu(dmemSrc, aiBufLen, swapLR, x0, x1, x2, x3, dmemDests);
+}
+
 void OotPspMixer_Mix(s32 countQuads, s16 gain, u16 dmemIn, u16 dmemOut) {
     s16* in = DMEM_S16(dmemIn);
     s16* out = DMEM_S16(dmemOut);
     s32 samples = ROUND_UP_32((countQuads & 0xFF) << 4) / sizeof(s16);
     s32 i;
 
-    for (i = 0; i < samples; i++) {
-        s32 outProduct = (s32)out[i] * 0x7FFF;
-        s32 inProduct = (s32)in[i] * gain;
-        s32 accumulator;
-
-        if ((inProduct > 0) && (outProduct > (0x7FFFFFFF - inProduct))) {
-            out[i] = 0x7FFF;
-        } else if ((inProduct < 0) && (outProduct < ((-0x7FFFFFFF - 1) - inProduct))) {
-            out[i] = -0x8000;
-        } else {
-            accumulator = outProduct + inProduct;
-            if (accumulator > (0x7FFFFFFF - 0x4000)) {
-                out[i] = 0x7FFF;
-            } else {
-                out[i] = OotPspMixer_Clamp16((accumulator + 0x4000) >> 15);
-            }
-        }
+#if defined(TARGET_PSP) && OOT_PSP_AUDIO_MIXER_VME
+    if (OotPspMixer_MixVme(in, out, gain, samples)) {
+        return;
     }
+#endif
+
+#if OOT_PSP_AUDIO_MIXER_FAST
+    s32 unrolledSamples = samples & ~7;
+
+    for (i = 0; i < unrolledSamples; i += 8) {
+#if OOT_PSP_AUDIO_MIXER_VERIFY
+        out[i + 0] = OotPspMixer_MixSampleFastVerified(in[i + 0], out[i + 0], gain);
+        out[i + 1] = OotPspMixer_MixSampleFastVerified(in[i + 1], out[i + 1], gain);
+        out[i + 2] = OotPspMixer_MixSampleFastVerified(in[i + 2], out[i + 2], gain);
+        out[i + 3] = OotPspMixer_MixSampleFastVerified(in[i + 3], out[i + 3], gain);
+        out[i + 4] = OotPspMixer_MixSampleFastVerified(in[i + 4], out[i + 4], gain);
+        out[i + 5] = OotPspMixer_MixSampleFastVerified(in[i + 5], out[i + 5], gain);
+        out[i + 6] = OotPspMixer_MixSampleFastVerified(in[i + 6], out[i + 6], gain);
+        out[i + 7] = OotPspMixer_MixSampleFastVerified(in[i + 7], out[i + 7], gain);
+#else
+        out[i + 0] = OotPspMixer_MixSampleFast(in[i + 0], out[i + 0], gain);
+        out[i + 1] = OotPspMixer_MixSampleFast(in[i + 1], out[i + 1], gain);
+        out[i + 2] = OotPspMixer_MixSampleFast(in[i + 2], out[i + 2], gain);
+        out[i + 3] = OotPspMixer_MixSampleFast(in[i + 3], out[i + 3], gain);
+        out[i + 4] = OotPspMixer_MixSampleFast(in[i + 4], out[i + 4], gain);
+        out[i + 5] = OotPspMixer_MixSampleFast(in[i + 5], out[i + 5], gain);
+        out[i + 6] = OotPspMixer_MixSampleFast(in[i + 6], out[i + 6], gain);
+        out[i + 7] = OotPspMixer_MixSampleFast(in[i + 7], out[i + 7], gain);
+#endif
+    }
+
+    for (; i < samples; i++) {
+#if OOT_PSP_AUDIO_MIXER_VERIFY
+        out[i] = OotPspMixer_MixSampleFastVerified(in[i], out[i], gain);
+#else
+        out[i] = OotPspMixer_MixSampleFast(in[i], out[i], gain);
+#endif
+    }
+#else
+    for (i = 0; i < samples; i++) {
+        out[i] = OotPspMixer_MixSampleReference(in[i], out[i], gain);
+    }
+#endif
 }
 
 void OotPspMixer_AddMixer(s32 nbytes, u16 dmemIn, u16 dmemOut, UNUSED s16 gain) {
