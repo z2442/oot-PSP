@@ -3285,6 +3285,11 @@ static bool gfx_cc_is_texture_prim_env_blend(uint32_t a, uint32_t b, uint32_t c,
            (d == G_CCMUX_ENVIRONMENT);
 }
 
+static bool gfx_cc_is_color_mul(uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t lhs, uint32_t rhs) {
+    return (b == (G_CCMUX_0 & 0xF)) && (d == (G_CCMUX_0 & 0x7)) &&
+           (((a == lhs) && (c == rhs)) || ((a == rhs) && (c == lhs)));
+}
+
 static bool gfx_cc_is_one(uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
     return (a == G_ACMUX_0) && (b == G_ACMUX_0) && (c == G_ACMUX_0) && (d == G_ACMUX_1);
 }
@@ -4301,17 +4306,14 @@ static void gfx_run_dl(Gfx* cmd) {
                 uint32_t alphaB1 = C1(3, 3);
                 uint32_t alphaC1 = C1(18, 3);
                 uint32_t alphaD1 = C1(0, 3);
-                bool colorMulTexelShade =
-                    (rgbA0 == G_CCMUX_TEXEL0) && (rgbB0 == (G_CCMUX_0 & 0xF)) &&
-                    (rgbC0 == G_CCMUX_SHADE) && (rgbD0 == (G_CCMUX_0 & 0x7));
-                bool colorMulEnv =
-                    colorMulTexelShade &&
-                    (rgbA1 == G_CCMUX_ENVIRONMENT) && (rgbB1 == (G_CCMUX_0 & 0xF)) &&
-                    (rgbC1 == G_CCMUX_COMBINED) && (rgbD1 == (G_CCMUX_0 & 0x7));
-                bool colorMulPrim =
-                    colorMulTexelShade &&
-                    (rgbA1 == G_CCMUX_COMBINED) && (rgbB1 == (G_CCMUX_0 & 0xF)) &&
-                    (rgbC1 == G_CCMUX_PRIMITIVE) && (rgbD1 == (G_CCMUX_0 & 0x7));
+                bool colorMulTexelShade = gfx_cc_is_color_mul(rgbA0, rgbB0, rgbC0, rgbD0, G_CCMUX_TEXEL0,
+                                                              G_CCMUX_SHADE);
+                bool colorMulEnv = colorMulTexelShade && gfx_cc_is_color_mul(rgbA1, rgbB1, rgbC1, rgbD1,
+                                                                              G_CCMUX_ENVIRONMENT,
+                                                                              G_CCMUX_COMBINED);
+                bool colorMulPrim = colorMulTexelShade && gfx_cc_is_color_mul(rgbA1, rgbB1, rgbC1, rgbD1,
+                                                                               G_CCMUX_COMBINED,
+                                                                               G_CCMUX_PRIMITIVE);
                 bool textureBlend = gfx_cc_is_texture_prim_env_blend(rgbA0, rgbB0, rgbC0, rgbD0);
                 uint32_t rgbComb = color_comb(rgbA0, rgbB0, rgbC0, rgbD0);
                 uint32_t alphaComb = color_comb(alphaA0, alphaB0, alphaC0, alphaD0);
