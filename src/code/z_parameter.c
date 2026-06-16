@@ -2810,8 +2810,26 @@ void Magic_DrawMeter(PlayState* play) {
         OVERLAY_DISP = Gfx_TextureIA8(OVERLAY_DISP, gMagicMeterEndTex, 8, 16, R_MAGIC_METER_X, magicMeterY, 8, 16,
                                       1 << 10, 1 << 10);
 
+#if PLATFORM_PSP
+        {
+            s16 midX = R_MAGIC_METER_X + 8;
+            s16 remainingWidth = gSaveContext.magicCapacity;
+
+            while (remainingWidth > 0) {
+                s16 chunkWidth =
+                    (remainingWidth < gMagicMeterMidTex_WIDTH) ? remainingWidth : gMagicMeterMidTex_WIDTH;
+
+                OVERLAY_DISP = Gfx_TextureIA8(OVERLAY_DISP, gMagicMeterMidTex, gMagicMeterMidTex_WIDTH,
+                                              gMagicMeterMidTex_HEIGHT, midX, magicMeterY, chunkWidth,
+                                              gMagicMeterMidTex_HEIGHT, 1 << 10, 1 << 10);
+                midX += chunkWidth;
+                remainingWidth -= chunkWidth;
+            }
+        }
+#else
         OVERLAY_DISP = Gfx_TextureIA8(OVERLAY_DISP, gMagicMeterMidTex, 24, 16, R_MAGIC_METER_X + 8, magicMeterY,
                                       gSaveContext.magicCapacity, 16, 1 << 10, 1 << 10);
+#endif
 
         gDPLoadTextureBlock(OVERLAY_DISP++, gMagicMeterEndTex, G_IM_FMT_IA, G_IM_SIZ_8b, 8, 16, 0,
                             G_TX_MIRROR | G_TX_WRAP, G_TX_NOMIRROR | G_TX_WRAP, 3, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
