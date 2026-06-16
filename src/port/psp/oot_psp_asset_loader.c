@@ -1,4 +1,5 @@
 #include "oot_psp_asset_loader.h"
+#include "oot_psp_memory.h"
 #include "segment_symbols.h"
 
 #include <pspiofilemgr.h>
@@ -655,7 +656,16 @@ static OotPspPackedAssetCacheBlock* OotPsp_LoadPackedCacheBlock(SceUID fd, const
     return block;
 }
 
-static s32 OotPsp_ReadPackedAssetFileRangeCached(SceUID fd, const char* path, size_t offset, u8* out, size_t size) {
+static void OotPsp_CopyAssetBytes(void* dst, const void* src, size_t size, s32 useVfpuCopy) {
+    if (useVfpuCopy) {
+        OotPsp_MemcpyVfpu(dst, src, size);
+    } else {
+        memcpy(dst, src, size);
+    }
+}
+
+static s32 OotPsp_ReadPackedAssetFileRangeCached(SceUID fd, const char* path, size_t offset, u8* out, size_t size,
+                                                 s32 useVfpuCopy) {
     size_t remaining = size;
     size_t cursor = offset;
 
@@ -674,7 +684,7 @@ static s32 OotPsp_ReadPackedAssetFileRangeCached(SceUID fd, const char* path, si
         slot = (size_t)(block - sOotPspPackedCacheBlocks);
         available = block->dataSize - blockOffset;
         copySize = remaining < available ? remaining : available;
-        memcpy(out, &OotPsp_PackedCacheBlockData(slot)[blockOffset], copySize);
+        OotPsp_CopyAssetBytes(out, &OotPsp_PackedCacheBlockData(slot)[blockOffset], copySize, useVfpuCopy);
 
         out += copySize;
         cursor += copySize;
@@ -685,7 +695,7 @@ static s32 OotPsp_ReadPackedAssetFileRangeCached(SceUID fd, const char* path, si
 }
 
 static s32 OotPsp_ReadPackedAssetFileRange(const OotPspExternalAsset* asset, size_t offset, u8* out, size_t size,
-                                           s32 useBlockCache) {
+                                           s32 useBlockCache, s32 useVfpuCopy) {
     char pathBuffer[384];
     const char* path;
     SceUID fd;
@@ -701,7 +711,7 @@ static s32 OotPsp_ReadPackedAssetFileRange(const OotPspExternalAsset* asset, siz
     }
 
     packedOffset = asset->fileOffset + offset;
-    if (useBlockCache && OotPsp_ReadPackedAssetFileRangeCached(fd, path, packedOffset, out, size)) {
+    if (useBlockCache && OotPsp_ReadPackedAssetFileRangeCached(fd, path, packedOffset, out, size, useVfpuCopy)) {
         return true;
     }
 
@@ -727,8 +737,8 @@ static s32 OotPsp_ReadLooseAssetFileRange(const OotPspExternalAsset* asset, size
 }
 
 static s32 OotPsp_ReadAssetFileRange(const OotPspExternalAsset* asset, size_t offset, u8* out, size_t size,
-                                     s32 useBlockCache) {
-    if (OotPsp_ReadPackedAssetFileRange(asset, offset, out, size, useBlockCache)) {
+                                     s32 useBlockCache, s32 useVfpuCopy) {
+    if (OotPsp_ReadPackedAssetFileRange(asset, offset, out, size, useBlockCache, useVfpuCopy)) {
         return true;
     }
 
@@ -831,7 +841,7 @@ static s32 OotPsp_EnsureAssetCacheRange(OotPspAssetCache* cache, const OotPspExt
         windowSize = cache->capacity;
     }
 
-    if (!OotPsp_ReadAssetFileRange(asset, windowStart, cache->data, windowSize, false)) {
+    if (!OotPsp_ReadAssetFileRange(asset, windowStart, cache->data, windowSize, false, false)) {
         free(cache->data);
         cache->data = NULL;
         cache->capacity = 0;
@@ -1355,7 +1365,8 @@ static u32 OotPsp_NextLoadedAssetSerial(void) {
     return serial;
 }
 
-static s32 OotPsp_TryReadAssetCache(const OotPspExternalAsset* asset, void* ram, uintptr_t vrom, size_t size) {
+static s32 OotPsp_TryReadAssetCache(const OotPspExternalAsset* asset, void* ram, uintptr_t vrom, size_t size,
+                                    s32 useVfpuCopy) {
     OotPspAssetCache* cache;
     size_t offset;
     size_t cacheOffset;
@@ -1378,7 +1389,7 @@ static s32 OotPsp_TryReadAssetCache(const OotPspExternalAsset* asset, void* ram,
     if ((cacheOffset > cache->dataSize) || (size > (cache->dataSize - cacheOffset))) {
         return false;
     }
-    memcpy(ram, &cache->data[cacheOffset], size);
+    OotPsp_CopyAssetBytes(ram, &cache->data[cacheOffset], size, useVfpuCopy);
     OotPsp_RegisterLoadedAssetRanges(ram, size, vrom, asset, OotPsp_NextLoadedAssetSerial());
     return true;
 }
@@ -1800,7 +1811,7 @@ s32 OotPsp_MapNativeExternalTextureByte(const void* ptr, const void** mapped) {
     return false;
 }
 
-static s32 OotPsp_AssetReadLocked(void* ram, uintptr_t vrom, size_t size) {
+static s32 OotPsp_AssetReadLocked(void* ram, uintptr_t vrom, size_t size, s32 useVfpuCopy) {
     uintptr_t normalizedVrom;
     uintptr_t normalizedEnd;
     uintptr_t cursor;
@@ -1826,7 +1837,7 @@ static s32 OotPsp_AssetReadLocked(void* ram, uintptr_t vrom, size_t size) {
         return OOT_PSP_ASSET_READ_NOT_EXTERNAL;
     }
 
-    if (OotPsp_TryReadAssetCache(&gOotPspExternalAssets[assetIndex], ram, normalizedVrom, size)) {
+    if (OotPsp_TryReadAssetCache(&gOotPspExternalAssets[assetIndex], ram, normalizedVrom, size, useVfpuCopy)) {
         return OOT_PSP_ASSET_READ_OK;
     }
 
@@ -1852,7 +1863,7 @@ static s32 OotPsp_AssetReadLocked(void* ram, uintptr_t vrom, size_t size) {
         chunkRequestedSize = chunkSize;
         chunkSerial = OotPsp_NextLoadedAssetSerial();
 
-        if (!OotPsp_ReadAssetFileRange(asset, offset, out, chunkSize, true)) {
+        if (!OotPsp_ReadAssetFileRange(asset, offset, out, chunkSize, true, useVfpuCopy)) {
             return OOT_PSP_ASSET_READ_FAILED;
         }
 
@@ -1905,7 +1916,7 @@ static s32 OotPsp_AssetReadInternal(void* ram, uintptr_t vrom, size_t size, s32 
         sOotPspForegroundAssetReadWaiters--;
     }
 
-    status = OotPsp_AssetReadLocked(ram, vrom, size);
+    status = OotPsp_AssetReadLocked(ram, vrom, size, !isAudioRead);
     OotPsp_UnlockAssetLoader();
     return status;
 }

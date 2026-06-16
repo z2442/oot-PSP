@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include "psp_texture_manager.h"
+#include "oot_psp_memory.h"
 
 #ifndef OOT_PSP_WAIT_VBLANK
 #define OOT_PSP_WAIT_VBLANK 1
@@ -283,7 +284,7 @@ static void gfx_scegu_copy_framebuffer_cpu(void *dst, const void *src) {
     void *dstAddr = gfx_scegu_vram_cpu_addr(dst);
     const void *srcAddr = gfx_scegu_vram_cpu_addr(src);
 
-    memcpy(dstAddr, srcAddr, FRAMEBUFFER_SIZE);
+    OotPsp_MemcpyVfpu(dstAddr, srcAddr, FRAMEBUFFER_SIZE);
     sceKernelDcacheWritebackRange(dstAddr, FRAMEBUFFER_SIZE);
 }
 
@@ -733,7 +734,7 @@ static void gfx_scegu_draw_triangles(float buf_vbo[], UNUSED size_t buf_vbo_len,
     }
 
     void *buf = sceGuGetMemory(sizeof(Vertex) * 3 * buf_vbo_num_tris);
-    memcpy(buf, buf_vbo, sizeof(Vertex) * 3 * buf_vbo_num_tris);
+    OotPsp_MemcpyVfpu(buf, buf_vbo, sizeof(Vertex) * 3 * buf_vbo_num_tris);
     sceGuDrawArray(GU_TRIANGLES, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D, 3 * buf_vbo_num_tris, 0, buf);
 
     // cur_fog_ofs is only set if GL_EXT_fog_coord isn't used
@@ -746,7 +747,7 @@ void gfx_scegu_draw_triangles_2d(float buf_vbo[], UNUSED size_t buf_vbo_len, UNU
     }
 
     void *quad_buf = sceGuGetMemory(sizeof(VertexColor) * 2);
-    memcpy(quad_buf, buf_vbo, sizeof(VertexColor) * 2);
+    OotPsp_MemcpyVfpu(quad_buf, buf_vbo, sizeof(VertexColor) * 2);
     sceGuDrawArray(GU_SPRITES, GU_TEXTURE_16BIT | GU_COLOR_8888 | GU_VERTEX_16BIT | GU_TRANSFORM_2D, 2, 0, quad_buf);
 }
 

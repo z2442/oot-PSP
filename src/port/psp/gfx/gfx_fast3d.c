@@ -33,6 +33,7 @@
 #include "oot_psp_asset_loader.h"
 #include "oot_psp_compat.h"
 #include "oot_psp_gfx_ext.h"
+#include "oot_psp_memory.h"
 #include "segmented_address.h"
 #include "sys_matrix.h"
 
@@ -823,7 +824,7 @@ static const uint8_t *gfx_prepare_psp_texture_for_upload(const uint8_t *src, uin
             memset(dst_base, 0, left_empty_bytes);
         }
 
-        memcpy(dst_row, src_row, src_row_bytes);
+        OotPsp_MemcpyVfpu(dst_row, src_row, src_row_bytes);
 
         if (use_mirror_s) {
             gfx_copy_psp_mirrored_row(dst_base + (size_t)(pot_width - width) * bytes_per_pixel,
@@ -837,9 +838,9 @@ static const uint8_t *gfx_prepare_psp_texture_for_upload(const uint8_t *src, uin
 
     if (use_mirror_t) {
         for (uint32_t y = 0; y < height; y++) {
-            memcpy(psp_texture_stage_buf + (size_t)(pot_height - 1 - y) * dst_row_bytes,
-                   psp_texture_stage_buf + (size_t)(source_y_offset + y) * dst_row_bytes,
-                   dst_row_bytes);
+            OotPsp_MemcpyVfpu(psp_texture_stage_buf + (size_t)(pot_height - 1 - y) * dst_row_bytes,
+                              psp_texture_stage_buf + (size_t)(source_y_offset + y) * dst_row_bytes,
+                              dst_row_bytes);
         }
     }
 

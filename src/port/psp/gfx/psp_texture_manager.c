@@ -9,6 +9,7 @@
  */
 
 #include "psp_texture_manager.h"
+#include "oot_psp_memory.h"
 #include <string.h>
 #include <pspkernel.h>
 #include <pspdebug.h>
@@ -332,7 +333,7 @@ void texman_upload(int width, int height, unsigned int type, const void *buffer)
     current->height = height;
     current->type = type;
     current->swizzled = GU_FALSE;
-    memcpy(current->location, buffer, size);
+    OotPsp_MemcpyVfpu(current->location, buffer, size);
 #ifdef DEBUG
     // printf("TEX_MAN upload plain [%d]\n", psp_tex_number);
 #endif

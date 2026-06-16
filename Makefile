@@ -1387,6 +1387,7 @@ PSP_PORT_RUNTIME_SOURCES := \
 	src/port/psp/oot_psp_audio_backend.c \
 	src/port/psp/oot_psp_audiomgr.c \
 	src/port/psp/oot_psp_game.c \
+	src/port/psp/oot_psp_memory.c \
 	src/port/psp/oot_psp_mixer.c \
 	src/port/psp/oot_psp_renderer.c \
 	src/port/psp/sys_ucode_psp.c \

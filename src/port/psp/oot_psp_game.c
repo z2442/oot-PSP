@@ -63,6 +63,7 @@
 #include "z_lib.h"
 #include "oot_psp_asset_loader.h"
 #include "oot_psp_audio_backend.h"
+#include "oot_psp_memory.h"
 
 #include <pspiofilemgr.h>
 #include <pspkernel.h>
@@ -465,7 +466,11 @@ static s32 OotPsp_DmaReadInternal(void* ram, uintptr_t vrom, size_t size, s32 is
         Fault_AddHungupAndCrash(__FILE__, __LINE__);
     }
 
-    memcpy(ram, (const void*)vrom, size);
+    if (isAudioRead) {
+        memcpy(ram, (const void*)vrom, size);
+    } else {
+        OotPsp_MemcpyVfpu(ram, (const void*)vrom, size);
+    }
     return 0;
 }
 
