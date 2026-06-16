@@ -4521,24 +4521,7 @@ void gfx_run(Gfx *commands) {
     gfx_rapi->end_frame();
     gfx_wapi->swap_buffers_begin();
     //double t1 = gfx_wapi->get_time();
-    unsigned int t1 = sceKernelLibcClock();
-    //printf("Process %f %f\n", t1, t1 - t0);
-    //printf("Process %d microsec, %f sec\n", t1 - t0, (t1 - t0)/1000000.0f);
-    times[frame_counter] = (t1 - t0)/1000.0f;
-    frame_counter++;
-    time_first_200  += (t1 - t0)/1000.0f;
-    total_frame_counter++;
-    if(frame_counter>=30){
-        frame_counter = 0;
-        int i;
-        for(i=0;i<30;i++)
-            time_avg += times[i];
-        time_avg /= 30;
-        //printf("GFX AVG: %2.3f ms FPS %2.3f\n", time_avg, 1000/time_avg);
-    }
-    if(total_frame_counter == 200){
-        printf("GFX FRAME 250 TIME TAKEN: %2.3f ms FPS %2.3f, AVG: %2.3f ms \n",  time_first_200, (250*1000)/time_first_200, 1000/(250/time_first_200));
-    }
+
 }
 
 void gfx_end_frame(void) {
@@ -4548,10 +4531,5 @@ void gfx_end_frame(void) {
         gfx_rapi->finish_render();
         gfx_wapi->swap_buffers_end();
     }
-    total_t1 = sceKernelLibcClock();
-    float delta = (total_t1 - total_t0)/1000.0f;
-    (void)delta;
-    if(frame_counter>=29){
-        //printf("TOTAL TIME FRAME: %2.3f ms FPS %2.3f\n", delta, 1000/delta);
-    }
+
 }

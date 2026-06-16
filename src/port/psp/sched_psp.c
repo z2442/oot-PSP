@@ -3,6 +3,47 @@
 #include "array_count.h"
 #include "oot_psp_renderer.h"
 
+#include <pspkernel.h>
+
+#define OOT_PSP_VI_RATE_HZ 60
+#define OOT_PSP_MAX_PACING_LAG_USEC 250000ULL
+
+static u64 sNextGfxCompletionUsec;
+
+static s32 SchedPsp_GetUpdateRate(OSScTask* task) {
+    s32 updateRate = 1;
+
+    if (task != NULL && task->framebuffer != NULL && task->framebuffer->updateRate > 0) {
+        updateRate = task->framebuffer->updateRate;
+    }
+
+    return updateRate;
+}
+
+static void SchedPsp_PaceGfxTask(OSScTask* task) {
+    u64 now = sceKernelGetSystemTimeWide();
+    u64 frameUsec = (1000000ULL * (u64)SchedPsp_GetUpdateRate(task)) / OOT_PSP_VI_RATE_HZ;
+
+    if (frameUsec == 0) {
+        frameUsec = 1;
+    }
+
+    if (sNextGfxCompletionUsec == 0 || now > sNextGfxCompletionUsec + OOT_PSP_MAX_PACING_LAG_USEC) {
+        sNextGfxCompletionUsec = now;
+    }
+
+    if (now < sNextGfxCompletionUsec) {
+        sceKernelDelayThread((u32)(sNextGfxCompletionUsec - now));
+        now = sceKernelGetSystemTimeWide();
+    }
+
+    sNextGfxCompletionUsec += frameUsec;
+
+    if (now > sNextGfxCompletionUsec + OOT_PSP_MAX_PACING_LAG_USEC) {
+        sNextGfxCompletionUsec = now + frameUsec;
+    }
+}
+
 void Sched_Notify(Scheduler* sc) {
     OSScTask* task;
 
@@ -21,6 +62,8 @@ void Sched_Notify(Scheduler* sc) {
             if ((task->flags & OS_SC_SWAPBUFFER) && task->framebuffer != NULL) {
                 osViSwapBuffer(task->framebuffer->swapBuffer);
             }
+
+            SchedPsp_PaceGfxTask(task);
         }
 
         if (task->msgQueue != NULL) {
