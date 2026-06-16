@@ -1190,6 +1190,7 @@ PSP_PORT_EFFECT_SOURCES := $(sort $(filter-out %.inc.c,$(wildcard src/overlays/e
 PSP_PORT_KALEIDO_SOURCES := $(sort $(filter-out %.inc.c,$(wildcard src/overlays/misc/ovl_kaleido_scope/*.c)))
 PSP_PORT_RUNTIME_ASM_SOURCES := \
 	src/code/kanread.s \
+	src/port/psp/gfx/gfx_clip_vfpu.s \
 	src/port/psp/oot_psp_ucode_assets.s
 PSP_PORT_ROOT_ASSET_SOURCES := $(sort $(filter-out %.inc.c,$(wildcard assets/objects/*/*.c)))
 PSP_PORT_ROOT_TEXTURE_SOURCES := \

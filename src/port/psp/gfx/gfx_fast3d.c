@@ -107,6 +107,12 @@ struct LoadedVertex {
     uint32_t clip_rej;
 } __attribute__((packed, aligned(16)));
 
+#if defined(TARGET_PSP)
+typedef char LoadedVertex_vfpu_size_check[(sizeof(struct LoadedVertex) == 48) ? 1 : -1];
+extern uint32_t gfx_clip_to_hyperplane_vfpu(struct LoadedVertex *dest, const struct LoadedVertex *source,
+                                            const float plane[4], uint32_t inCount);
+#endif
+
 typedef struct VertexColor {
 	unsigned short u, v;
 	struct RGBA color;
@@ -983,6 +989,13 @@ static const float NDCPlane[6][4] __attribute__((aligned(16))) =
 
 static uint32_t clipToHyperPlane( struct LoadedVertex *dest, const struct LoadedVertex *source, uint32_t inCount, const float plane[4] )
 {
+#if defined(TARGET_PSP)
+	if (inCount == 0) {
+		return 0;
+	}
+
+	return gfx_clip_to_hyperplane_vfpu(dest, source, plane, inCount);
+#else
 	uint32_t outCount;
 	struct LoadedVertex *out;
 
@@ -1044,6 +1057,7 @@ static uint32_t clipToHyperPlane( struct LoadedVertex *dest, const struct Loaded
 	}
 
 	return outCount;
+#endif
 }
 
 uint32_t clip_to_frustum( struct LoadedVertex * v0, struct LoadedVertex * v1, uint32_t vIn )
