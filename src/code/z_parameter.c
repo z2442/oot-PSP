@@ -1303,11 +1303,15 @@ static void Interface_InitPspCounterDigitTextures(void) {
     sPspCounterDigitTexturesInitialized = true;
 }
 
-static Gfx* Gfx_TextureCounterDigit(Gfx* displayListHead, s16 digit, s16 rectLeft, s16 rectTop, s16 rectWidth,
-                                    s16 rectHeight, u16 dsdx, u16 dtdy) {
+void* Interface_GetCounterDigitTexture(s16 digit) {
     Interface_InitPspCounterDigitTextures();
 
-    gDPLoadTextureBlock(displayListHead++, sPspCounterDigitTextures[digit], G_IM_FMT_IA, G_IM_SIZ_16b,
+    return sPspCounterDigitTextures[digit];
+}
+
+static Gfx* Gfx_TextureCounterDigit(Gfx* displayListHead, s16 digit, s16 rectLeft, s16 rectTop, s16 rectWidth,
+                                    s16 rectHeight, u16 dsdx, u16 dtdy) {
+    gDPLoadTextureBlock(displayListHead++, Interface_GetCounterDigitTexture(digit), G_IM_FMT_IA, G_IM_SIZ_16b,
                         gCounterDigit0Tex_WIDTH, gCounterDigit0Tex_HEIGHT, 0, G_TX_NOMIRROR | G_TX_WRAP,
                         G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
 

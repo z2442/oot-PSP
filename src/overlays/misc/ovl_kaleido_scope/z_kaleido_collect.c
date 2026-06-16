@@ -9,11 +9,24 @@
 #include "ocarina.h"
 #include "play_state.h"
 #include "save.h"
+#if PLATFORM_PSP
+#include "interface.h"
+#endif
 
 #include "assets/textures/parameter_static/parameter_static.h"
 #include "assets/textures/icon_item_static/icon_item_static.h"
 
 #define SONG_MAX_LENGTH 8
+
+#if PLATFORM_PSP
+#define gDPLoadCounterDigitTexture(pkt, digit, cms, cmt)                                                        \
+    gDPLoadTextureBlock(pkt, Interface_GetCounterDigitTexture(digit), G_IM_FMT_IA, G_IM_SIZ_16b, 8, 16, 0, cms, \
+                        cmt, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD)
+#else
+#define gDPLoadCounterDigitTexture(pkt, digit, cms, cmt)                                                   \
+    gDPLoadTextureBlock(pkt, ((u8*)gCounterDigit0Tex + (8 * 16 * (digit))), G_IM_FMT_I, G_IM_SIZ_8b, 8, 16, \
+                        0, cms, cmt, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD)
+#endif
 
 #if !PLATFORM_GC
 #define QUEST_OCARINA_BTN_A_COLOR_R 80
@@ -849,9 +862,8 @@ void KaleidoScope_DrawQuestStatus(PlayState* play, GraphicsContext* gfxCtx) {
 
             for (bufI = 0; bufI < 3; bufI++, j += 4) {
                 if ((bufI >= 2) || (gsTokenDigits[bufI] != 0) || cursorItem) {
-                    gDPLoadTextureBlock(POLY_OPA_DISP++, ((u8*)gCounterDigit0Tex + (8 * 16 * gsTokenDigits[bufI])),
-                                        G_IM_FMT_I, G_IM_SIZ_8b, 8, 16, 0, G_TX_NOMIRROR | G_TX_WRAP,
-                                        G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
+                    gDPLoadCounterDigitTexture(POLY_OPA_DISP++, gsTokenDigits[bufI], G_TX_NOMIRROR | G_TX_WRAP,
+                                               G_TX_NOMIRROR | G_TX_WRAP);
 
                     gSP1Quadrangle(POLY_OPA_DISP++, j, j + 2, j + 3, j + 1, 0);
 

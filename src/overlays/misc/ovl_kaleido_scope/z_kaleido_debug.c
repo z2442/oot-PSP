@@ -9,8 +9,21 @@
 #include "translation.h"
 #include "play_state.h"
 #include "save.h"
+#if PLATFORM_PSP
+#include "interface.h"
+#endif
 
 #include "assets/textures/parameter_static/parameter_static.h"
+
+#if PLATFORM_PSP
+#define gDPLoadCounterDigitTexture(pkt, digit, cms, cmt)                                                        \
+    gDPLoadTextureBlock(pkt, Interface_GetCounterDigitTexture(digit), G_IM_FMT_IA, G_IM_SIZ_16b, 8, 16, 0, cms, \
+                        cmt, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD)
+#else
+#define gDPLoadCounterDigitTexture(pkt, digit, cms, cmt)                                                   \
+    gDPLoadTextureBlock(pkt, ((u8*)gCounterDigit0Tex + (8 * 16 * (digit))), G_IM_FMT_I, G_IM_SIZ_8b, 8, 16, \
+                        0, cms, cmt, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD)
+#endif
 
 typedef enum DebugSection {
     /* 0x00 */ SECTION_RUPEES,
@@ -222,9 +235,7 @@ void KaleidoScope_DrawInventoryEditorText(Gfx** gfxP) {
 void KaleidoScope_DrawDigit(PlayState* play, s32 digit, s32 rectLeft, s32 rectTop) {
     OPEN_DISPS(play->state.gfxCtx, "../z_kaleido_debug.c", 208);
 
-    gDPLoadTextureBlock(POLY_OPA_DISP++, ((u8*)gCounterDigit0Tex + (8 * 16 * digit)), G_IM_FMT_I, G_IM_SIZ_8b, 8, 16, 0,
-                        G_TX_NOMIRROR | G_TX_CLAMP, G_TX_NOMIRROR | G_TX_CLAMP, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD,
-                        G_TX_NOLOD);
+    gDPLoadCounterDigitTexture(POLY_OPA_DISP++, digit, G_TX_NOMIRROR | G_TX_CLAMP, G_TX_NOMIRROR | G_TX_CLAMP);
     gSPTextureRectangle(POLY_OPA_DISP++, rectLeft << 2, rectTop << 2, (rectLeft + 8) << 2, (rectTop + 16) << 2,
                         G_TX_RENDERTILE, 0, 0, 1 << 10, 1 << 10);
 
@@ -757,6 +768,11 @@ void KaleidoScope_DrawInventoryEditor(PlayState* play) {
                         if (gSaveContext.save.info.inventory.gsTokens <= 0) {
                             gSaveContext.save.info.inventory.gsTokens = 0;
                         }
+                    }
+                    if (gSaveContext.save.info.inventory.gsTokens != 0) {
+                        gSaveContext.save.info.inventory.questItems |= gBitFlags[QUEST_SKULL_TOKEN];
+                    } else {
+                        gSaveContext.save.info.inventory.questItems &= ~gBitFlags[QUEST_SKULL_TOKEN];
                     }
                 } else if (curSection < SECTION_HEART_PIECES) {
                     i = curSection - SECTION_FIRST_MEDALLION;

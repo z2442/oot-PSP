@@ -276,6 +276,7 @@ void Interface_Init(struct PlayState* play);
 
 #if PLATFORM_PSP
 extern void* gAmmoDigitTextures[10];
+void* Interface_GetCounterDigitTexture(s16 digit);
 #endif
 
 extern s16 gSpoilingItems[3];
