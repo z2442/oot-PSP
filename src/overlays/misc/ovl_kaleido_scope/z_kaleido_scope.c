@@ -43,6 +43,10 @@
 #endif
 #include "assets/textures/icon_item_gameover_static/icon_item_gameover_static.h"
 
+#if PLATFORM_PSP
+void KaleidoScope_UpdateCursorVtx(PlayState* play);
+#endif
+
 #pragma increment_block_number "gc-eu:0 gc-eu-mq:0 gc-jp:128 gc-jp-ce:128 gc-jp-mq:128 gc-us:128 gc-us-mq:128" \
                                "ntsc-1.0:0 ntsc-1.1:0 ntsc-1.2:0 pal-1.0:0 pal-1.1:0"
 
@@ -1165,6 +1169,9 @@ void KaleidoScope_DrawCursor(PlayState* play, u16 pageIndex) {
         if (pauseCtx->pageIndex == pageIndex) {
 
             // Draw PAUSE_CURSOR_QUAD_TL, PAUSE_CURSOR_QUAD_TR, PAUSE_CURSOR_QUAD_BL, PAUSE_CURSOR_QUAD_BR
+#if PLATFORM_PSP
+            KaleidoScope_UpdateCursorVtx(play);
+#endif
 
             gDPPipeSync(POLY_OPA_DISP++);
             gDPSetCombineLERP(POLY_OPA_DISP++, PRIMITIVE, ENVIRONMENT, TEXEL0, ENVIRONMENT, TEXEL0, 0, PRIMITIVE, 0,
@@ -3536,6 +3543,10 @@ void KaleidoScope_UpdateCursorVtx(PlayState* play) {
     s16 tlOffsetY;
     s16 bottomOffsetY;
     s16 rightOffsetX;
+#if PLATFORM_PSP
+    s16 baseX;
+    s16 baseY;
+#endif
 
     if (pauseCtx->cursorSpecialPos == 0) {
         tlOffsetX = -1;
@@ -3598,6 +3609,34 @@ void KaleidoScope_UpdateCursorVtx(PlayState* play) {
     // and the position of the cursor in `pauseCtx->cursorVtx[0].v.ob`
     // (see `KaleidoScope_SetCursorPos` and other `PAUSE_CURSOR_QUAD_TL` uses)
 
+#if PLATFORM_PSP
+    baseX = pauseCtx->cursorVtx[0].v.ob[0] + tlOffsetX;
+    baseY = pauseCtx->cursorVtx[0].v.ob[1] + tlOffsetY;
+
+    // PAUSE_CURSOR_QUAD_TL
+    pauseCtx->cursorVtx[0].v.ob[0] = pauseCtx->cursorVtx[2].v.ob[0] = baseX;
+    pauseCtx->cursorVtx[1].v.ob[0] = pauseCtx->cursorVtx[3].v.ob[0] = baseX + 16;
+    pauseCtx->cursorVtx[0].v.ob[1] = pauseCtx->cursorVtx[1].v.ob[1] = baseY;
+    pauseCtx->cursorVtx[2].v.ob[1] = pauseCtx->cursorVtx[3].v.ob[1] = baseY - 16;
+
+    // PAUSE_CURSOR_QUAD_TR
+    pauseCtx->cursorVtx[4].v.ob[0] = pauseCtx->cursorVtx[6].v.ob[0] = baseX + rightOffsetX;
+    pauseCtx->cursorVtx[5].v.ob[0] = pauseCtx->cursorVtx[7].v.ob[0] = baseX + rightOffsetX + 16;
+    pauseCtx->cursorVtx[4].v.ob[1] = pauseCtx->cursorVtx[5].v.ob[1] = baseY;
+    pauseCtx->cursorVtx[6].v.ob[1] = pauseCtx->cursorVtx[7].v.ob[1] = baseY - 16;
+
+    // PAUSE_CURSOR_QUAD_BL
+    pauseCtx->cursorVtx[8].v.ob[0] = pauseCtx->cursorVtx[10].v.ob[0] = baseX;
+    pauseCtx->cursorVtx[9].v.ob[0] = pauseCtx->cursorVtx[11].v.ob[0] = baseX + 16;
+    pauseCtx->cursorVtx[8].v.ob[1] = pauseCtx->cursorVtx[9].v.ob[1] = baseY - bottomOffsetY;
+    pauseCtx->cursorVtx[10].v.ob[1] = pauseCtx->cursorVtx[11].v.ob[1] = baseY - bottomOffsetY - 16;
+
+    // PAUSE_CURSOR_QUAD_BR
+    pauseCtx->cursorVtx[12].v.ob[0] = pauseCtx->cursorVtx[14].v.ob[0] = baseX + rightOffsetX;
+    pauseCtx->cursorVtx[13].v.ob[0] = pauseCtx->cursorVtx[15].v.ob[0] = baseX + rightOffsetX + 16;
+    pauseCtx->cursorVtx[12].v.ob[1] = pauseCtx->cursorVtx[13].v.ob[1] = baseY - bottomOffsetY;
+    pauseCtx->cursorVtx[14].v.ob[1] = pauseCtx->cursorVtx[15].v.ob[1] = baseY - bottomOffsetY - 16;
+#else
     // PAUSE_CURSOR_QUAD_TL
     pauseCtx->cursorVtx[0].v.ob[0] = pauseCtx->cursorVtx[2].v.ob[0] = pauseCtx->cursorVtx[0].v.ob[0] + tlOffsetX;
     pauseCtx->cursorVtx[1].v.ob[0] = pauseCtx->cursorVtx[3].v.ob[0] = pauseCtx->cursorVtx[0].v.ob[0] + 16;
@@ -3621,6 +3660,7 @@ void KaleidoScope_UpdateCursorVtx(PlayState* play) {
     pauseCtx->cursorVtx[13].v.ob[0] = pauseCtx->cursorVtx[15].v.ob[0] = pauseCtx->cursorVtx[12].v.ob[0] + 16;
     pauseCtx->cursorVtx[12].v.ob[1] = pauseCtx->cursorVtx[13].v.ob[1] = pauseCtx->cursorVtx[0].v.ob[1] - bottomOffsetY;
     pauseCtx->cursorVtx[14].v.ob[1] = pauseCtx->cursorVtx[15].v.ob[1] = pauseCtx->cursorVtx[12].v.ob[1] - 16;
+#endif
 }
 
 void KaleidoScope_LoadDungeonMap(PlayState* play) {
