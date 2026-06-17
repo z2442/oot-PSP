@@ -761,9 +761,77 @@ static inline void gfx_copy_psp_mirrored_row(uint8_t *dst, const uint8_t *src, u
     }
 }
 
-static inline void gfx_zero_psp_texture_rows(uint32_t first_row, uint32_t row_count, size_t row_bytes) {
-    if (row_count != 0) {
-        memset(psp_texture_stage_buf + (size_t)first_row * row_bytes, 0, (size_t)row_count * row_bytes);
+static inline void gfx_copy_psp_texture_texel(uint8_t *dst, const uint8_t *src, size_t bytes_per_pixel) {
+    switch (bytes_per_pixel) {
+        case 1:
+            dst[0] = src[0];
+            break;
+
+        case 2:
+            dst[0] = src[0];
+            dst[1] = src[1];
+            break;
+
+        default:
+            dst[0] = src[0];
+            dst[1] = src[1];
+            dst[2] = src[2];
+            dst[3] = src[3];
+            break;
+    }
+}
+
+static void gfx_fill_psp_texture_horizontal_padding(uint8_t *row, uint32_t content_x, uint32_t content_width,
+                                                    uint32_t upload_width, size_t bytes_per_pixel) {
+    if (content_width == 0) {
+        return;
+    }
+
+    if (content_x != 0) {
+        const uint8_t *edge = row + (size_t)content_x * bytes_per_pixel;
+        uint8_t *dst = row;
+
+        for (uint32_t x = 0; x < content_x; x++) {
+            gfx_copy_psp_texture_texel(dst, edge, bytes_per_pixel);
+            dst += bytes_per_pixel;
+        }
+    }
+
+    uint32_t content_right = content_x + content_width;
+
+    if (content_right < upload_width) {
+        const uint8_t *edge = row + (size_t)(content_right - 1) * bytes_per_pixel;
+        uint8_t *dst = row + (size_t)content_right * bytes_per_pixel;
+
+        for (uint32_t x = content_right; x < upload_width; x++) {
+            gfx_copy_psp_texture_texel(dst, edge, bytes_per_pixel);
+            dst += bytes_per_pixel;
+        }
+    }
+}
+
+static void gfx_fill_psp_texture_vertical_padding(uint32_t content_y, uint32_t content_height,
+                                                  uint32_t upload_height, size_t row_bytes) {
+    if (content_height == 0) {
+        return;
+    }
+
+    if (content_y != 0) {
+        const uint8_t *edge_row = psp_texture_stage_buf + (size_t)content_y * row_bytes;
+
+        for (uint32_t y = 0; y < content_y; y++) {
+            OotPsp_MemcpyVfpu(psp_texture_stage_buf + (size_t)y * row_bytes, edge_row, row_bytes);
+        }
+    }
+
+    uint32_t content_bottom = content_y + content_height;
+
+    if (content_bottom < upload_height) {
+        const uint8_t *edge_row = psp_texture_stage_buf + (size_t)(content_bottom - 1) * row_bytes;
+
+        for (uint32_t y = content_bottom; y < upload_height; y++) {
+            OotPsp_MemcpyVfpu(psp_texture_stage_buf + (size_t)y * row_bytes, edge_row, row_bytes);
+        }
     }
 }
 
@@ -806,23 +874,15 @@ static const uint8_t *gfx_prepare_psp_texture_for_upload(const uint8_t *src, uin
 
     const size_t src_row_bytes = (size_t)width * bytes_per_pixel;
     const size_t dst_row_bytes = (size_t)(*upload_width) * bytes_per_pixel;
-    const uint32_t top_empty_rows = use_mirror_t ? (pot_height - height) : 0;
-    const uint32_t bottom_empty_row = source_y_offset + height;
-    const uint32_t bottom_empty_rows = *upload_height - bottom_empty_row;
-    const size_t left_empty_bytes = use_mirror_s ? (size_t)(pot_width - width) * bytes_per_pixel : 0;
-    const size_t right_empty_bytes =
-        ((size_t)(*upload_width) - (source_x_offset + width)) * bytes_per_pixel;
-
-    gfx_zero_psp_texture_rows(0, top_empty_rows, dst_row_bytes);
+    const uint32_t content_x_offset = use_mirror_s ? (pot_width - width) : source_x_offset;
+    const uint32_t content_width = width * (use_mirror_s ? 2 : 1);
+    const uint32_t content_y_offset = use_mirror_t ? (pot_height - height) : source_y_offset;
+    const uint32_t content_height = height * (use_mirror_t ? 2 : 1);
 
     for (uint32_t y = 0; y < height; y++) {
         const uint8_t *src_row = src + (size_t)y * src_row_bytes;
         uint8_t *dst_base = psp_texture_stage_buf + (size_t)(source_y_offset + y) * dst_row_bytes;
         uint8_t *dst_row = dst_base + (size_t)source_x_offset * bytes_per_pixel;
-
-        if (left_empty_bytes != 0) {
-            memset(dst_base, 0, left_empty_bytes);
-        }
 
         OotPsp_MemcpyVfpu(dst_row, src_row, src_row_bytes);
 
@@ -831,9 +891,8 @@ static const uint8_t *gfx_prepare_psp_texture_for_upload(const uint8_t *src, uin
                                       src_row, width, bytes_per_pixel);
         }
 
-        if (right_empty_bytes != 0) {
-            memset(dst_row + src_row_bytes, 0, right_empty_bytes);
-        }
+        gfx_fill_psp_texture_horizontal_padding(dst_base, content_x_offset, content_width, *upload_width,
+                                                bytes_per_pixel);
     }
 
     if (use_mirror_t) {
@@ -844,7 +903,7 @@ static const uint8_t *gfx_prepare_psp_texture_for_upload(const uint8_t *src, uin
         }
     }
 
-    gfx_zero_psp_texture_rows(bottom_empty_row, bottom_empty_rows, dst_row_bytes);
+    gfx_fill_psp_texture_vertical_padding(content_y_offset, content_height, *upload_height, dst_row_bytes);
 
     return psp_texture_stage_buf;
 }
