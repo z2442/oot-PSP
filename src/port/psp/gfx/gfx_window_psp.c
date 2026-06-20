@@ -5,6 +5,7 @@
 #include <psppower.h>
 #include <psprtc.h>
 
+#include "oot_psp_home_menu.h"
 #include "oot_port_macros.h"
 
 #define OOT_PSP_SCREEN_WIDTH  480
@@ -14,7 +15,7 @@ static bool sQuitRequested;
 static unsigned int sLastSwapBeginUsec;
 
 static int oot_psp_exit_callback(UNUSED int arg1, UNUSED int arg2, UNUSED void* common) {
-    sQuitRequested = true;
+    OotPspHomeMenu_RequestOpen();
     return 0;
 }
 

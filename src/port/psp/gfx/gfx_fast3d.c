@@ -261,6 +261,7 @@ static struct RenderingState {
     bool decal_mode;
     bool alpha_blend;
     bool tri_pipeline_dirty;
+    bool backend_state_dirty;
     struct TriPipelineState tri_pipeline;
 } rendering_state __attribute__((aligned(16)));
 
@@ -1364,6 +1365,47 @@ extern int texman_texture_slot_available(void);
 static uint32_t gfx_texture_import_width(int tile);
 static uint32_t gfx_texture_import_height(int tile);
 
+#if defined(TARGET_PSP)
+static unsigned int gfx_texture_cache_upload_type(uint32_t fmt, uint32_t siz) {
+    if (fmt == G_IM_FMT_RGBA && siz == G_IM_SIZ_16b) {
+        return GU_PSM_5551;
+    }
+
+    if (fmt == G_IM_FMT_I && siz == G_IM_SIZ_8b) {
+        return GU_PSM_T8;
+    }
+
+    return GU_PSM_8888;
+}
+
+static unsigned int gfx_texture_cache_upload_size(uint16_t width, uint16_t height, uint32_t fmt, uint32_t siz,
+                                                  bool mirror_s, bool mirror_t) {
+    const unsigned int type = gfx_texture_cache_upload_type(fmt, siz);
+    const size_t bytes_per_pixel = gfx_gu_texture_bytes_per_pixel(type);
+    const uint32_t pot_width = gfx_next_power_of_two(width);
+    const uint32_t pot_height = gfx_next_power_of_two(height);
+    uint32_t upload_width = pot_width * (mirror_s ? 2 : 1);
+    uint32_t upload_height = pot_height * (mirror_t ? 2 : 1);
+    size_t upload_size = (size_t)upload_width * upload_height * bytes_per_pixel;
+
+    if ((mirror_s || mirror_t) && upload_size > sizeof(psp_texture_stage_buf)) {
+        upload_width = pot_width;
+        upload_height = pot_height;
+        upload_size = (size_t)upload_width * upload_height * bytes_per_pixel;
+    }
+
+    if (upload_size > sizeof(psp_texture_stage_buf)) {
+        upload_size = (size_t)width * height * bytes_per_pixel;
+    }
+
+    if (upload_size > (size_t)0xFFFFFFFFU) {
+        return 0xFFFFFFFFU;
+    }
+
+    return (unsigned int)upload_size;
+}
+#endif
+
 static void gfx_texture_cache_clear(void) {
     gfx_flush();
     texman_clear();
@@ -1374,6 +1416,7 @@ static void gfx_texture_cache_clear(void) {
     rdp.textures_changed[1] = true;
     memset(rendering_state.textures, 0, sizeof(rendering_state.textures));
     rendering_state.tri_pipeline_dirty = true;
+    rendering_state.backend_state_dirty = true;
 }
 
 static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, const uint8_t *orig_addr, uint32_t fmt, uint32_t siz) {
@@ -1422,7 +1465,12 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
         }
         node = &(*node)->next;
     }
+#if defined(TARGET_PSP)
+    if (!texman_vram_space_available(gfx_texture_cache_upload_size(width, height, fmt, siz, mirror_s, mirror_t)) ||
+        !texman_texture_slot_available()) {
+#else
     if (!gfx_vram_space_available() || !texman_texture_slot_available()) {
+#endif
         gfx_texture_cache_clear();
         node = &gfx_texture_cache.hashmap[hash];
         //puts("Clearing texture cache");
@@ -2035,34 +2083,35 @@ static void gfx_prepare_tri_pipeline_state(void) {
         return;
     }
 
+    const bool backend_state_dirty = rendering_state.backend_state_dirty;
     bool depth_test = (rsp.geometry_mode & G_ZBUFFER) == G_ZBUFFER;
-    if (depth_test != rendering_state.depth_test) {
+    if (backend_state_dirty || depth_test != rendering_state.depth_test) {
         gfx_flush();
         gfx_rapi->set_depth_test(depth_test);
         rendering_state.depth_test = depth_test;
     }
 
     bool z_upd = (rdp.other_mode_l & Z_UPD) == Z_UPD;
-    if (z_upd != rendering_state.depth_mask) {
+    if (backend_state_dirty || z_upd != rendering_state.depth_mask) {
         gfx_flush();
         gfx_rapi->set_depth_mask(z_upd);
         rendering_state.depth_mask = z_upd;
     }
 
     bool zmode_decal = (rdp.other_mode_l & ZMODE_DEC) == ZMODE_DEC;
-    if (zmode_decal != rendering_state.decal_mode) {
+    if (backend_state_dirty || zmode_decal != rendering_state.decal_mode) {
         gfx_flush();
         gfx_rapi->set_zmode_decal(zmode_decal);
         rendering_state.decal_mode = zmode_decal;
     }
 
-    if (rdp.viewport_or_scissor_changed) {
-        if (memcmp(&rdp.viewport, &rendering_state.viewport, sizeof(rdp.viewport)) != 0) {
+    if (backend_state_dirty || rdp.viewport_or_scissor_changed) {
+        if (backend_state_dirty || memcmp(&rdp.viewport, &rendering_state.viewport, sizeof(rdp.viewport)) != 0) {
             gfx_flush();
             gfx_rapi->set_viewport(rdp.viewport.x, rdp.viewport.y, rdp.viewport.width, rdp.viewport.height);
             rendering_state.viewport = rdp.viewport;
         }
-        if (memcmp(&rdp.scissor, &rendering_state.scissor, sizeof(rdp.scissor)) != 0) {
+        if (backend_state_dirty || memcmp(&rdp.scissor, &rendering_state.scissor, sizeof(rdp.scissor)) != 0) {
             gfx_flush();
             gfx_rapi->set_scissor(rdp.scissor.x, rdp.scissor.y, rdp.scissor.width, rdp.scissor.height);
             rendering_state.scissor = rdp.scissor;
@@ -2090,7 +2139,7 @@ static void gfx_prepare_tri_pipeline_state(void) {
         cc_id &= ~0xfff000;
     }
 
-    if (!rendering_state.color_combiner_valid || rendering_state.color_combiner_id != cc_id) {
+    if (backend_state_dirty || !rendering_state.color_combiner_valid || rendering_state.color_combiner_id != cc_id) {
         rendering_state.color_combiner = gfx_lookup_or_create_color_combiner(cc_id);
         rendering_state.color_combiner_id = cc_id;
         rendering_state.color_combiner_valid = true;
@@ -2098,13 +2147,13 @@ static void gfx_prepare_tri_pipeline_state(void) {
 
     struct ColorCombiner *comb = rendering_state.color_combiner;
     struct ShaderProgram *prg = comb->prg;
-    if (prg != rendering_state.shader_program) {
+    if (backend_state_dirty || prg != rendering_state.shader_program) {
         gfx_flush();
-        gfx_rapi->unload_shader(rendering_state.shader_program);
+        gfx_rapi->unload_shader(backend_state_dirty ? NULL : rendering_state.shader_program);
         gfx_rapi->load_shader(prg);
         rendering_state.shader_program = prg;
     }
-    if (alpha_blend != rendering_state.alpha_blend) {
+    if (backend_state_dirty || alpha_blend != rendering_state.alpha_blend) {
         gfx_flush();
         gfx_rapi->set_use_alpha(alpha_blend);
         rendering_state.alpha_blend = alpha_blend;
@@ -2129,7 +2178,8 @@ static void gfx_prepare_tri_pipeline_state(void) {
                 import_texture(i);
                 rdp.textures_changed[i] = false;
             }
-            if (linear_filter != rendering_state.textures[i]->linear_filter ||
+            if (backend_state_dirty ||
+                linear_filter != rendering_state.textures[i]->linear_filter ||
                 rdp.texture_tile.cms != rendering_state.textures[i]->cms ||
                 rdp.texture_tile.cmt != rendering_state.textures[i]->cmt ||
                 rdp.texture_tile.masks != rendering_state.textures[i]->masks ||
@@ -2216,6 +2266,7 @@ static void gfx_prepare_tri_pipeline_state(void) {
     }
 
     rendering_state.tri_pipeline_dirty = false;
+    rendering_state.backend_state_dirty = false;
 }
 
 static inline float dot(const float a[3], const float b[3])
@@ -4498,6 +4549,7 @@ void gfx_init(struct GfxWindowManagerAPI *wapi, struct GfxRenderingAPI *rapi, co
     gfx_rapi->init();
     rendering_state.color_combiner_valid = false;
     rendering_state.tri_pipeline_dirty = true;
+    rendering_state.backend_state_dirty = true;
 
     int i;
     for(i=0;i<30;i++){
@@ -4594,4 +4646,40 @@ void gfx_end_frame(void) {
         gfx_wapi->swap_buffers_end();
     }
 
+}
+
+void gfx_invalidate_render_state(void) {
+    gfx_flush();
+
+    if (gfx_rapi != NULL) {
+        gfx_rapi->unload_shader(NULL);
+    }
+
+    rendering_state.shader_program = NULL;
+    rendering_state.color_combiner_valid = false;
+    rendering_state.tri_pipeline_dirty = true;
+    rendering_state.backend_state_dirty = true;
+    sUploadedProjectionValid = false;
+}
+
+void gfx_render_callback_frame(void (*draw_callback)(void *arg), void *arg) {
+    gfx_start_frame();
+
+    if (!gfx_wapi->start_frame()) {
+        dropped_frame = true;
+        return;
+    }
+
+    dropped_frame = false;
+    gfx_rapi->start_frame();
+    sUploadedProjectionValid = false;
+
+    if (draw_callback != NULL) {
+        draw_callback(arg);
+    }
+
+    gfx_rapi->end_frame();
+    gfx_wapi->swap_buffers_begin();
+    gfx_end_frame();
+    gfx_invalidate_render_state();
 }

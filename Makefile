@@ -1201,6 +1201,7 @@ PSP_PORT_PSPSDK := $(shell psp-config -p 2>/dev/null)
 PSP_PORT_PREFIX := $(shell psp-config -P 2>/dev/null)
 PSP_PORT_CC := psp-gcc
 PSP_PORT_AR := psp-ar
+PSP_PORT_INTRAFONT_LIB := $(firstword $(wildcard $(PSP_PORT_PREFIX)/lib/libintrafont.a))
 PSP_PORT_GPROF_LINKER_SOURCE := $(PSP_PORT_PREFIX)/lib/ldscripts/elf_mipsallegrexel_psp.x
 PSP_PORT_GPROF_LINKER_SCRIPT := $(PSP_PORT_BUILD_DIR)/linkfile.gprof
 
@@ -1388,7 +1389,9 @@ PSP_PORT_RUNTIME_SOURCES := \
 	src/port/psp/oot_psp_asset_loader.c \
 	src/port/psp/oot_psp_audio_backend.c \
 	src/port/psp/oot_psp_audiomgr.c \
+	src/port/psp/oot_psp_controls.c \
 	src/port/psp/oot_psp_game.c \
+	src/port/psp/oot_psp_home_menu.c \
 	src/port/psp/oot_psp_memory.c \
 	src/port/psp/oot_psp_mixer.c \
 	src/port/psp/oot_psp_renderer.c \
@@ -1530,6 +1533,11 @@ PSP_PORT_DEFINES := \
 ifneq ($(PSP_PORT_GPROF_ENABLED),)
 PSP_PORT_DEFINES += -DOOT_PSP_GPROF=1
 endif
+ifneq ($(PSP_PORT_INTRAFONT_LIB),)
+PSP_PORT_DEFINES += -DOOT_PSP_USE_INTRAFONT=1
+else
+PSP_PORT_DEFINES += -DOOT_PSP_USE_INTRAFONT=0
+endif
 PSP_PORT_ASM_DEFINES := $(filter-out -D_LANGUAGE_C,$(PSP_PORT_DEFINES))
 
 PSP_PORT_INCLUDES := \
@@ -1559,6 +1567,9 @@ PSP_PORT_AUDIO_ME_CFLAGS := $(filter-out -pg,$(PSP_PORT_CFLAGS)) $(PSP_AUDIO_ME_
 
 PSP_PORT_LIBS := -L$(PSP_PORT_PSPSDK)/lib -L$(PSP_PORT_PREFIX)/lib -lme-core -lpspgu -lpspgum -lpspjpeg \
 	-lpspdisplay -lpspge -lpspfpu -lpspctrl -lpsppower -lpspaudio -lpspdebug
+ifneq ($(PSP_PORT_INTRAFONT_LIB),)
+PSP_PORT_LIBS += -lintrafont
+endif
 
 ifneq ($(PSP_PORT_GPROF_ENABLED),)
 PSP_PORT_LINKER_DEPS := $(PSP_PORT_GPROF_LINKER_SCRIPT)

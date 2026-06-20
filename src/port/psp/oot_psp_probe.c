@@ -5,13 +5,14 @@
 #include <string.h>
 
 #include "attributes.h"
-#include "controller.h"
 #include "console_logo_state.h"
 #include "fault.h"
 #include "game.h"
 #include "gfx.h"
 #include "libc64/malloc.h"
 #include "oot_psp_asset_loader.h"
+#include "oot_psp_controls.h"
+#include "oot_psp_home_menu.h"
 #include "play_state.h"
 #include "setup_state.h"
 #include "title_setup_state.h"
@@ -89,8 +90,7 @@ static void OotPspProfiler_Stop(UNUSED int shouldDump) {
 #endif
 
 static int OotPspExitCallback(UNUSED int arg1, UNUSED int arg2, UNUSED void* common) {
-    OotPspProfiler_Stop(true);
-    sceKernelExitGame();
+    OotPspHomeMenu_RequestOpen();
     return 0;
 }
 
@@ -116,6 +116,7 @@ static void OotPspSetupCallbacks(void) {
 int main(int argc, char** argv) {
 
     pspFpuSetEnable(0);
+    OotPspHomeMenu_Init();
     OotPspSetupCallbacks();
 
     GraphicsContext gfxCtx;
@@ -127,6 +128,7 @@ int main(int argc, char** argv) {
     osSyncPrintf("oot-psp probe rom md5=%s size=%u header=%02X%02X%02X%02X\n", gOotPspRomMd5, gOotPspRomSize,
                  gOotPspRomHeader[0], gOotPspRomHeader[1], gOotPspRomHeader[2], gOotPspRomHeader[3]);
     OotPsp_AssetInit(((argc > 0) && (argv != NULL)) ? argv[0] : NULL);
+    OotPspControls_Load();
     OotPspGame_Init();
     Graph_Init(&gfxCtx);
     OotPspProfiler_Start();
@@ -142,13 +144,18 @@ int main(int argc, char** argv) {
         GameState_Init(gameState, nextInit, &gfxCtx);
 
         while (GameState_IsRunning(gameState)) {
-            Graph_Update(&gfxCtx, gameState);
+            OotPspHomeMenu_PollHomeButton();
 
-            if (CHECK_BTN_ALL(gameState->input[0].cur.button, BTN_START | BTN_L)) {
-                gameState->running = false;
-                nextInit = NULL;
-                break;
+            if (OotPspHomeMenu_IsOpen()) {
+                if (OotPspHomeMenu_RunFrame() == OOT_PSP_HOME_MENU_RESULT_EXIT_GAME) {
+                    gameState->running = false;
+                    nextInit = NULL;
+                    break;
+                }
+                continue;
             }
+
+            Graph_Update(&gfxCtx, gameState);
         }
 
         if (nextInit == NULL) {

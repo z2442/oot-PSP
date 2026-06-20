@@ -9,8 +9,8 @@
 #include <stdarg.h>
 #include <stdio.h>
 
-#include "controller.h"
 #include "oot_psp_audio_backend.h"
+#include "oot_psp_controls.h"
 #include "versions.h"
 
 #define OOT_PSP_MAX_THREADS 16
@@ -405,62 +405,6 @@ static void OotPsp_UnlockMesgQueue(UNUSED OSMesgQueue* mq) {
     if (OotPsp_IsValidUid(sMesgQueueLockSema)) {
         sceKernelSignalSema(sMesgQueueLockSema, 1);
     }
-}
-
-static u16 OotPsp_MapButtons(const SceCtrlData* pad) {
-    u16 button = 0;
-
-    if (pad->Buttons & PSP_CTRL_CROSS) {
-        button |= BTN_A;
-    }
-    if (pad->Buttons & PSP_CTRL_CIRCLE) {
-        button |= BTN_B;
-    }
-    if (pad->Buttons & PSP_CTRL_TRIANGLE) {
-        button |= BTN_CUP;
-    }
-    if (pad->Buttons & PSP_CTRL_SQUARE) {
-        button |= BTN_CLEFT;
-    }
-    if (pad->Buttons & PSP_CTRL_LTRIGGER) {
-        button |= BTN_Z;
-    }
-    if (pad->Buttons & PSP_CTRL_RTRIGGER) {
-        button |= BTN_R;
-    }
-    if (pad->Buttons & PSP_CTRL_START) {
-        button |= BTN_START;
-    }
-    if (pad->Buttons & PSP_CTRL_SELECT) {
-        button |= BTN_L;
-    }
-    if (pad->Buttons & PSP_CTRL_UP) {
-        button |= BTN_CUP;
-    }
-    if (pad->Buttons & PSP_CTRL_DOWN) {
-        button |= BTN_CDOWN;
-    }
-    if (pad->Buttons & PSP_CTRL_LEFT) {
-        button |= BTN_CLEFT;
-    }
-    if (pad->Buttons & PSP_CTRL_RIGHT) {
-        button |= BTN_CRIGHT;
-    }
-
-    return button;
-}
-
-static s8 OotPsp_MapStick(u8 raw) {
-    s32 centered = (s32)raw - 128;
-
-    if (centered < -80) {
-        centered = -80;
-    }
-    if (centered > 80) {
-        centered = 80;
-    }
-
-    return centered;
 }
 
 void osSyncPrintf(const char* fmt, ...) {
@@ -1080,9 +1024,9 @@ s32 osContStartReadData(UNUSED OSMesgQueue* mq) {
     memset(sControllerPads, 0, sizeof(sControllerPads));
     sceCtrlPeekBufferPositive(&pad, 1);
 
-    sControllerPads[0].button = OotPsp_MapButtons(&pad);
-    sControllerPads[0].stick_x = OotPsp_MapStick(pad.Lx);
-    sControllerPads[0].stick_y = -OotPsp_MapStick(pad.Ly);
+    sControllerPads[0].button = OotPspControls_MapButtons(pad.Buttons);
+    sControllerPads[0].stick_x = OotPspControls_MapStick(pad.Lx);
+    sControllerPads[0].stick_y = -OotPspControls_MapStick(pad.Ly);
     sControllerPads[0].errno = 0;
 
     return 0;

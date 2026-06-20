@@ -26,6 +26,8 @@ struct GfxRenderingAPI *gfx_get_current_rendering_api(void);
 void gfx_start_frame(void);
 void gfx_run(Gfx *commands);
 void gfx_end_frame(void);
+void gfx_render_callback_frame(void (*draw_callback)(void *arg), void *arg);
+void gfx_invalidate_render_state(void);
 
 #ifdef __cplusplus
 }

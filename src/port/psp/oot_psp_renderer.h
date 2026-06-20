@@ -10,5 +10,9 @@ void OotPspRenderer_RenderDisplayList(Gfx* dl);
 void OotPspRenderer_RenderTask(const OSTask* task);
 void OotPspRenderer_RequestPauseBackground(void);
 void OotPspRenderer_SetPauseBackgroundActive(bool active);
+void OotPspRenderer_RequestHomeMenuBackground(void);
+void OotPspRenderer_SetHomeMenuBackgroundActive(bool active);
+void OotPspRenderer_RenderHomeMenu(int selectedIndex, int screen, int controlSelectedIndex,
+                                   const char* statusMessage);
 
 #endif

@@ -21,7 +21,19 @@
 #include <pspgum.h>
 #include <string.h>
 
+#ifndef OOT_PSP_USE_INTRAFONT
+#define OOT_PSP_USE_INTRAFONT 0
+#endif
+
+#if OOT_PSP_USE_INTRAFONT
+#include <intraFont.h>
+#else
+#define INTRAFONT_ALIGN_LEFT   0
+#define INTRAFONT_ALIGN_CENTER 0
+#endif
+
 #include "psp_texture_manager.h"
+#include "oot_psp_controls.h"
 #include "oot_psp_memory.h"
 
 #ifndef OOT_PSP_WAIT_VBLANK
@@ -275,6 +287,15 @@ static bool sPauseBgActive;
 static bool sPauseBgCaptureRequested;
 static bool sPauseBgCaptured;
 static void *sPauseBgBuffer;
+static bool sHomeMenuBgActive;
+static bool sHomeMenuBgCaptureRequested;
+static bool sHomeMenuBgCaptured;
+static uint16_t sHomeMenuBgBuffer[BUF_WIDTH * SCR_HEIGHT] __attribute__((aligned(64)));
+static uint16_t sHomeMenuBgBlurScratch[BUF_WIDTH * SCR_HEIGHT] __attribute__((aligned(64)));
+#if OOT_PSP_USE_INTRAFONT
+static intraFont *sHomeMenuFont;
+static bool sHomeMenuFontInitTried;
+#endif
 
 static void *gfx_scegu_vram_cpu_addr(const void *vramBuffer) {
     return (void *)(((uintptr_t)sceGeEdramGetAddr() | 0x40000000U) + ((uintptr_t)vramBuffer & 0x00FFFFFFU));
@@ -286,6 +307,371 @@ static void gfx_scegu_copy_framebuffer_cpu(void *dst, const void *src) {
 
     OotPsp_MemcpyVfpu(dstAddr, srcAddr, FRAMEBUFFER_SIZE);
     sceKernelDcacheWritebackRange(dstAddr, FRAMEBUFFER_SIZE);
+}
+
+static void gfx_scegu_copy_framebuffer_from_vram(uint16_t *dst, const void *src) {
+    const void *srcAddr = gfx_scegu_vram_cpu_addr(src);
+
+    OotPsp_MemcpyVfpu(dst, srcAddr, FRAMEBUFFER_SIZE);
+}
+
+static void gfx_scegu_copy_framebuffer_to_vram(void *dst, const uint16_t *src) {
+    void *dstAddr = gfx_scegu_vram_cpu_addr(dst);
+
+    OotPsp_MemcpyVfpu(dstAddr, src, FRAMEBUFFER_SIZE);
+    sceKernelDcacheWritebackRange(dstAddr, FRAMEBUFFER_SIZE);
+}
+
+static void gfx_scegu_apply_home_menu_2d_view(void) {
+    sceGuOffset(2048 - (SCR_WIDTH / 2), 2048 - (SCR_HEIGHT / 2));
+    sceGuViewport(2048 - (SCR_WIDTH / 2), 2048 - (SCR_HEIGHT / 2), SCR_WIDTH, SCR_HEIGHT);
+    sceGuScissor(0, 0, SCR_WIDTH, SCR_HEIGHT);
+    sceGuEnable(GU_SCISSOR_TEST);
+    sceGuSetMatrix(GU_VIEW, (const ScePspFMatrix4 *)identity_matrix);
+    sceGuSetMatrix(GU_MODEL, (const ScePspFMatrix4 *)identity_matrix);
+}
+
+static uint16_t gfx_scegu_make_rgb565(unsigned int r, unsigned int g, unsigned int b) {
+    return (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+}
+
+static void gfx_scegu_accum_rgb565(uint16_t color, unsigned int *r, unsigned int *g, unsigned int *b) {
+    *r += ((color >> 11) & 0x1F) << 3;
+    *g += ((color >> 5) & 0x3F) << 2;
+    *b += (color & 0x1F) << 3;
+}
+
+static int gfx_scegu_clamp_int(int value, int min, int max) {
+    if (value < min) {
+        return min;
+    }
+    if (value > max) {
+        return max;
+    }
+    return value;
+}
+
+static void gfx_scegu_blur_framebuffer_565(uint16_t *pixels) {
+    static const int offsets[3] = { -3, 0, 3 };
+    int x;
+    int y;
+    int ox;
+    int oy;
+
+    OotPsp_MemcpyVfpu(sHomeMenuBgBlurScratch, pixels, FRAMEBUFFER_SIZE);
+
+    for (y = 0; y < SCR_HEIGHT; y++) {
+        for (x = 0; x < SCR_WIDTH; x++) {
+            unsigned int r = 0;
+            unsigned int g = 0;
+            unsigned int b = 0;
+
+            for (oy = 0; oy < 3; oy++) {
+                int sampleY = gfx_scegu_clamp_int(y + offsets[oy], 0, SCR_HEIGHT - 1);
+
+                for (ox = 0; ox < 3; ox++) {
+                    int sampleX = gfx_scegu_clamp_int(x + offsets[ox], 0, SCR_WIDTH - 1);
+
+                    gfx_scegu_accum_rgb565(pixels[(sampleY * BUF_WIDTH) + sampleX], &r, &g, &b);
+                }
+            }
+
+            sHomeMenuBgBlurScratch[(y * BUF_WIDTH) + x] = gfx_scegu_make_rgb565(r / 9, g / 9, b / 9);
+        }
+    }
+
+    OotPsp_MemcpyVfpu(pixels, sHomeMenuBgBlurScratch, FRAMEBUFFER_SIZE);
+    sceKernelDcacheWritebackRange(pixels, FRAMEBUFFER_SIZE);
+}
+
+static unsigned int gfx_scegu_rgba(unsigned int r, unsigned int g, unsigned int b, unsigned int a) {
+    return (a << 24) | (b << 16) | (g << 8) | r;
+}
+
+static void gfx_scegu_draw_rect(int x, int y, int width, int height, unsigned int color) {
+    VertexColor *verts;
+
+    if ((width <= 0) || (height <= 0)) {
+        return;
+    }
+
+    verts = (VertexColor *)sceGuGetMemory(sizeof(VertexColor) * 2);
+    if (verts == NULL) {
+        return;
+    }
+
+    verts[0].a = 0;
+    verts[0].b = 0;
+    verts[0].color = color;
+    verts[0].x = (unsigned short)x;
+    verts[0].y = (unsigned short)y;
+    verts[0].z = 0;
+    verts[1].a = 0;
+    verts[1].b = 0;
+    verts[1].color = color;
+    verts[1].x = (unsigned short)(x + width);
+    verts[1].y = (unsigned short)(y + height);
+    verts[1].z = 0;
+
+    gfx_scegu_apply_home_menu_2d_view();
+    sceGuDisable(GU_TEXTURE_2D);
+    sceGuDisable(GU_DEPTH_TEST);
+    sceGuDisable(GU_ALPHA_TEST);
+    sceGuEnable(GU_BLEND);
+    sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
+    sceGuDrawArray(GU_SPRITES, GU_TEXTURE_16BIT | GU_COLOR_8888 | GU_VERTEX_16BIT | GU_TRANSFORM_2D, 2, 0, verts);
+}
+
+static const unsigned char *gfx_scegu_get_fallback_glyph(char c) {
+    static const unsigned char glyphA[7] = { 0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11 };
+    static const unsigned char glyphB[7] = { 0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E };
+    static const unsigned char glyphC[7] = { 0x0F, 0x10, 0x10, 0x10, 0x10, 0x10, 0x0F };
+    static const unsigned char glyphE[7] = { 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F };
+    static const unsigned char glyphG[7] = { 0x0F, 0x10, 0x10, 0x17, 0x11, 0x11, 0x0F };
+    static const unsigned char glyphI[7] = { 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1F };
+    static const unsigned char glyphK[7] = { 0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11 };
+    static const unsigned char glyphL[7] = { 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F };
+    static const unsigned char glyphM[7] = { 0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11 };
+    static const unsigned char glyphN[7] = { 0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11 };
+    static const unsigned char glyphO[7] = { 0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E };
+    static const unsigned char glyphP[7] = { 0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10 };
+    static const unsigned char glyphR[7] = { 0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11 };
+    static const unsigned char glyphT[7] = { 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04 };
+    static const unsigned char glyphX[7] = { 0x11, 0x0A, 0x04, 0x04, 0x04, 0x0A, 0x11 };
+    static const unsigned char blank[7] = { 0 };
+
+    if ((c >= 'A') && (c <= 'Z')) {
+        c = (char)(c - 'A' + 'a');
+    }
+
+    switch (c) {
+        case 'a':
+            return glyphA;
+        case 'b':
+            return glyphB;
+        case 'c':
+            return glyphC;
+        case 'e':
+            return glyphE;
+        case 'g':
+            return glyphG;
+        case 'i':
+            return glyphI;
+        case 'k':
+            return glyphK;
+        case 'l':
+            return glyphL;
+        case 'm':
+            return glyphM;
+        case 'n':
+            return glyphN;
+        case 'o':
+            return glyphO;
+        case 'p':
+            return glyphP;
+        case 'r':
+            return glyphR;
+        case 't':
+            return glyphT;
+        case 'x':
+            return glyphX;
+        default:
+            return blank;
+    }
+}
+
+static int gfx_scegu_fallback_text_width(const char *text, int scale) {
+    int width = 0;
+
+    while (*text != '\0') {
+        width += 6 * scale;
+        text++;
+    }
+
+    if (width > 0) {
+        width -= scale;
+    }
+
+    return width;
+}
+
+static void gfx_scegu_draw_fallback_text_centered(int centerX, int y, const char *text, int scale,
+                                                  unsigned int color) {
+    int x = centerX - (gfx_scegu_fallback_text_width(text, scale) / 2);
+
+    while (*text != '\0') {
+        const unsigned char *glyph = gfx_scegu_get_fallback_glyph(*text);
+        int row;
+
+        for (row = 0; row < 7; row++) {
+            int col;
+
+            for (col = 0; col < 5; col++) {
+                if (glyph[row] & (1 << (4 - col))) {
+                    gfx_scegu_draw_rect(x + (col * scale), y + (row * scale), scale, scale, color);
+                }
+            }
+        }
+
+        x += 6 * scale;
+        text++;
+    }
+}
+
+#if OOT_PSP_USE_INTRAFONT
+static bool gfx_scegu_ensure_home_menu_font(void) {
+    if (!sHomeMenuFontInitTried) {
+        sHomeMenuFontInitTried = true;
+
+        if (intraFontInit()) {
+            sHomeMenuFont = intraFontLoad("flash0:/font/ltn0.pgf", INTRAFONT_CACHE_ASCII);
+        }
+    }
+
+    return sHomeMenuFont != NULL;
+}
+#endif
+
+static void gfx_scegu_draw_home_menu_text(int x, int y, const char *text, float size, unsigned int color,
+                                          unsigned int shadowColor, unsigned int options) {
+#if OOT_PSP_USE_INTRAFONT
+    if (gfx_scegu_ensure_home_menu_font()) {
+        gfx_scegu_apply_home_menu_2d_view();
+        intraFontActivate(sHomeMenuFont);
+        intraFontSetStyle(sHomeMenuFont, size, color, shadowColor, 0.0f, options | INTRAFONT_STRING_ASCII);
+        intraFontPrint(sHomeMenuFont, (float)x, (float)y, text);
+        return;
+    }
+#endif
+
+    (void)size;
+    (void)shadowColor;
+    (void)options;
+    gfx_scegu_draw_fallback_text_centered(x, y - 14, text, 3, color);
+}
+
+static void gfx_scegu_prepare_home_menu_draw(void) {
+    gfx_scegu_apply_home_menu_2d_view();
+    sceGuTexOffset(0.0f, 0.0f);
+    sceGuTexScale(1.0f, 1.0f);
+    sceGuTexEnvColor(0xffffffff);
+    sceGuDisable(GU_TEXTURE_2D);
+    sceGuDisable(GU_DEPTH_TEST);
+    sceGuDisable(GU_ALPHA_TEST);
+    sceGuDisable(GU_FOG);
+    sceGuDisable(GU_LIGHTING);
+    sceGuDisable(GU_CULL_FACE);
+    sceGuEnable(GU_BLEND);
+    sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
+    sceGuDepthMask(GU_FALSE);
+}
+
+static void gfx_scegu_render_home_menu_main(int selectedIndex) {
+    static const char *items[] = {
+        "Exit game",
+        "Controller Mapping",
+    };
+    int i;
+
+    gfx_scegu_draw_rect(0, 0, SCR_WIDTH, SCR_HEIGHT, gfx_scegu_rgba(0, 0, 0, 96));
+    gfx_scegu_draw_rect(112, 88, 256, 102, gfx_scegu_rgba(0, 0, 0, 132));
+
+    for (i = 0; i < 2; i++) {
+        int y = 124 + (i * 34);
+        unsigned int color = gfx_scegu_rgba(218, 224, 218, 255);
+
+        if (selectedIndex == i) {
+            gfx_scegu_draw_rect(128, y - 22, 224, 28, gfx_scegu_rgba(38, 92, 78, 205));
+            color = gfx_scegu_rgba(255, 255, 245, 255);
+        }
+
+        gfx_scegu_draw_home_menu_text(SCR_WIDTH / 2, y, items[i], 0.72f, color, gfx_scegu_rgba(0, 0, 0, 180),
+                                      INTRAFONT_ALIGN_CENTER);
+    }
+}
+
+static void gfx_scegu_render_controller_mapping(int selectedIndex, const char* statusMessage) {
+    char line[80];
+    char value[96];
+    int bindingCount = OotPspControls_GetBindingCount();
+    int deadzoneRow = bindingCount;
+    int saveRow = bindingCount + 1;
+    int resetRow = bindingCount + 2;
+    int backRow = bindingCount + 3;
+    int totalRows = backRow + 1;
+    int visibleRows = 7;
+    int firstRow = selectedIndex - (visibleRows / 2);
+    int row;
+
+    if (visibleRows > totalRows) {
+        visibleRows = totalRows;
+    }
+    if (firstRow < 0) {
+        firstRow = 0;
+    }
+    if ((firstRow + visibleRows) > totalRows) {
+        firstRow = totalRows - visibleRows;
+    }
+
+    gfx_scegu_draw_rect(0, 0, SCR_WIDTH, SCR_HEIGHT, gfx_scegu_rgba(0, 0, 0, 112));
+    gfx_scegu_draw_rect(34, 20, 412, 232, gfx_scegu_rgba(0, 0, 0, 154));
+    gfx_scegu_draw_home_menu_text(SCR_WIDTH / 2, 50, "Controller Mapping", 0.82f,
+                                  gfx_scegu_rgba(255, 255, 245, 255), gfx_scegu_rgba(0, 0, 0, 180),
+                                  INTRAFONT_ALIGN_CENTER);
+
+#if OOT_PSP_USE_INTRAFONT
+    if (gfx_scegu_ensure_home_menu_font()) {
+        intraFontActivate(sHomeMenuFont);
+
+        for (row = firstRow; row < firstRow + visibleRows; row++) {
+            int y = 82 + ((row - firstRow) * 22);
+            unsigned int color = gfx_scegu_rgba(218, 224, 218, 255);
+
+            if (selectedIndex == row) {
+                gfx_scegu_draw_rect(54, y - 17, 372, 22, gfx_scegu_rgba(38, 92, 78, 205));
+                color = gfx_scegu_rgba(255, 255, 245, 255);
+            }
+
+            if (row < bindingCount) {
+                OotPspControls_GetBindingValueText(row, value, sizeof(value));
+                snprintf(line, sizeof(line), "%s: %.32s", OotPspControls_GetBindingName(row), value);
+            } else if (row == deadzoneRow) {
+                snprintf(line, sizeof(line), "Deadzone: %d", OotPspControls_GetDeadzone());
+            } else if (row == saveRow) {
+                snprintf(line, sizeof(line), "Save controls.ini");
+            } else if (row == resetRow) {
+                snprintf(line, sizeof(line), "Reset defaults");
+            } else {
+                snprintf(line, sizeof(line), "Back");
+            }
+
+            intraFontSetStyle(sHomeMenuFont, 0.68f, color, gfx_scegu_rgba(0, 0, 0, 180), 0.0f,
+                              INTRAFONT_ALIGN_LEFT | INTRAFONT_STRING_ASCII);
+            intraFontPrint(sHomeMenuFont, 70.0f, (float)y, line);
+        }
+
+        intraFontSetStyle(sHomeMenuFont, 0.48f, gfx_scegu_rgba(170, 190, 180, 255),
+                          gfx_scegu_rgba(0, 0, 0, 160), 0.0f, INTRAFONT_ALIGN_CENTER | INTRAFONT_STRING_ASCII);
+
+        if (firstRow > 0) {
+            intraFontPrint(sHomeMenuFont, 422.0f, 82.0f, "^");
+        }
+        if ((firstRow + visibleRows) < totalRows) {
+            intraFontPrint(sHomeMenuFont, 422.0f, 214.0f, "v");
+        }
+
+        if ((statusMessage != NULL) && (statusMessage[0] != '\0')) {
+            intraFontPrint(sHomeMenuFont, SCR_WIDTH / 2, 242.0f, statusMessage);
+        } else {
+            intraFontPrint(sHomeMenuFont, SCR_WIDTH / 2, 242.0f, "Left/Right change  Cross select  Circle back");
+        }
+        return;
+    }
+#endif
+
+    gfx_scegu_draw_fallback_text_centered(SCR_WIDTH / 2, 116, "Controller Mapping", 4,
+                                          gfx_scegu_rgba(255, 255, 245, 255));
+    gfx_scegu_draw_fallback_text_centered(SCR_WIDTH / 2, 158, "Back", 4, gfx_scegu_rgba(218, 224, 218, 255));
 }
 
 static inline uint32_t get_shader_index(uint32_t id) {
@@ -395,6 +781,8 @@ static void gfx_scegu_apply_shader(struct ShaderProgram *prg) {
 
     if (use_texture) {
         sceGuEnable(GU_TEXTURE_2D);
+        sceGuTexOffset(0.0f, 0.0f);
+        sceGuTexScale(1.0f, 1.0f);
     } else {
         sceGuDisable(GU_TEXTURE_2D);
     }
@@ -660,6 +1048,8 @@ static void gfx_scegu_upload_texture(const uint8_t *rgba32_buf, int width, int h
 }
 
 static void gfx_scegu_set_depth_test(bool depth_test) {
+    sceGuDepthFunc(GU_GEQUAL);
+
     if (depth_test) {
         sceGuEnable(GU_DEPTH_TEST);
     } else {
@@ -813,13 +1203,30 @@ static void gfx_scegu_init(void) {
 }
 
 static void gfx_scegu_start_frame(void) {
+    bool hasHomeMenuBackground;
+    bool hasPauseBackground;
+    bool hasStaticBackground;
+
+    if (sHomeMenuBgCaptureRequested) {
+        gfx_scegu_copy_framebuffer_from_vram(sHomeMenuBgBuffer, sDisplayBuffer);
+        gfx_scegu_blur_framebuffer_565(sHomeMenuBgBuffer);
+        sHomeMenuBgCaptureRequested = false;
+        sHomeMenuBgCaptured = true;
+    }
+
     if (sPauseBgCaptureRequested) {
         gfx_scegu_copy_framebuffer_cpu(sPauseBgBuffer, sDisplayBuffer);
         sPauseBgCaptureRequested = false;
         sPauseBgCaptured = true;
     }
 
-    if (sPauseBgActive && sPauseBgCaptured) {
+    hasHomeMenuBackground = sHomeMenuBgActive && sHomeMenuBgCaptured;
+    hasPauseBackground = sPauseBgActive && sPauseBgCaptured;
+    hasStaticBackground = hasHomeMenuBackground || hasPauseBackground;
+
+    if (hasHomeMenuBackground) {
+        gfx_scegu_copy_framebuffer_to_vram(sDrawBuffer, sHomeMenuBgBuffer);
+    } else if (hasPauseBackground) {
         gfx_scegu_copy_framebuffer_cpu(sDrawBuffer, sPauseBgBuffer);
     }
 
@@ -828,7 +1235,7 @@ static void gfx_scegu_start_frame(void) {
     sceGuDepthMask(GU_TRUE); // Must be set to clear Z-buffer
     sceGuClearDepth(0);
 
-    if (sPauseBgActive && sPauseBgCaptured) {
+    if (hasStaticBackground) {
         sceGuClear(GU_DEPTH_BUFFER_BIT);
     } else {
         sceGuClearColor(0xFF000000);
@@ -920,6 +1327,29 @@ void gfx_scegu_set_pause_background_active(bool active) {
     if (!active) {
         sPauseBgCaptureRequested = false;
         sPauseBgCaptured = false;
+    }
+}
+
+void gfx_scegu_request_home_menu_background(void) {
+    sHomeMenuBgCaptureRequested = true;
+}
+
+void gfx_scegu_set_home_menu_background_active(bool active) {
+    sHomeMenuBgActive = active;
+
+    if (!active) {
+        sHomeMenuBgCaptureRequested = false;
+        sHomeMenuBgCaptured = false;
+    }
+}
+
+void gfx_scegu_render_home_menu(int selectedIndex, int screen, int controlSelectedIndex, const char* statusMessage) {
+    gfx_scegu_prepare_home_menu_draw();
+
+    if (screen == 1) {
+        gfx_scegu_render_controller_mapping(controlSelectedIndex, statusMessage);
+    } else {
+        gfx_scegu_render_home_menu_main(selectedIndex);
     }
 }
 
