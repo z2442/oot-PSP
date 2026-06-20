@@ -21,7 +21,6 @@ from tools import version_config
 
 EXTERNAL_VROM_BASE = 0x20000000
 EXTERNAL_VROM_ALIGN = 16
-RUNTIME_SEGMENT_DIR = Path("data/segments")
 PACKED_ASSET_FILENAME = "oot_psp_assets.bin"
 NATIVE_ASSET_FLAG = 1
 TEXTURE_WORDS_FLAG = 2
@@ -931,7 +930,6 @@ def build_entries(version: str) -> list[dict[str, object]]:
                 "vrom_end": end,
                 "original_vrom_start": original_start,
                 "original_vrom_end": original_end,
-                "runtime_path": RUNTIME_SEGMENT_DIR / f"{name}.bin",
             }
         )
 
@@ -1229,14 +1227,13 @@ def emit_table(
     ]
 
     for entry in entries:
-        path = entry["runtime_path"]
-        assert isinstance(path, Path)
+        name = str(entry["name"])
         lines.append(
             f"    {{ 0x{entry['vrom_start']:08X}, 0x{entry['vrom_end']:08X}, "
             f"0x{entry['original_vrom_start']:08X}, 0x{entry['original_vrom_end']:08X}, "
             f"0x{entry['flags']:08X}, "
             f"0x{entry['file_offset']:08X}, "
-            f'"{c_string(path.as_posix())}" }},'
+            f'"{c_string(name)}" }},'
         )
 
     lines.extend(

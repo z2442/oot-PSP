@@ -71,6 +71,10 @@ AudioTask* AudioThread_UpdateImpl(void) {
         }
     }
 
+#if defined(TARGET_PSP)
+    OotPspAudioBackend_WaitForCommands();
+#endif
+
     osSendMesg(gAudioCtx.taskStartQueueP, (OSMesg)gAudioCtx.totalTaskCount, OS_MESG_NOBLOCK);
     gAudioCtx.rspTaskIndex ^= 1;
     gAudioCtx.curAiBufIndex++;
@@ -168,12 +172,17 @@ AudioTask* AudioThread_UpdateImpl(void) {
     gAudioCtx.curAbiCmdBuf =
         AudioSynth_Update(gAudioCtx.curAbiCmdBuf, &abiCmdCnt, curAiBuffer, gAudioCtx.aiBufLengths[index]);
 #if defined(TARGET_PSP)
-    OotPspAudioBackend_ExecuteCommands(gAudioCtx.abiCmdBufs[gAudioCtx.rspTaskIndex], abiCmdCnt);
+    OotPspAudioBackend_SubmitCommands(gAudioCtx.abiCmdBufs[gAudioCtx.rspTaskIndex], abiCmdCnt);
 #endif
 
     // Update audioRandom to the next random number
     gAudioCtx.audioRandom = (gAudioCtx.audioRandom + gAudioCtx.totalTaskCount) * osGetCount();
+#if defined(TARGET_PSP)
+    gAudioCtx.audioRandom =
+        gAudioCtx.audioRandom + gAudioCtx.aiBuffers[(gAudioCtx.curAiBufIndex + 2) % 3][gAudioCtx.totalTaskCount & 0xFF];
+#else
     gAudioCtx.audioRandom = gAudioCtx.audioRandom + gAudioCtx.aiBuffers[index][gAudioCtx.totalTaskCount & 0xFF];
+#endif
 
     // gWaveSamples[8] interprets compiled assembly code as s16 samples as a way to generate sound with noise.
     // Start with the address of AudioThread_Update, and offset it by a random number between 0 - 0xFFF0
@@ -619,6 +628,10 @@ s32 AudioThread_ResetAudioHeap(s32 specId) {
     s32 resetStatus;
     OSMesg msg;
     s32 pad;
+
+#if defined(TARGET_PSP)
+    OotPspAudioBackend_WaitForCommands();
+#endif
 
     func_800E5F34();
     resetStatus = gAudioCtx.resetStatus;

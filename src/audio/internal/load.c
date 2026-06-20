@@ -10,6 +10,9 @@
 #include "ultra64.h"
 #include "versions.h"
 #include "audio.h"
+#if defined(TARGET_PSP)
+#include "oot_psp_asset_loader.h"
+#endif
 
 #define MK_ASYNC_MSG(retData, tableType, id, loadStatus) \
     (((retData) << 24) | ((tableType) << 16) | ((id) << 8) | (loadStatus))
@@ -100,6 +103,25 @@ static s32 OotPspAudio_IsAlignedNativePtr(const void* ptr) {
     u32 addr = (u32)ptr;
 
     return (addr >= OOT_PSP_AUDIO_NATIVE_PTR_START) && (addr < OOT_PSP_AUDIO_NATIVE_PTR_END) && ((addr & 3) == 0);
+}
+
+static void* OotPspAudio_GetResidentSampleBank(u32 sampleBankId) {
+    AudioTable* sampleBankTable = gAudioCtx.sampleBankTable;
+    AudioTableEntry* entry;
+    const void* ramAddr;
+
+    if (!OotPspAudio_IsAlignedNativePtr(sampleBankTable) ||
+        (sampleBankId >= (u32)sampleBankTable->header.numEntries)) {
+        return NULL;
+    }
+
+    entry = &sampleBankTable->entries[sampleBankId];
+    if (entry->size == 0) {
+        return NULL;
+    }
+
+    ramAddr = OotPsp_GetCachedAssetPointer(entry->romAddr, entry->size);
+    return (void*)ramAddr;
 }
 
 static void OotPspAudio_LogBadSampleLookup(s32 fontId, s32 instId) {
@@ -922,6 +944,14 @@ u32 AudioLoad_TrySyncLoadSampleBank(u32 sampleBankId, u32* outMedium, s32 noLoad
     s8 cachePolicy;
 
     sampleBankTable = AudioLoad_GetLoadTable(SAMPLE_TABLE);
+#if defined(TARGET_PSP)
+    ramAddr = OotPspAudio_GetResidentSampleBank(realTableId);
+    if (ramAddr != NULL) {
+        AudioLoad_SetSampleFontLoadStatus(realTableId, LOAD_STATUS_COMPLETE);
+        *outMedium = MEDIUM_RAM;
+        return (u32)ramAddr;
+    }
+#endif
     ramAddr = AudioLoad_SearchCaches(SAMPLE_TABLE, realTableId);
     if (ramAddr != NULL) {
         if (gAudioCtx.sampleFontLoadStatus[realTableId] != LOAD_STATUS_IN_PROGRESS) {
@@ -1437,6 +1467,18 @@ void* AudioLoad_AsyncLoadInner(s32 tableType, s32 id, s32 nChunks, s32 retData, 
             }
             break;
     }
+
+#if defined(TARGET_PSP)
+    if (tableType == SAMPLE_TABLE) {
+        ramAddr = OotPspAudio_GetResidentSampleBank(realId);
+        if (ramAddr != NULL) {
+            loadStatus = LOAD_STATUS_COMPLETE;
+            AudioLoad_SetSampleFontLoadStatus(realId, loadStatus);
+            osSendMesg(retQueue, (OSMesg)MK_ASYNC_MSG(retData, 0, 0, LOAD_STATUS_NOT_LOADED), OS_MESG_NOBLOCK);
+            return ramAddr;
+        }
+    }
+#endif
 
     ramAddr = AudioLoad_SearchCaches(tableType, realId);
     if (ramAddr != NULL) {

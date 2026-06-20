@@ -1,6 +1,8 @@
 #include "oot_psp_mixer.h"
 
 #include "attributes.h"
+#include "audio.h"
+#include "oot_psp_audio_commands.h"
 
 #ifndef OOT_PSP_AUDIO_MIXER_VME
 #define OOT_PSP_AUDIO_MIXER_VME 1
@@ -29,7 +31,6 @@
 #define ROUND_UP_8(v) (((v) + 7) & ~7)
 #define ROUND_DOWN_16(v) ((v) & ~15)
 #define OOT_PSP_FILTER_TAP_COUNT 8
-#define OOT_PSP_A_COPYBLOCKS 16
 #define OOT_PSP_MIXER_VME_MAX_SAMPLES 1024
 #define OOT_PSP_MIXER_VME_PROLOGUE 0x10
 #define OOT_PSP_MIXER_VME_LANE_STRIDE 0x2000
@@ -194,6 +195,73 @@ void OotPspMixer_LoadBuffer(const void* source, u16 dmemDest, u16 nbytes) {
 
 void OotPspMixer_SaveBuffer(u16 dmemSrc, void* dest, u16 nbytes) {
     memcpy(dest, DMEM_U8(dmemSrc), ROUND_DOWN_16(nbytes));
+}
+
+static void OotPspMixer_ReverbDownsample(u16 dmemLeft, const OotPspAudioReverbDownsampleCmd* desc) {
+    const s16* left = DMEM_S16(dmemLeft);
+    const s16* right = DMEM_S16(dmemLeft + DMEM_1CH_SIZE);
+    s16* leftRing = desc->leftRingBuf;
+    s16* rightRing = desc->rightRingBuf;
+    s32 startPos = desc->startPos;
+    s32 step = desc->downsampleRate;
+    s32 lengthASamples = desc->lengthA / (s32)sizeof(s16);
+    s32 lengthBSamples = desc->lengthB / (s32)sizeof(s16);
+    s32 i;
+    s32 j;
+
+    for (j = 0, i = 0; i < lengthASamples; i++, j += step) {
+        leftRing[startPos + i] = left[j];
+        rightRing[startPos + i] = right[j];
+    }
+
+    for (i = 0; i < lengthBSamples; i++, j += step) {
+        leftRing[i] = left[j];
+        rightRing[i] = right[j];
+    }
+}
+
+static void OotPspMixer_ReverbSave(u16 dmemLeft, const OotPspAudioReverbDownsampleCmd* desc) {
+    const s16* left = DMEM_S16(dmemLeft);
+    const s16* right = DMEM_S16(dmemLeft + DMEM_1CH_SIZE);
+    s16* leftRing = desc->leftRingBuf;
+    s16* rightRing = desc->rightRingBuf;
+    s32 startPos = desc->startPos;
+    s32 lengthASamples = desc->lengthA / (s32)sizeof(s16);
+    s32 lengthBSamples = desc->lengthB / (s32)sizeof(s16);
+    s32 i;
+    s32 j;
+
+    for (j = 0, i = 0; i < lengthASamples; i++, j++) {
+        leftRing[startPos + i] = left[j];
+        rightRing[startPos + i] = right[j];
+    }
+
+    for (i = 0; i < lengthBSamples; i++, j++) {
+        leftRing[i] = left[j];
+        rightRing[i] = right[j];
+    }
+}
+
+static void OotPspMixer_ReverbLoad(u16 dmemLeft, const OotPspAudioReverbDownsampleCmd* desc) {
+    s16* left = DMEM_S16(dmemLeft);
+    s16* right = DMEM_S16(dmemLeft + DMEM_1CH_SIZE);
+    const s16* leftRing = desc->leftRingBuf;
+    const s16* rightRing = desc->rightRingBuf;
+    s32 startPos = desc->startPos;
+    s32 lengthASamples = desc->lengthA / (s32)sizeof(s16);
+    s32 lengthBSamples = desc->lengthB / (s32)sizeof(s16);
+    s32 i;
+    s32 j;
+
+    for (j = 0, i = 0; i < lengthASamples; i++, j++) {
+        left[j] = leftRing[startPos + i];
+        right[j] = rightRing[startPos + i];
+    }
+
+    for (i = 0; i < lengthBSamples; i++, j++) {
+        left[j] = leftRing[i];
+        right[j] = rightRing[i];
+    }
 }
 
 void OotPspMixer_LoadADPCM(s32 numEntriesBytes, const s16* book) {
@@ -1192,6 +1260,19 @@ void OotPspMixer_ExecuteCommandList(const Acmd* cmdList, s32 cmdCount) {
 
             case OOT_PSP_A_COPYBLOCKS:
                 OotPspMixer_CopyBlocks((w0 >> 16) & 0xFF, w0 & 0xFFFF, (w1 >> 16) & 0xFFFF, w1 & 0xFFFF);
+                break;
+
+            case OOT_PSP_A_REVERB_DOWNSAMPLE:
+                OotPspMixer_ReverbDownsample(w0 & 0xFFFF,
+                                             (const OotPspAudioReverbDownsampleCmd*)(uintptr_t)w1);
+                break;
+
+            case OOT_PSP_A_REVERB_SAVE:
+                OotPspMixer_ReverbSave(w0 & 0xFFFF, (const OotPspAudioReverbDownsampleCmd*)(uintptr_t)w1);
+                break;
+
+            case OOT_PSP_A_REVERB_LOAD:
+                OotPspMixer_ReverbLoad(w0 & 0xFFFF, (const OotPspAudioReverbDownsampleCmd*)(uintptr_t)w1);
                 break;
 
             case A_INTERL:

@@ -444,8 +444,9 @@ static s32 OotPsp_DmaReadInternal(void* ram, uintptr_t vrom, size_t size, s32 is
     s32 status;
 
     if (isAudioRead) {
-        status = OotPspAudioBackend_NeedsRefillUrgently() ? OotPsp_AssetReadAudioUrgent(ram, vrom, size)
-                                                          : OotPsp_AssetReadAudio(ram, vrom, size);
+        status = (OotPspAudioBackend_NeedsRefillUrgently() || OotPspAudioBackend_NeedsRefillDuringIo())
+                     ? OotPsp_AssetReadAudioUrgent(ram, vrom, size)
+                     : OotPsp_AssetReadAudio(ram, vrom, size);
     } else {
         status = OotPsp_AssetRead(ram, vrom, size);
     }

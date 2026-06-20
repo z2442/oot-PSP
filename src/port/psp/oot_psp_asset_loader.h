@@ -20,7 +20,7 @@ typedef struct OotPspExternalAsset {
     uintptr_t originalVromEnd;
     u32 flags;
     uintptr_t fileOffset;
-    const char* path;
+    const char* name;
 } OotPspExternalAsset;
 
 typedef struct OotPspExternalAssetTextureRange {
@@ -53,15 +53,10 @@ extern const size_t gOotPspStaffMessageEntriesCount;
 
 void OotPsp_AssetInit(const char* executablePath);
 const char* OotPsp_ResolveRootPath(const char* path, char* buffer, size_t bufferSize);
-uintptr_t OotPsp_GetPrxRelocationBias(void);
 s32 OotPsp_TryNormalizePrxRelocatedAddress(uintptr_t addr, uintptr_t* normalized);
 uintptr_t OotPsp_NormalizeVrom(uintptr_t vrom);
-s32 OotPsp_NormalizeVromRange(uintptr_t vromStart, uintptr_t vromEnd, uintptr_t* normalizedStart,
-                              uintptr_t* normalizedEnd);
 void OotPsp_NormalizeRomFile(RomFile* file);
 s32 OotPsp_IsNativeExternalTextureRange(const void* ptr, size_t size);
-s32 OotPsp_IsNativeExternalTextureByte(const void* ptr);
-s32 OotPsp_IsLoadedExternalAssetRange(const void* ptr, size_t size);
 s32 OotPsp_IsLoadedNativeExternalAssetRange(const void* ptr, size_t size);
 s32 OotPsp_GetLoadedExternalAssetRangeFlags(const void* ptr, size_t size, u32* flags);
 u32 OotPsp_GetExternalAssetRangeSerial(const void* ptr, size_t size);
@@ -70,6 +65,8 @@ s32 OotPsp_MapNativeExternalTextureByte(const void* ptr, const void** mapped);
 s32 OotPsp_AssetRead(void* ram, uintptr_t vrom, size_t size);
 s32 OotPsp_AssetReadAudio(void* ram, uintptr_t vrom, size_t size);
 s32 OotPsp_AssetReadAudioUrgent(void* ram, uintptr_t vrom, size_t size);
+s32 OotPsp_AssetReadHasForegroundPressure(void);
+const void* OotPsp_GetCachedAssetPointer(uintptr_t vrom, size_t size);
 const OotPspMessageEntry* OotPsp_FindMessageEntry(const OotPspMessageEntry* entries, size_t count, u16 textId);
 
 #endif

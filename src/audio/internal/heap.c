@@ -6,6 +6,10 @@
 #include "versions.h"
 #include "audio.h"
 
+#if defined(TARGET_PSP) && !defined(OOT_PSP_AUDIO_SOURCE_FREQUENCY)
+#define OOT_PSP_AUDIO_SOURCE_FREQUENCY 22050
+#endif
+
 void AudioHeap_InitSampleCaches(u32 persistentSampleCacheSize, u32 temporarySampleCacheSize);
 SampleCacheEntry* AudioHeap_AllocTemporarySampleCacheEntry(u32 size);
 SampleCacheEntry* AudioHeap_AllocPersistentSampleCacheEntry(u32 size);
@@ -967,11 +971,22 @@ void AudioHeap_Init(void) {
     s32 j;
     s32 pad2;
     AudioSpec* spec = &gAudioSpecs[gAudioCtx.specId]; // Audio Specifications
+    u32 samplingFrequency = spec->samplingFrequency;
+    u32 persistentSampleBankCacheSize = spec->persistentSampleBankCacheSize;
+    u32 temporarySampleBankCacheSize = spec->temporarySampleBankCacheSize;
 
     gAudioCtx.sampleDmaCount = 0;
 
+#if defined(TARGET_PSP)
+    if (samplingFrequency > OOT_PSP_AUDIO_SOURCE_FREQUENCY) {
+        samplingFrequency = OOT_PSP_AUDIO_SOURCE_FREQUENCY;
+    }
+    persistentSampleBankCacheSize = 0;
+    temporarySampleBankCacheSize = 0;
+#endif
+
     // audio buffer parameters
-    gAudioCtx.audioBufferParameters.samplingFrequency = spec->samplingFrequency;
+    gAudioCtx.audioBufferParameters.samplingFrequency = samplingFrequency;
     gAudioCtx.audioBufferParameters.aiSamplingFrequency =
         osAiSetFrequency(gAudioCtx.audioBufferParameters.samplingFrequency);
     gAudioCtx.audioBufferParameters.samplesPerFrameTarget =
@@ -1035,9 +1050,9 @@ void AudioHeap_Init(void) {
 
     // Calculate sizes for various caches on the audio heap
     persistentSize =
-        spec->persistentSeqCacheSize + spec->persistentFontCacheSize + spec->persistentSampleBankCacheSize + 0x10;
+        spec->persistentSeqCacheSize + spec->persistentFontCacheSize + persistentSampleBankCacheSize + 0x10;
     temporarySize =
-        spec->temporarySeqCacheSize + spec->temporaryFontCacheSize + spec->temporarySampleBankCacheSize + 0x10;
+        spec->temporarySeqCacheSize + spec->temporaryFontCacheSize + temporarySampleBankCacheSize + 0x10;
     cachePoolSize = persistentSize + temporarySize;
     miscPoolSize = gAudioCtx.sessionPool.size - cachePoolSize - 0x100;
 
@@ -1058,13 +1073,13 @@ void AudioHeap_Init(void) {
     // Persistent Pool Split (split into Sequences, SoundFonts, Samples pools)
     gAudioCtx.persistentCommonPoolSplit.seqCacheSize = spec->persistentSeqCacheSize;
     gAudioCtx.persistentCommonPoolSplit.fontCacheSize = spec->persistentFontCacheSize;
-    gAudioCtx.persistentCommonPoolSplit.sampleBankCacheSize = spec->persistentSampleBankCacheSize;
+    gAudioCtx.persistentCommonPoolSplit.sampleBankCacheSize = persistentSampleBankCacheSize;
     AudioHeap_InitPersistentPoolsAndCaches(&gAudioCtx.persistentCommonPoolSplit);
 
     // Temporary Pool Split (split into Sequences, SoundFonts, Samples pools)
     gAudioCtx.temporaryCommonPoolSplit.seqCacheSize = spec->temporarySeqCacheSize;
     gAudioCtx.temporaryCommonPoolSplit.fontCacheSize = spec->temporaryFontCacheSize;
-    gAudioCtx.temporaryCommonPoolSplit.sampleBankCacheSize = spec->temporarySampleBankCacheSize;
+    gAudioCtx.temporaryCommonPoolSplit.sampleBankCacheSize = temporarySampleBankCacheSize;
     AudioHeap_InitTemporaryPoolsAndCaches(&gAudioCtx.temporaryCommonPoolSplit);
 
     AudioHeap_ResetLoadStatus();

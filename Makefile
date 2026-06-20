@@ -1171,9 +1171,11 @@ $(BUILD_DIR)/assets/audio/audiobank_padding.o:
 #### PSP Port Probe ####
 
 PSP_ENABLE_GPROF ?= 0
+PSP_AUDIO_SOURCE_FREQUENCY ?= 22050
 PSP_AUDIO_MIXER_VME ?= 1
 PSP_AUDIO_MIXER_FAST ?= 1
 PSP_AUDIO_MIXER_VERIFY ?= 0
+PSP_AUDIO_ME_OPT_CFLAGS ?= -O3 -finline-functions
 PSP_PORT_AUDIO_MIXER_VARIANT :=
 ifeq ($(PSP_AUDIO_MIXER_VME),0)
 PSP_PORT_AUDIO_MIXER_VARIANT := -mixer-cpu
@@ -1520,6 +1522,7 @@ PSP_PORT_DEFINES := \
 	-DF3DEX_GBI_PL \
 	-DGBI_DOWHILE \
 	-DTARGET_PSP=1 \
+	-DOOT_PSP_AUDIO_SOURCE_FREQUENCY=$(PSP_AUDIO_SOURCE_FREQUENCY) \
 	-DOOT_PSP_AUDIO_MIXER_VME=$(PSP_AUDIO_MIXER_VME) \
 	-DOOT_PSP_AUDIO_MIXER_FAST=$(PSP_AUDIO_MIXER_FAST) \
 	-DOOT_PSP_AUDIO_MIXER_VERIFY=$(PSP_AUDIO_MIXER_VERIFY) \
@@ -1552,6 +1555,7 @@ PSP_PORT_CFLAGS := -G0 -O2 -g3 -Wall -Wextra -Wno-format-security -Wno-unused-pa
 ifneq ($(PSP_PORT_GPROF_ENABLED),)
 PSP_PORT_CFLAGS += -pg -g -fno-omit-frame-pointer -fno-optimize-sibling-calls
 endif
+PSP_PORT_AUDIO_ME_CFLAGS := $(filter-out -pg,$(PSP_PORT_CFLAGS)) $(PSP_AUDIO_ME_OPT_CFLAGS)
 
 PSP_PORT_LIBS := -L$(PSP_PORT_PSPSDK)/lib -L$(PSP_PORT_PREFIX)/lib -lme-core -lpspgu -lpspgum -lpspjpeg \
 	-lpspdisplay -lpspge -lpspfpu -lpspctrl -lpsppower -lpspaudio -lpspdebug
@@ -1671,6 +1675,8 @@ $(PSP_PORT_RUNTIME_OBJECTS): $(PSP_PORT_SETUP_STAMP) $(PSP_PORT_RUNTIME_GENERATE
 
 $(PSP_PORT_BUILD_DIR)/src/audio/game/session_init.o: $(BUILD_DIR)/assets/audio/sequence_sizes.h
 $(PSP_PORT_BUILD_DIR)/src/audio/internal/seqplayer.o: PSP_PORT_CFLAGS += -DMML_VERSION=MML_VERSION_OOT
+$(PSP_PORT_BUILD_DIR)/src/port/psp/oot_psp_audio_backend.o: PSP_PORT_CFLAGS := $(PSP_PORT_AUDIO_ME_CFLAGS)
+$(PSP_PORT_BUILD_DIR)/src/port/psp/oot_psp_mixer.o: PSP_PORT_CFLAGS := $(PSP_PORT_AUDIO_ME_CFLAGS)
 
 $(PSP_PORT_NATIVE_SEGMENT_OBJECTS): $(PSP_PORT_SETUP_STAMP) $(PSP_PORT_EXTRACTED_ASSET_FILES) $(PSP_PORT_NATIVE_GENERATED_ASSET_STAMP)
 
@@ -1689,7 +1695,8 @@ $(PSP_PORT_ELF): $(PSP_PORT_LIBRARY) $(PSP_PORT_PROBE_OBJECT) $(PSP_PORT_LINKER_
 ifneq ($(PSP_PORT_EXTRA_LINK_OBJECTS),)
 	$(file >$@.extra.rsp,$(PSP_PORT_EXTRA_LINK_OBJECTS))
 endif
-	$(PSP_PORT_CC) -o $@ $(PSP_PORT_PROBE_OBJECT) $(if $(PSP_PORT_EXTRA_LINK_OBJECTS),@$@.extra.rsp) $(PSP_PORT_LIBRARY) $(PSP_PORT_LDFLAGS)
+	$(PSP_PORT_CC) -o $@ $(PSP_PORT_PROBE_OBJECT) $(if $(PSP_PORT_EXTRA_LINK_OBJECTS),@$@.extra.rsp) \
+		-Wl,--start-group $(PSP_PORT_LIBRARY) -Wl,--end-group $(PSP_PORT_LDFLAGS)
 	psp-fixup-imports $@
 
 $(PSP_PORT_PRX): $(PSP_PORT_ELF)

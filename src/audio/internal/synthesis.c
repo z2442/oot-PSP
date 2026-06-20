@@ -4,6 +4,9 @@
 #include "alignment.h"
 #include "ultra64.h"
 #include "audio.h"
+#if defined(TARGET_PSP)
+#include "oot_psp_audio_commands.h"
+#endif
 
 // DMEM Addresses for the RSP
 #define DMEM_TEMP 0x3C0
@@ -43,13 +46,54 @@ u32 sEnvMixerOp = _SHIFTL(A_ENVMIXER, 24, 8);
 #if defined(TARGET_PSP)
 #define OOT_PSP_AUDIO_NATIVE_PTR_START 0x08000000U
 #define OOT_PSP_AUDIO_NATIVE_PTR_END   0x0C000000U
+#define OOT_PSP_AUDIO_REVERB_COUNT     4
+#define OOT_PSP_AUDIO_REVERB_FRAMES    2
+#define OOT_PSP_AUDIO_REVERB_UPDATES   5
+#define OOT_PSP_AUDIO_REVERB_DESC_SLOTS 2
+#define OOT_PSP_AUDIO_REVERB_DESC_ITEMS 0
+#define OOT_PSP_AUDIO_REVERB_DESC_ITEMS2 1
 
 static u8 sOotPspAudioSynthBadSampleLogged;
+static OotPspAudioReverbDownsampleCmd sOotPspAudioReverbDownsampleCmds[OOT_PSP_AUDIO_REVERB_COUNT]
+                                                                             [OOT_PSP_AUDIO_REVERB_FRAMES]
+                                                                             [OOT_PSP_AUDIO_REVERB_UPDATES]
+                                                                             [OOT_PSP_AUDIO_REVERB_DESC_SLOTS]
+    __attribute__((aligned(64)));
 
 static s32 OotPspAudioSynth_IsAlignedNativePtr(const void* ptr) {
     u32 addr = (u32)ptr;
 
     return (addr >= OOT_PSP_AUDIO_NATIVE_PTR_START) && (addr < OOT_PSP_AUDIO_NATIVE_PTR_END) && ((addr & 3) == 0);
+}
+
+static OotPspAudioReverbDownsampleCmd* OotPspAudioSynth_SetupReverbRingCmd(SynthesisReverb* reverb,
+                                                                            ReverbRingBufferItem* bufItem,
+                                                                            s16 updateIndex, s32 slot) {
+    s32 reverbIndex = reverb - gAudioCtx.synthesisReverbs;
+    OotPspAudioReverbDownsampleCmd* pspCmd;
+
+    if ((reverbIndex < 0) || (reverbIndex >= OOT_PSP_AUDIO_REVERB_COUNT) ||
+        (reverb->curFrame >= OOT_PSP_AUDIO_REVERB_FRAMES) ||
+        ((u32)updateIndex >= OOT_PSP_AUDIO_REVERB_UPDATES) ||
+        ((u32)slot >= OOT_PSP_AUDIO_REVERB_DESC_SLOTS)) {
+        return NULL;
+    }
+
+    pspCmd = &sOotPspAudioReverbDownsampleCmds[reverbIndex][reverb->curFrame][updateIndex][slot];
+    pspCmd->leftRingBuf = reverb->leftRingBuf;
+    pspCmd->rightRingBuf = reverb->rightRingBuf;
+    pspCmd->startPos = bufItem->startPos;
+    pspCmd->lengthA = bufItem->lengthA;
+    pspCmd->lengthB = bufItem->lengthB;
+    pspCmd->downsampleRate = reverb->downsampleRate;
+
+    return pspCmd;
+}
+
+static OotPspAudioReverbDownsampleCmd* OotPspAudioSynth_SetupReverbDownsampleCmd(SynthesisReverb* reverb,
+                                                                                 ReverbRingBufferItem* bufItem,
+                                                                                 s16 updateIndex) {
+    return OotPspAudioSynth_SetupReverbRingCmd(reverb, bufItem, updateIndex, OOT_PSP_AUDIO_REVERB_DESC_ITEMS);
 }
 #endif
 
@@ -89,6 +133,7 @@ void AudioSynth_InitNextRingBuf(s32 chunkLen, s32 updateIndex, s32 reverbIndex) 
     s32 i;
     s32 j;
 
+#if !defined(TARGET_PSP)
     if (reverb->downsampleRate >= 2) {
         if (reverb->framesToIgnore == 0) {
             bufItem = &reverb->items[reverb->curFrame][updateIndex];
@@ -105,6 +150,7 @@ void AudioSynth_InitNextRingBuf(s32 chunkLen, s32 updateIndex, s32 reverbIndex) 
             }
         }
     }
+#endif
 
     bufItem = &reverb->items[reverb->curFrame][updateIndex];
     numSamples = chunkLen / reverb->downsampleRate;
@@ -266,6 +312,16 @@ static Acmd* OotPspAudioSynth_DropBadNote(Acmd* cmd, s32 updateIndex, s32 noteIn
 Acmd* AudioSynth_LoadRingBuffer1AtTemp(Acmd* cmd, SynthesisReverb* reverb, s16 updateIndex) {
     ReverbRingBufferItem* bufItem = &reverb->items[reverb->curFrame][updateIndex];
 
+#if defined(TARGET_PSP)
+    OotPspAudioReverbDownsampleCmd* pspCmd =
+        OotPspAudioSynth_SetupReverbRingCmd(reverb, bufItem, updateIndex, OOT_PSP_AUDIO_REVERB_DESC_ITEMS);
+
+    if (pspCmd != NULL) {
+        aOotPspAudioReverbLoad(cmd++, DMEM_WET_TEMP, pspCmd);
+        return cmd;
+    }
+#endif
+
     cmd = AudioSynth_LoadRingBufferPart(cmd, DMEM_WET_TEMP, bufItem->startPos, bufItem->lengthA, reverb);
     if (bufItem->lengthB != 0) {
         // Ring buffer wrapped
@@ -279,6 +335,16 @@ Acmd* AudioSynth_LoadRingBuffer1AtTemp(Acmd* cmd, SynthesisReverb* reverb, s16 u
  */
 Acmd* AudioSynth_SaveRingBuffer1AtTemp(Acmd* cmd, SynthesisReverb* reverb, s16 updateIndex) {
     ReverbRingBufferItem* bufItem = &reverb->items[reverb->curFrame][updateIndex];
+
+#if defined(TARGET_PSP)
+    OotPspAudioReverbDownsampleCmd* pspCmd =
+        OotPspAudioSynth_SetupReverbRingCmd(reverb, bufItem, updateIndex, OOT_PSP_AUDIO_REVERB_DESC_ITEMS);
+
+    if (pspCmd != NULL) {
+        aOotPspAudioReverbSave(cmd++, DMEM_WET_TEMP, pspCmd);
+        return cmd;
+    }
+#endif
 
     cmd = AudioSynth_SaveRingBufferPart(cmd, DMEM_WET_TEMP, bufItem->startPos, bufItem->lengthA, reverb);
     if (bufItem->lengthB != 0) {
@@ -554,6 +620,16 @@ void AudioSynth_LoadFilterSize(Acmd* cmd, s32 size, void* addr) {
 Acmd* AudioSynth_LoadRingBuffer1(Acmd* cmd, s32 aiBufLen, SynthesisReverb* reverb, s16 updateIndex) {
     ReverbRingBufferItem* ringBufferItem = &reverb->items[reverb->curFrame][updateIndex];
 
+#if defined(TARGET_PSP)
+    OotPspAudioReverbDownsampleCmd* pspCmd =
+        OotPspAudioSynth_SetupReverbRingCmd(reverb, ringBufferItem, updateIndex, OOT_PSP_AUDIO_REVERB_DESC_ITEMS);
+
+    if (pspCmd != NULL) {
+        aOotPspAudioReverbLoad(cmd++, DMEM_WET_LEFT_CH, pspCmd);
+        return cmd;
+    }
+#endif
+
     cmd =
         AudioSynth_LoadRingBufferPart(cmd, DMEM_WET_LEFT_CH, ringBufferItem->startPos, ringBufferItem->lengthA, reverb);
     if (ringBufferItem->lengthB != 0) {
@@ -570,6 +646,16 @@ Acmd* AudioSynth_LoadRingBuffer1(Acmd* cmd, s32 aiBufLen, SynthesisReverb* rever
  */
 Acmd* AudioSynth_LoadRingBuffer2(Acmd* cmd, s32 aiBufLen, SynthesisReverb* reverb, s16 updateIndex) {
     ReverbRingBufferItem* bufItem = &reverb->items2[reverb->curFrame][updateIndex];
+
+#if defined(TARGET_PSP)
+    OotPspAudioReverbDownsampleCmd* pspCmd =
+        OotPspAudioSynth_SetupReverbRingCmd(reverb, bufItem, updateIndex, OOT_PSP_AUDIO_REVERB_DESC_ITEMS2);
+
+    if (pspCmd != NULL) {
+        aOotPspAudioReverbLoad(cmd++, DMEM_WET_LEFT_CH, pspCmd);
+        return cmd;
+    }
+#endif
 
     cmd = AudioSynth_LoadRingBufferPart(cmd, DMEM_WET_LEFT_CH, bufItem->startPos, bufItem->lengthA, reverb);
     if (bufItem->lengthB != 0) {
@@ -643,6 +729,25 @@ Acmd* AudioSynth_SaveReverbSamples(Acmd* cmd, SynthesisReverb* reverb, s16 updat
         if (reverb->unk_18 != 0) {
             cmd = func_800DB680(cmd, reverb, updateIndex);
         } else {
+#if defined(TARGET_PSP)
+            s32 lengthA = bufItem->lengthA;
+            s32 lengthB = bufItem->lengthB;
+            OotPspAudioReverbDownsampleCmd* pspCmd =
+                OotPspAudioSynth_SetupReverbDownsampleCmd(reverb, bufItem, updateIndex);
+
+            if (pspCmd != NULL) {
+                aOotPspAudioReverbSave(cmd++, DMEM_WET_LEFT_CH, pspCmd);
+            } else {
+                // Put the oldest samples in the ring buffer into the wet channels
+                aSaveBuffer(cmd++, DMEM_WET_LEFT_CH, &reverb->leftRingBuf[bufItem->startPos], lengthA);
+                aSaveBuffer(cmd++, DMEM_WET_RIGHT_CH, &reverb->rightRingBuf[bufItem->startPos], lengthA);
+                if (lengthB != 0) {
+                    // Ring buffer wrapped
+                    aSaveBuffer(cmd++, DMEM_WET_LEFT_CH + lengthA, reverb->leftRingBuf, lengthB);
+                    aSaveBuffer(cmd++, DMEM_WET_RIGHT_CH + lengthA, reverb->rightRingBuf, lengthB);
+                }
+            }
+#else
             // Put the oldest samples in the ring buffer into the wet channels
             cmd = AudioSynth_SaveRingBufferPart(cmd, DMEM_WET_LEFT_CH, bufItem->startPos, bufItem->lengthA, reverb);
             if (bufItem->lengthB != 0) {
@@ -650,12 +755,22 @@ Acmd* AudioSynth_SaveReverbSamples(Acmd* cmd, SynthesisReverb* reverb, s16 updat
                 cmd = AudioSynth_SaveRingBufferPart(cmd, DMEM_WET_LEFT_CH + bufItem->lengthA, 0, bufItem->lengthB,
                                                     reverb);
             }
+#endif
         }
     } else {
+#if defined(TARGET_PSP)
+        OotPspAudioReverbDownsampleCmd* pspCmd = OotPspAudioSynth_SetupReverbDownsampleCmd(reverb, bufItem,
+                                                                                           updateIndex);
+
+        if ((pspCmd != NULL) && (reverb->framesToIgnore == 0)) {
+            aOotPspAudioReverbDownsample(cmd++, DMEM_WET_LEFT_CH, pspCmd);
+        }
+#else
         // Downsampling is done later by CPU when RSP is done, therefore we need to have
         // double buffering. Left and right buffers are adjacent in memory.
         AudioSynth_SaveBuffer(cmd++, DMEM_WET_LEFT_CH, DMEM_2CH_SIZE,
                               reverb->items[reverb->curFrame][updateIndex].toDownsampleLeft);
+#endif
     }
 
     reverb->resampleFlags = 0;
@@ -667,6 +782,16 @@ Acmd* AudioSynth_SaveReverbSamples(Acmd* cmd, SynthesisReverb* reverb, s16 updat
  */
 Acmd* AudioSynth_SaveRingBuffer2(Acmd* cmd, SynthesisReverb* reverb, s16 updateIndex) {
     ReverbRingBufferItem* bufItem = &reverb->items2[reverb->curFrame][updateIndex];
+
+#if defined(TARGET_PSP)
+    OotPspAudioReverbDownsampleCmd* pspCmd =
+        OotPspAudioSynth_SetupReverbRingCmd(reverb, bufItem, updateIndex, OOT_PSP_AUDIO_REVERB_DESC_ITEMS2);
+
+    if (pspCmd != NULL) {
+        aOotPspAudioReverbSave(cmd++, DMEM_WET_LEFT_CH, pspCmd);
+        return cmd;
+    }
+#endif
 
     cmd = AudioSynth_SaveRingBufferPart(cmd, DMEM_WET_LEFT_CH, bufItem->startPos, bufItem->lengthA, reverb);
     if (bufItem->lengthB != 0) {
