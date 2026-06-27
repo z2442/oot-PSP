@@ -11,11 +11,14 @@
 #include "translation.h"
 #include "play_state.h"
 #include "save.h"
+#if PLATFORM_PSP
+#include "segmented_address.h"
+#endif
 
 #include "assets/textures/parameter_static/parameter_static.h"
 
 #if PLATFORM_PSP
-#define AMMO_DIGIT_TEXTURE(digit) gAmmoDigitTextures[(digit)]
+#define AMMO_DIGIT_TEXTURE(digit) SEGMENTED_TO_VIRTUAL(gAmmoDigitTextures[(digit)])
 #else
 #define AMMO_DIGIT_TEXTURE(digit) ((u8*)gAmmoDigit0Tex + (8 * 8 * (digit)))
 #endif

@@ -10,9 +10,18 @@
 #include "play_state.h"
 #include "player.h"
 #include "save.h"
+#if PLATFORM_PSP
+#include "segmented_address.h"
+#endif
 
 #include "assets/textures/icon_item_static/icon_item_static.h"
 #include "assets/textures/parameter_static/parameter_static.h"
+
+#if PLATFORM_PSP
+static void KaleidoScopeEquipment_SetPspSegmentBase(s32 segment, void* base) {
+    gSegments[segment] = (base != NULL) ? OS_K0_TO_PHYSICAL(base) : 0;
+}
+#endif
 
 static u8 sChildUpgrades[] = {
     UPG_BULLET_BAG, // EQUIP_QUAD_UPG_BULLETBAG_QUIVER
@@ -738,6 +747,14 @@ void KaleidoScope_DrawEquipment(PlayState* play) {
 #endif
     }
 
+#if PLATFORM_PSP
+    KaleidoScopeEquipment_SetPspSegmentBase(0x07, pauseCtx->playerSegment);
+    KaleidoScopeEquipment_SetPspSegmentBase(0x08, pauseCtx->iconItemSegment);
+    KaleidoScopeEquipment_SetPspSegmentBase(0x09, pauseCtx->iconItem24Segment);
+    KaleidoScopeEquipment_SetPspSegmentBase(0x0A, pauseCtx->nameSegment);
+    KaleidoScopeEquipment_SetPspSegmentBase(0x0B, interfaceCtx->mapSegment);
+    KaleidoScopeEquipment_SetPspSegmentBase(0x0C, pauseCtx->iconItemAltSegment);
+#endif
     gSPSegment(POLY_OPA_DISP++, 0x07, pauseCtx->playerSegment);
     gSPSegment(POLY_OPA_DISP++, 0x08, pauseCtx->iconItemSegment);
     gSPSegment(POLY_OPA_DISP++, 0x09, pauseCtx->iconItem24Segment);

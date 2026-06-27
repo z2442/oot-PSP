@@ -278,7 +278,7 @@ class NativeAssetContext:
         if self.version.startswith("pal"):
             return True
 
-        variant_suffixes = ("_pal", "_pal_n64", "_v2", "_v2_mq", "_v3", "_v3_mq", "_ique", "_mq")
+        variant_suffixes = ("_pal", "_pal_n64", "_pal_gc", "_v2", "_v2_mq", "_v3", "_v3_mq", "_ique", "_mq")
         return not stem.endswith(variant_suffixes)
 
     def _add_texture_range(self, segment_name: str, offset: int, size: int) -> None:
@@ -1120,11 +1120,11 @@ def emit_asm(output: Path, entries: list[dict[str, object]], native_assets: Nati
             ]
         )
 
-    linker_symbols = native_assets.linker_symbol_values({"objects", "scenes"})
+    linker_symbols = native_assets.linker_symbol_values({"objects", "scenes", "textures", "misc"})
     if linker_symbols:
         lines.extend(
             [
-                "/* Object and scene asset data is loaded at runtime; expose symbols as segmented addresses. */",
+                "/* Native asset data is loaded at runtime; expose symbols as segmented addresses. */",
                 "",
             ]
         )

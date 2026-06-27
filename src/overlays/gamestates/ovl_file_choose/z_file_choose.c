@@ -17,6 +17,7 @@
 #include "regs.h"
 #include "rumble.h"
 #include "segment_symbols.h"
+#include "segmented_address.h"
 #include "seqcmd.h"
 #include "sequence.h"
 #include "sfx.h"
@@ -2054,6 +2055,13 @@ void FileSelect_Main(GameState* thisx) {
 #endif
 
     gSPSegment(POLY_OPA_DISP++, 0x00, NULL);
+#if PLATFORM_PSP
+    gSegments[1] = OS_K0_TO_PHYSICAL(this->staticSegment);
+    gSegments[2] = OS_K0_TO_PHYSICAL(this->parameterSegment);
+#if OOT_PAL_N64
+    gSegments[6] = OS_K0_TO_PHYSICAL(this->objectMagSegment);
+#endif
+#endif
     gSPSegment(POLY_OPA_DISP++, 0x01, this->staticSegment);
     gSPSegment(POLY_OPA_DISP++, 0x02, this->parameterSegment);
 #if OOT_PAL_N64

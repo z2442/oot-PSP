@@ -19,6 +19,7 @@
 #include "printf.h"
 #include "regs.h"
 #include "segment_symbols.h"
+#include "segmented_address.h"
 #include "sequence.h"
 #include "sys_matrix.h"
 #include "sys_debug_controller.h"
@@ -33,7 +34,19 @@
 #include "oot_psp_compat.h"
 #endif
 
+#if PLATFORM_PSP
+#define nintendo_rogo_static_Tex_000000_WIDTH 192
+#define nintendo_rogo_static_Tex_000000_HEIGHT 32
+extern u64 nintendo_rogo_static_Tex_000000[];
+#define nintendo_rogo_static_Tex_001800_WIDTH 32
+#define nintendo_rogo_static_Tex_001800_HEIGHT 32
+extern u64 nintendo_rogo_static_Tex_001800[];
+extern Gfx gNintendo64LogoDL[];
+#define CONSOLE_LOGO_DL ((Gfx*)SEGMENTED_TO_VIRTUAL(gNintendo64LogoDL))
+#else
 #include "assets/textures/nintendo_rogo_static/nintendo_rogo_static.h"
+#define CONSOLE_LOGO_DL gNintendo64LogoDL
+#endif
 
 #if DEBUG_FEATURES
 void ConsoleLogo_PrintBuildInfo(Gfx** gfxP) {
@@ -112,7 +125,7 @@ static ConsoleLogoPspTexture ConsoleLogo_GetPspTexture(void* texture) {
     ConsoleLogoPspTexture source;
     u32 loadedFlags;
 
-    source.data = texture;
+    source.data = SEGMENTED_TO_VIRTUAL(texture);
     source.byteSwap = false;
 
     if (OotPsp_GetLoadedExternalAssetRangeFlags(source.data, 1, &loadedFlags)) {
@@ -149,8 +162,10 @@ static u8 ConsoleLogo_ReadI8Texel(ConsoleLogoPspTexture texture, s16 width, s16 
 }
 
 static void ConsoleLogo_BuildPspWordmarkTexture(ConsoleLogoState* this, u8* dst) {
-    ConsoleLogoPspTexture wordmarkTex = ConsoleLogo_GetPspTexture(nintendo_rogo_static_Tex_000000);
-    ConsoleLogoPspTexture effectTex = ConsoleLogo_GetPspTexture(nintendo_rogo_static_Tex_001800);
+    ConsoleLogoPspTexture wordmarkTex =
+        ConsoleLogo_GetPspTexture(SEGMENTED_TO_VIRTUAL(nintendo_rogo_static_Tex_000000));
+    ConsoleLogoPspTexture effectTex =
+        ConsoleLogo_GetPspTexture(SEGMENTED_TO_VIRTUAL(nintendo_rogo_static_Tex_001800));
     s16 scrollS = (this->uls >> G_TEXTURE_IMAGE_FRAC) & 0x1F;
     s16 scrollT = (this->ult >> G_TEXTURE_IMAGE_FRAC) & 0x1F;
     s16 x;
@@ -237,16 +252,16 @@ void ConsoleLogo_Draw(ConsoleLogoState* this) {
     Matrix_RotateZYX(0, sTitleRotY, 0, MTXMODE_APPLY);
 
     MATRIX_FINALIZE_AND_LOAD(POLY_OPA_DISP++, this->state.gfxCtx, "../z_title.c", 424);
-    gSPDisplayList(POLY_OPA_DISP++, gNintendo64LogoDL);
+    gSPDisplayList(POLY_OPA_DISP++, CONSOLE_LOGO_DL);
 #if PLATFORM_PSP
     /*
      * The PSP backend imports this boot logo's I8 texture with alpha, so a
      * single pass reads too translucent. Layer it locally instead of changing
      * global I8 alpha handling, which is shared by HUD and effect materials.
      */
-    gSPDisplayList(POLY_OPA_DISP++, gNintendo64LogoDL);
-    gSPDisplayList(POLY_OPA_DISP++, gNintendo64LogoDL);
-    gSPDisplayList(POLY_OPA_DISP++, gNintendo64LogoDL);
+    gSPDisplayList(POLY_OPA_DISP++, CONSOLE_LOGO_DL);
+    gSPDisplayList(POLY_OPA_DISP++, CONSOLE_LOGO_DL);
+    gSPDisplayList(POLY_OPA_DISP++, CONSOLE_LOGO_DL);
 #endif
     Gfx_SetupDL_39Opa(this->state.gfxCtx);
 #if PLATFORM_PSP
@@ -287,6 +302,9 @@ void ConsoleLogo_Main(GameState* thisx) {
     OPEN_DISPS(this->state.gfxCtx, "../z_title.c", 494);
 
     gSPSegment(POLY_OPA_DISP++, 0, NULL);
+#if PLATFORM_PSP
+    gSegments[1] = OS_K0_TO_PHYSICAL(this->staticSegment);
+#endif
     gSPSegment(POLY_OPA_DISP++, 1, this->staticSegment);
     Gfx_SetupFrame(this->state.gfxCtx, 0, 0, 0);
     ConsoleLogo_Calc(this);
@@ -337,9 +355,7 @@ void ConsoleLogo_Destroy(GameState* thisx) {
 
 void ConsoleLogo_Init(GameState* thisx) {
     ConsoleLogoState* this = (ConsoleLogoState*)thisx;
-#if !PLATFORM_PSP
     u32 size = (uintptr_t)_nintendo_rogo_staticSegmentRomEnd - (uintptr_t)_nintendo_rogo_staticSegmentRomStart;
-#endif
 
 #if PLATFORM_N64
     if ((D_80121210 != 0) && (D_80121211 != 0) && (D_80121212 == 0)) {
@@ -352,14 +368,10 @@ void ConsoleLogo_Init(GameState* thisx) {
     }
 #endif
 
-#if PLATFORM_PSP
-    this->staticSegment = (void*)nintendo_rogo_static_Tex_000000;
-#else
     this->staticSegment = GAME_STATE_ALLOC(&this->state, size, "../z_title.c", 611);
     PRINTF("z_title.c\n");
     ASSERT(this->staticSegment != NULL, "this->staticSegment != NULL", "../z_title.c", 614);
     DMA_REQUEST_SYNC(this->staticSegment, (uintptr_t)_nintendo_rogo_staticSegmentRomStart, size, "../z_title.c", 615);
-#endif
     R_UPDATE_RATE = 1;
     Matrix_Init(&this->state);
     View_Init(&this->view, this->state.gfxCtx);

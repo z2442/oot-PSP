@@ -154,6 +154,8 @@ s16 sMessageHasSetSfx = false;
 
 u16 sOcarinaSongBitFlags = 0; // ocarina bit flags
 
+#if !PLATFORM_PSP
+
 #if OOT_NTSC
 
 MessageTableEntry sJpnMessageEntryTable[] = {
@@ -258,6 +260,8 @@ const char** sFraMessageEntryTablePtr = sFraMessageEntryTable;
 #endif
 
 MessageTableEntry* sStaffMessageEntryTablePtr = sStaffMessageEntryTable;
+
+#endif
 
 s16 sTextboxBackgroundForePrimColors[][3] = {
     { 255, 255, 255 }, { 50, 20, 0 },     { 255, 60, 0 },    { 255, 255, 255 },
@@ -3227,7 +3231,7 @@ void Message_DrawMain(PlayState* play, Gfx** p) {
             case MSGMODE_OCARINA_PLAYING:
                 msgCtx->ocarinaStaff = AudioOcarina_GetPlayingStaff();
                 if (msgCtx->ocarinaStaff->pos) {
-#if DEBUG_FEATURES
+#if DEBUG_FEATURES && !PLATFORM_PSP
                     PRINTF("locate=%d  onpu_pt=%d\n", msgCtx->ocarinaStaff->pos, sOcarinaButtonIndexBufPos);
 #endif
 #if OOT_VERSION >= PAL_1_0
@@ -4512,6 +4516,7 @@ void Message_Update(PlayState* play) {
 }
 
 void Message_SetTables(void) {
+#if !PLATFORM_PSP
 #if OOT_NTSC
     sJpnMessageEntryTablePtr = sJpnMessageEntryTable;
     sNesMessageEntryTablePtr = sNesMessageEntryTable;
@@ -4532,5 +4537,6 @@ void Message_SetTables(void) {
         B_80121220->unk_58(&sNesMessageEntryTablePtr, &sGerMessageEntryTablePtr, &sFraMessageEntryTablePtr,
                            &sStaffMessageEntryTablePtr);
     }
+#endif
 #endif
 }

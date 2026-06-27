@@ -6,8 +6,17 @@
 #include "z_kaleido_scope.h"
 #include "z_lib.h"
 #include "play_state.h"
+#if PLATFORM_PSP
+#include "segmented_address.h"
+#endif
 
 #include "assets/textures/parameter_static/parameter_static.h"
+
+#if PLATFORM_PSP
+#define PAUSE_MAP_MARK_TEXTURE(ptr) SEGMENTED_TO_VIRTUAL(ptr)
+#else
+#define PAUSE_MAP_MARK_TEXTURE(ptr) (ptr)
+#endif
 
 typedef struct PauseMapMarkInfo {
     /* 0x00 */ void* texture;
@@ -129,7 +138,8 @@ void PauseMapMark_DrawForDungeon(PlayState* play) {
                 markInfo = &sMapMarkInfoTable[mapMarkData->markType];
 
                 gDPPipeSync(POLY_OPA_DISP++);
-                gDPLoadTextureBlock_Runtime(POLY_OPA_DISP++, markInfo->texture, markInfo->imageFormat,
+                gDPLoadTextureBlock_Runtime(POLY_OPA_DISP++, PAUSE_MAP_MARK_TEXTURE(markInfo->texture),
+                                            markInfo->imageFormat,
                                             markInfo->imageSize, markInfo->textureWidth, markInfo->textureHeight, 0,
                                             G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMASK,
                                             G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);

@@ -94,6 +94,7 @@ typedef struct OotPspPinnedAssetWindowCache {
 } OotPspPinnedAssetWindowCache;
 
 static char sOotPspAssetRoot[256];
+extern u8 _ftext[];
 static uintptr_t sOotPspPrxRelocationBias = OOT_PSP_DEFAULT_PRX_RELOCATION_BIAS;
 static s32 sOotPspPrxRelocationBiasInitialized = false;
 static s32 sOotPspOriginalRangesSorted = -1;
@@ -1494,7 +1495,10 @@ static uintptr_t OotPsp_GetPrxRelocationBias(void) {
     if (!sOotPspPrxRelocationBiasInitialized) {
         sOotPspPrxRelocationBiasInitialized = true;
 
-        if (gOotPspExternalAssetCount != 0) {
+        uintptr_t textBias = (uintptr_t)_ftext;
+        if ((textBias >= OOT_PSP_RELOCATION_BIAS_MIN) && (textBias < OOT_PSP_RELOCATION_BIAS_MAX)) {
+            sOotPspPrxRelocationBias = textBias;
+        } else if (gOotPspExternalAssetCount != 0) {
             uintptr_t relocatedStart = (uintptr_t)_AudiobankSegmentRomStart;
             uintptr_t expectedStart = gOotPspExternalAssets[0].vromStart;
 

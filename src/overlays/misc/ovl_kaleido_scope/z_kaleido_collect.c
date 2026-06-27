@@ -11,6 +11,7 @@
 #include "save.h"
 #if PLATFORM_PSP
 #include "interface.h"
+#include "segmented_address.h"
 #endif
 
 #include "assets/textures/parameter_static/parameter_static.h"
@@ -19,10 +20,12 @@
 #define SONG_MAX_LENGTH 8
 
 #if PLATFORM_PSP
+#define KALEIDO_COLLECT_TEXTURE(ptr) SEGMENTED_TO_VIRTUAL(ptr)
 #define gDPLoadCounterDigitTexture(pkt, digit, cms, cmt)                                                        \
     gDPLoadTextureBlock(pkt, Interface_GetCounterDigitTexture(digit), G_IM_FMT_IA, G_IM_SIZ_16b, 8, 16, 0, cms, \
                         cmt, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD)
 #else
+#define KALEIDO_COLLECT_TEXTURE(ptr) (ptr)
 #define gDPLoadCounterDigitTexture(pkt, digit, cms, cmt)                                                   \
     gDPLoadTextureBlock(pkt, ((u8*)gCounterDigit0Tex + (8 * 16 * (digit))), G_IM_FMT_I, G_IM_SIZ_8b, 8, 16, \
                         0, cms, cmt, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD)
@@ -510,7 +513,8 @@ void KaleidoScope_DrawQuestStatus(PlayState* play, GraphicsContext* gfxCtx) {
     gDPSetPrimColor(POLY_OPA_DISP++, 0, 0, 255, 255, 255, pauseCtx->alpha);
     gDPSetEnvColor(POLY_OPA_DISP++, 0, 0, 0, 255);
 
-    gDPLoadTextureBlock(POLY_OPA_DISP++, gSongNoteTex, G_IM_FMT_IA, G_IM_SIZ_8b, gSongNoteTex_WIDTH,
+    gDPLoadTextureBlock(POLY_OPA_DISP++, KALEIDO_COLLECT_TEXTURE(gSongNoteTex), G_IM_FMT_IA, G_IM_SIZ_8b,
+                        gSongNoteTex_WIDTH,
                         gSongNoteTex_HEIGHT, 0, G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMASK,
                         G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
 
@@ -692,7 +696,8 @@ void KaleidoScope_DrawQuestStatus(PlayState* play, GraphicsContext* gfxCtx) {
                     gDPSetEnvColor(POLY_OPA_DISP++, 10, 10, 10, 0);
                     gSPVertex(POLY_OPA_DISP++, &pauseCtx->questVtx[bufI], 4, 0);
 
-                    gDPLoadTextureBlock(POLY_OPA_DISP++, sOcarinaBtnTextures[sPlayedSongBtns[j]], G_IM_FMT_IA,
+                    gDPLoadTextureBlock(POLY_OPA_DISP++,
+                                        KALEIDO_COLLECT_TEXTURE(sOcarinaBtnTextures[sPlayedSongBtns[j]]), G_IM_FMT_IA,
                                         G_IM_SIZ_8b, 16, 16, 0, G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMIRROR | G_TX_WRAP,
                                         G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
 
@@ -737,7 +742,9 @@ void KaleidoScope_DrawQuestStatus(PlayState* play, GraphicsContext* gfxCtx) {
                 gSPVertex(POLY_OPA_DISP++, &pauseCtx->questVtx[bufI], 4, 0);
 
                 gDPLoadTextureBlock(POLY_OPA_DISP++,
-                                    sOcarinaBtnTextures[gOcarinaSongButtons[stepGreen].buttonsIndex[i]], G_IM_FMT_IA,
+                                    KALEIDO_COLLECT_TEXTURE(
+                                        sOcarinaBtnTextures[gOcarinaSongButtons[stepGreen].buttonsIndex[i]]),
+                                    G_IM_FMT_IA,
                                     G_IM_SIZ_8b, 16, 16, 0, G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMIRROR | G_TX_WRAP,
                                     G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
 
@@ -794,7 +801,8 @@ void KaleidoScope_DrawQuestStatus(PlayState* play, GraphicsContext* gfxCtx) {
 
                     gSPVertex(POLY_OPA_DISP++, &pauseCtx->questVtx[bufI], 4, 0);
 
-                    gDPLoadTextureBlock(POLY_OPA_DISP++, sOcarinaBtnTextures[sPlayedSongBtns[i]], G_IM_FMT_IA,
+                    gDPLoadTextureBlock(POLY_OPA_DISP++,
+                                        KALEIDO_COLLECT_TEXTURE(sOcarinaBtnTextures[sPlayedSongBtns[i]]), G_IM_FMT_IA,
                                         G_IM_SIZ_8b, 16, 16, 0, G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMIRROR | G_TX_WRAP,
                                         G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
 

@@ -324,6 +324,10 @@ static s32 OotPsp_IsSegmentedAddress(uintptr_t addr, u32 segment) {
     return OotPsp_AddressLooksSegmented(addr, segment) && (gSegments[segment] != 0);
 }
 
+static void* OotPsp_TranslateSegmentedAddress(uintptr_t addr, u32 segment) {
+    return (void*)(gSegments[segment] + SEGMENT_OFFSET(addr) + K0BASE);
+}
+
 static s32 OotPsp_TryNormalizePrxRelocatedSegmentedAddress(uintptr_t addr, uintptr_t* normalizedAddr,
                                                            u32* normalizedSegment) {
     uintptr_t candidate;
@@ -367,15 +371,20 @@ void* SegmentedToVirtualCompat(uintptr_t addr) {
 
     segment = SEGMENT_NUMBER(addr);
     if (OotPsp_IsSegmentedAddress(addr, segment)) {
-        return (void*)(gSegments[segment] + SEGMENT_OFFSET(addr) + K0BASE);
+        return OotPsp_TranslateSegmentedAddress(addr, segment);
+    }
+
+    if (OotPsp_TryNormalizePrxRelocatedSegmentedAddress(addr, &normalizedAddr, &normalizedSegment)) {
+        void* normalizedPtr = OotPsp_TranslateSegmentedAddress(normalizedAddr, normalizedSegment);
+
+        if (!OotPsp_IsRuntimeByteRange((void*)addr, 1) ||
+            OotPsp_IsLoadedNativeExternalAssetRange(normalizedPtr, 1)) {
+            return normalizedPtr;
+        }
     }
 
     if (OotPsp_IsRuntimeByteRange((void*)addr, 1)) {
         return (void*)addr;
-    }
-
-    if (OotPsp_TryNormalizePrxRelocatedSegmentedAddress(addr, &normalizedAddr, &normalizedSegment)) {
-        return (void*)(gSegments[normalizedSegment] + SEGMENT_OFFSET(normalizedAddr) + K0BASE);
     }
 
     /*

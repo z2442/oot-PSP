@@ -1962,6 +1962,11 @@ s32 Player_OverrideLimbDrawPause(PlayState* play, s32 limbIndex, Gfx** dList, Ve
 
     dLists = sPlayerDListGroups[type] + ((void)0, gSaveContext.save.linkAge);
     *dList = *(dLists + dListOffset);
+#if PLATFORM_PSP
+    if (*dList != NULL) {
+        *dList = SEGMENTED_TO_VIRTUAL(*dList);
+    }
+#endif
 
     return false;
 }

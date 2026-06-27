@@ -1062,7 +1062,9 @@ $(BUILD_DIR)/assets/audio/samplebanks/%.xml: $(EXTRACTED_DIR)/assets/audio/sampl
 $(BUILD_DIR)/assets/audio/samplebanks/%.s: $(BUILD_DIR)/assets/audio/samplebanks/%.xml | $(AIFC_FILES)
 	$(SBC) $(SBCFLAGS) --makedepend $(@:.s=.d) $< $@
 
+ifneq ($(PSP_PORT_NO_ASSET_REGEN),1)
 -include $(SAMPLEBANK_DEP_FILES)
+endif
 
 $(BUILD_DIR)/assets/audio/samplebanks/%.o: $(BUILD_DIR)/assets/audio/samplebanks/%.s
 	$(AS) $(ASFLAGS) $< -o $@
@@ -1085,7 +1087,9 @@ $(BUILD_DIR)/assets/audio/soundfonts/%.c $(BUILD_DIR)/assets/audio/soundfonts/%.
 # substitution $(@:.c=.h) will fail ~50% of the time with -j. Instead, don't assume anything about the suffix of $@.
 	$(SFC) $(SFCFLAGS) --makedepend $(basename $@).c.d $< $(basename $@).c $(basename $@).h $(basename $@).name
 
+ifneq ($(PSP_PORT_NO_ASSET_REGEN),1)
 -include $(SOUNDFONT_DEP_FILES)
+endif
 
 $(BUILD_DIR)/assets/audio/soundfonts/%.o: $(BUILD_DIR)/assets/audio/soundfonts/%.c $(BUILD_DIR)/assets/audio/soundfonts/%.name
 	$(CPP) $(MIPS_BUILTIN_DEFS) $(CPPFLAGS) -x assembler-with-cpp $(INC) -I include/audio -MD -MP -MF $(@:.o=.d) -MT $@ $< -o /dev/null
@@ -1120,7 +1124,9 @@ ifeq ($(AUDIO_BUILD_DEBUG),1)
 	@(cmp $(@:.o=.aseq) $(patsubst $(BUILD_DIR)/assets/audio/sequences/%,$(EXTRACTED_DIR)/baserom_audiotest/audioseq_files/%,$(@:.o=.aseq)) && echo "$(<F) OK" || (mkdir -p NONMATCHINGS/sequences && cp $(@:.o=.aseq) NONMATCHINGS/sequences/$(@F:.o=.aseq)))
 endif
 
+ifneq ($(PSP_PORT_NO_ASSET_REGEN),1)
 -include $(SEQUENCE_DEP_FILES)
+endif
 
 # put together the tables
 
@@ -1158,11 +1164,19 @@ $(BUILD_DIR)/assets/audio/sequence_font_table.o: $(BUILD_DIR)/assets/audio/seque
 
 # make headers with file sizes and amounts
 
+ifneq ($(PSP_PORT_NO_ASSET_REGEN),1)
 $(BUILD_DIR)/assets/audio/soundfont_sizes.h: $(SOUNDFONT_O_FILES)
 	$(AFILE_SIZES) $@ NUM_SOUNDFONTS SOUNDFONT_SIZES .rodata $^
 
 $(BUILD_DIR)/assets/audio/sequence_sizes.h: $(SEQUENCE_O_FILES)
 	$(AFILE_SIZES) $@ NUM_SEQUENCES SEQUENCE_SIZES .data $^
+else
+$(BUILD_DIR)/assets/audio/soundfont_sizes.h $(BUILD_DIR)/assets/audio/sequence_sizes.h:
+	@test -f $@ || { \
+		echo "Missing $@; run 'make psp-port' with the ROM available to generate PSP audio metadata."; \
+		exit 1; \
+	}
+endif
 
 # Extra audiobank padding that doesn't belong to any soundfont file
 $(BUILD_DIR)/assets/audio/audiobank_padding.o:
@@ -1409,10 +1423,7 @@ PSP_PORT_ASSET_SOURCES := \
 	$(PSP_PORT_EXTRACTED_MISC_SOURCES)
 
 PSP_PORT_LINKED_ASSET_SOURCES := \
-	$(PSP_PORT_ROOT_TEXTURE_SOURCES) \
-	$(PSP_PORT_TEXT_ASSET_SOURCES) \
-	$(PSP_PORT_EXTRACTED_TEXTURE_SOURCES) \
-	$(PSP_PORT_EXTRACTED_MISC_SOURCES)
+	$(EMPTY)
 
 PSP_PORT_PROBE_SOURCE := src/port/psp/oot_psp_probe.c
 
@@ -1441,12 +1452,17 @@ PSP_PORT_ELF := $(PSP_PORT_BUILD_DIR)/oot-psp-port.elf
 PSP_PORT_STRIPPED_ELF := $(PSP_PORT_BUILD_DIR)/oot-psp-port.stripped.elf
 PSP_PORT_PRX := $(PSP_PORT_BUILD_DIR)/oot-psp-port.prx
 PSP_PORT_PBP := $(PSP_PORT_BUILD_DIR)/EBOOT.PBP
+PSP_PORT_BUILD_MODE := $(if $(filter 1,$(PSP_PORT_NO_ASSET_REGEN)),no-asset-regen,full-assets)
+PSP_PORT_BUILD_MODE_STAMP := $(PSP_PORT_BUILD_DIR)/.build-mode
 PSP_PORT_DEP_FILES := $(PSP_PORT_RUNTIME_OBJECTS:.o=.d) $(PSP_PORT_RUNTIME_ASM_OBJECTS:.o=.d) \
-	$(PSP_PORT_ASSET_OBJECTS:.o=.d) $(PSP_PORT_NATIVE_SEGMENT_OBJECTS:.o=.d) \
+	$(PSP_PORT_ASSET_OBJECTS:.o=.d) \
 	$(PSP_PORT_ROMINFO_OBJECT:.o=.d) $(PSP_PORT_ASSET_TABLE_OBJECT:.o=.d) \
 	$(PSP_PORT_AUDIO_TABLE_OBJECT:.o=.d) \
 	$(PSP_PORT_ASSET_SEGMENT_OBJECT:.o=.d) $(PSP_PORT_ASSET_SEGMENT_TABLE_OBJECT:.o=.d) \
 	$(PSP_PORT_PROBE_OBJECT:.o=.d)
+ifneq ($(PSP_PORT_NO_ASSET_REGEN),1)
+PSP_PORT_DEP_FILES += $(PSP_PORT_NATIVE_SEGMENT_OBJECTS:.o=.d)
+endif
 
 $(PSP_PORT_BUILD_DIR)/assets/text/jpn_message_data_static.o: $(BUILD_DIR)/assets/text/message_data.enc.jpn.h
 $(PSP_PORT_BUILD_DIR)/assets/text/nes_message_data_static.o: $(BUILD_DIR)/assets/text/message_data.enc.nes.h
@@ -1588,6 +1604,9 @@ endif
 psp-port: $(PSP_PORT_PBP) $(PSP_PORT_ASSET_SEGMENT_DATA_STAMP)
 	@echo "PSP port is up to date: $(PSP_PORT_PBP)"
 
+psp-port-eboot:
+	$(MAKE) PSP_PORT_NO_ASSET_REGEN=1 $(PSP_PORT_PBP)
+
 $(PSP_PORT_BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(PSP_PORT_CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $(PSP_PORT_CFLAGS) -o $@ $<
@@ -1612,33 +1631,48 @@ $(PSP_PORT_SETUP_STAMP): $(BASEROM_DIR)/baserom.z64
 $(PSP_PORT_BASEROM): $(PSP_PORT_SETUP_STAMP)
 	@:
 
+ifneq ($(PSP_PORT_NO_ASSET_REGEN),1)
 $(PSP_PORT_ROMINFO_SOURCE): $(PSP_PORT_BASEROM) tools/psp_port_rom_info.py
 	$(PYTHON) tools/psp_port_rom_info.py $< $@
+else
+$(PSP_PORT_ROMINFO_SOURCE) $(PSP_PORT_ASSET_TABLE_SOURCE) $(PSP_PORT_AUDIO_TABLE_SOURCE) \
+$(PSP_PORT_ASSET_SEGMENT_SOURCE) $(PSP_PORT_ASSET_SEGMENT_TABLE_SOURCE):
+	@test -f $@ || { \
+		echo "Missing $@; run 'make psp-port' with the ROM available to generate PSP asset metadata."; \
+		exit 1; \
+	}
+endif
 
 $(PSP_PORT_ROMINFO_OBJECT): $(PSP_PORT_ROMINFO_SOURCE)
 	@mkdir -p $(dir $@)
 	$(PSP_PORT_CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $(PSP_PORT_CFLAGS) -o $@ $<
 
+ifneq ($(PSP_PORT_NO_ASSET_REGEN),1)
 $(PSP_PORT_ASSET_TABLE_SOURCE): $(PSP_PORT_SETUP_STAMP) tools/psp_port_asset_tables.py include/tables/object_table.h include/tables/scene_table.h include/segment_symbols.h
 	$(PYTHON) tools/psp_port_asset_tables.py $(VERSION) $@
+endif
 
 $(PSP_PORT_ASSET_TABLE_OBJECT): $(PSP_PORT_ASSET_TABLE_SOURCE)
 	@mkdir -p $(dir $@)
 	$(PSP_PORT_CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $(PSP_PORT_CFLAGS) -o $@ $<
 
+ifneq ($(PSP_PORT_NO_ASSET_REGEN),1)
 $(PSP_PORT_AUDIO_TABLE_SOURCE): $(PSP_PORT_SETUP_STAMP) tools/psp_port_audio_tables.py baseroms/$(VERSION)/config.yml $(EXTRACTED_DIR)/baserom/code
 	$(PYTHON) tools/psp_port_audio_tables.py $(VERSION) $@
+endif
 
 $(PSP_PORT_AUDIO_TABLE_OBJECT): $(PSP_PORT_AUDIO_TABLE_SOURCE)
 	@mkdir -p $(dir $@)
 	$(PSP_PORT_CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $(PSP_PORT_CFLAGS) -o $@ $<
 
+ifneq ($(PSP_PORT_NO_ASSET_REGEN),1)
 $(PSP_PORT_ASSET_SEGMENT_STAMP): $(PSP_PORT_SETUP_STAMP) tools/psp_port_asset_segments.py include/segment_symbols.h $(PSP_PORT_NATIVE_SEGMENT_OBJECTS)
 	$(PYTHON) tools/psp_port_asset_segments.py $(VERSION) $(PSP_PORT_ASSET_SEGMENT_SOURCE) $(PSP_PORT_ASSET_SEGMENT_TABLE_SOURCE) $(PSP_PORT_ASSET_SEGMENT_DATA_DIR) --build-root $(PSP_PORT_BUILD_DIR)
 	@touch $@
 
 $(PSP_PORT_ASSET_SEGMENT_SOURCE) $(PSP_PORT_ASSET_SEGMENT_TABLE_SOURCE): $(PSP_PORT_ASSET_SEGMENT_STAMP)
 	@:
+endif
 
 $(PSP_PORT_ASSET_SEGMENT_DATA_STAMP): $(PSP_PORT_ASSET_SEGMENT_STAMP)
 	@touch $@
@@ -1682,18 +1716,29 @@ $(PSP_PORT_NATIVE_GENERATED_ASSET_STAMP): $(PSP_PORT_SETUP_STAMP)
 		-e 's#\.jpg$$#.jpg.inc.c#' | xargs -r $(MAKE)
 	@touch $@
 
+ifneq ($(PSP_PORT_NO_ASSET_REGEN),1)
 $(PSP_PORT_RUNTIME_OBJECTS): $(PSP_PORT_SETUP_STAMP) $(PSP_PORT_RUNTIME_GENERATED_ASSET_STAMP)
+endif
 
 $(PSP_PORT_BUILD_DIR)/src/audio/game/session_init.o: $(BUILD_DIR)/assets/audio/sequence_sizes.h
 $(PSP_PORT_BUILD_DIR)/src/audio/internal/seqplayer.o: PSP_PORT_CFLAGS += -DMML_VERSION=MML_VERSION_OOT
 $(PSP_PORT_BUILD_DIR)/src/port/psp/oot_psp_audio_backend.o: PSP_PORT_CFLAGS := $(PSP_PORT_AUDIO_ME_CFLAGS)
 $(PSP_PORT_BUILD_DIR)/src/port/psp/oot_psp_mixer.o: PSP_PORT_CFLAGS := $(PSP_PORT_AUDIO_ME_CFLAGS)
 
+ifneq ($(PSP_PORT_NO_ASSET_REGEN),1)
 $(PSP_PORT_NATIVE_SEGMENT_OBJECTS): $(PSP_PORT_SETUP_STAMP) $(PSP_PORT_EXTRACTED_ASSET_FILES) $(PSP_PORT_NATIVE_GENERATED_ASSET_STAMP)
+endif
 
-$(PSP_PORT_LIBRARY): $(PSP_PORT_RUNTIME_OBJECTS) $(PSP_PORT_RUNTIME_ASM_OBJECTS) $(PSP_PORT_ASSET_OBJECTS) $(PSP_PORT_ROMINFO_OBJECT) $(PSP_PORT_ASSET_TABLE_OBJECT) $(PSP_PORT_AUDIO_TABLE_OBJECT) $(PSP_PORT_ASSET_SEGMENT_OBJECT) $(PSP_PORT_ASSET_SEGMENT_TABLE_OBJECT)
+$(PSP_PORT_BUILD_MODE_STAMP): FORCE
 	@mkdir -p $(dir $@)
-	$(file >$@.rsp,$^)
+	@mode='$(PSP_PORT_BUILD_MODE)'; \
+	if test ! -f $@ || test "$$(cat $@)" != "$$mode"; then \
+		printf '%s\n' "$$mode" > $@; \
+	fi
+
+$(PSP_PORT_LIBRARY): $(PSP_PORT_BUILD_MODE_STAMP) $(PSP_PORT_RUNTIME_OBJECTS) $(PSP_PORT_RUNTIME_ASM_OBJECTS) $(PSP_PORT_ASSET_OBJECTS) $(PSP_PORT_ROMINFO_OBJECT) $(PSP_PORT_ASSET_TABLE_OBJECT) $(PSP_PORT_AUDIO_TABLE_OBJECT) $(PSP_PORT_ASSET_SEGMENT_OBJECT) $(PSP_PORT_ASSET_SEGMENT_TABLE_OBJECT)
+	@mkdir -p $(dir $@)
+	$(file >$@.rsp,$(filter-out $(PSP_PORT_BUILD_MODE_STAMP),$^))
 	$(RM) $@
 	$(PSP_PORT_AR) rcs $@ @$@.rsp
 
@@ -1722,16 +1767,22 @@ else
 PSP_PORT_EBOOT_PAYLOAD := $(PSP_PORT_PRX)
 endif
 
-$(PSP_PORT_PBP): $(PSP_PORT_EBOOT_PAYLOAD)
+PSP_PORT_ICON0 := assets/psp/ICON0.PNG
+
+$(PSP_PORT_PBP): $(PSP_PORT_EBOOT_PAYLOAD) $(PSP_PORT_ICON0)
 	mksfoex -d MEMSIZE=1 "OOT PSP Port" $(PSP_PORT_BUILD_DIR)/PARAM.SFO
-	pack-pbp $@ $(PSP_PORT_BUILD_DIR)/PARAM.SFO NULL NULL NULL NULL NULL $< NULL
+	pack-pbp $@ $(PSP_PORT_BUILD_DIR)/PARAM.SFO $(PSP_PORT_ICON0) NULL NULL NULL NULL $< NULL
 
 psp-port-clean:
 	$(RM) -r $(PSP_PORT_BUILD_DIR)
 
-.PHONY: psp-port psp-port-clean
+.PHONY: FORCE psp-port psp-port-eboot psp-port-clean
 
+FORCE:
+
+ifneq ($(PSP_PORT_NO_ASSET_REGEN),1)
 -include $(DEP_FILES) $(PSP_PORT_DEP_FILES)
+endif
 
 # Print target for debugging
 print-% : ; $(info $* is a $(flavor $*) variable set to [$($*)]) @true

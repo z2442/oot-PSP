@@ -3705,14 +3705,55 @@ static inline bool gfx_addr_looks_segmented(uintptr_t addr) {
     return offset < PSP_SEGMENTED_COLLISION_OFFSET_MAX;
 }
 
+static inline bool gfx_segmented_addr_maps_loaded_external_byte(uintptr_t addr) {
+    uint8_t segment = addr >> 24;
+    uintptr_t offset = addr & 0x00FFFFFFU;
+    uintptr_t translatedValue;
+    uintptr_t normalized;
+
+    if ((segment == 0) || (segment >= NUM_SEGMENTS)) {
+        return false;
+    }
+
+    if (rsp.segments[segment] != NULL) {
+        uintptr_t baseValue = (uintptr_t)rsp.segments[segment];
+
+        if (offset <= (UINTPTR_MAX - baseValue)) {
+            translatedValue = baseValue + offset;
+            if (gfx_normalize_native_addr(translatedValue, &normalized)) {
+                translatedValue = normalized;
+            }
+            if (OotPsp_IsLoadedNativeExternalAssetRange((const void*)translatedValue, 1)) {
+                return true;
+            }
+        }
+    }
+
+#if defined(TARGET_PSP)
+    if (gSegments[segment] != 0) {
+        uintptr_t baseValue = gSegments[segment] + K0BASE;
+
+        if (offset <= (UINTPTR_MAX - baseValue)) {
+            translatedValue = baseValue + offset;
+            if (gfx_normalize_native_addr(translatedValue, &normalized)) {
+                translatedValue = normalized;
+            }
+            if (OotPsp_IsLoadedNativeExternalAssetRange((const void*)translatedValue, 1)) {
+                return true;
+            }
+        }
+    }
+#endif
+
+    return false;
+}
+
 static inline __attribute__((always_inline)) bool gfx_try_normalize_prx_relocated_segmented_addr(
     uintptr_t addr, uintptr_t* normalizedAddr) {
     uintptr_t candidate;
     uint8_t segment;
-
-    if (gfx_addr_is_native(addr) && !gfx_is_static_prx_range(addr, 1) && OotPsp_IsRuntimeByteRange((void*)addr, 1)) {
-        return false;
-    }
+    bool rawIsRuntime = gfx_addr_is_native(addr) && !gfx_is_static_prx_range(addr, 1) &&
+                        OotPsp_IsRuntimeByteRange((void*)addr, 1);
 
     if (gfx_addr_looks_segmented(addr)) {
         segment = addr >> 24;
@@ -3737,7 +3778,19 @@ static inline __attribute__((always_inline)) bool gfx_try_normalize_prx_relocate
     }
 
     segment = candidate >> 24;
-    if ((segment < 2) || (rsp.segments[segment] == NULL)) {
+    if ((segment == 0) || (segment >= NUM_SEGMENTS)) {
+        return false;
+    }
+
+    if (rsp.segments[segment] == NULL
+#if defined(TARGET_PSP)
+        && (gSegments[segment] == 0)
+#endif
+    ) {
+        return false;
+    }
+
+    if (rawIsRuntime && !gfx_segmented_addr_maps_loaded_external_byte(candidate)) {
         return false;
     }
 

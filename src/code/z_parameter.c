@@ -1260,7 +1260,7 @@ static InterfacePspTexture Interface_GetPspTexture(void* texture) {
     InterfacePspTexture source;
     u32 loadedFlags;
 
-    source.data = texture;
+    source.data = SEGMENTED_TO_VIRTUAL(texture);
     source.byteSwap = false;
 
     if (OotPsp_GetLoadedExternalAssetRangeFlags(source.data, 1, &loadedFlags)) {
@@ -1319,6 +1319,10 @@ static Gfx* Gfx_TextureCounterDigit(Gfx* displayListHead, s16 digit, s16 rectLef
                         (rectTop + rectHeight) << 2, G_TX_RENDERTILE, 0, 0, dsdx, dtdy);
 
     return displayListHead;
+}
+
+static void Interface_SetPspSegmentBase(s32 segment, void* base) {
+    gSegments[segment] = (base != NULL) ? OS_K0_TO_PHYSICAL(base) : 0;
 }
 #else
 static Gfx* Gfx_TextureCounterDigit(Gfx* displayListHead, s16 digit, s16 rectLeft, s16 rectTop, s16 rectWidth,
@@ -3386,6 +3390,12 @@ void Interface_Draw(PlayState* play) {
 
     OPEN_DISPS(play->state.gfxCtx, "../z_parameter.c", 3405);
 
+#if PLATFORM_PSP
+    Interface_SetPspSegmentBase(0x02, interfaceCtx->parameterSegment);
+    Interface_SetPspSegmentBase(0x07, interfaceCtx->doActionSegment);
+    Interface_SetPspSegmentBase(0x08, interfaceCtx->iconItemSegment);
+    Interface_SetPspSegmentBase(0x0B, interfaceCtx->mapSegment);
+#endif
     gSPSegment(OVERLAY_DISP++, 0x02, interfaceCtx->parameterSegment);
     gSPSegment(OVERLAY_DISP++, 0x07, interfaceCtx->doActionSegment);
     gSPSegment(OVERLAY_DISP++, 0x08, interfaceCtx->iconItemSegment);
@@ -3631,6 +3641,9 @@ void Interface_Draw(PlayState* play) {
 
         if ((pauseCtx->state == PAUSE_STATE_MAIN) && (pauseCtx->mainState == PAUSE_MAIN_STATE_3)) {
             // Inventory Equip Effects
+#if PLATFORM_PSP
+            Interface_SetPspSegmentBase(0x08, pauseCtx->iconItemSegment);
+#endif
             gSPSegment(OVERLAY_DISP++, 0x08, pauseCtx->iconItemSegment);
             Gfx_SetupDL_42Overlay(play->state.gfxCtx);
             gDPSetCombineMode(OVERLAY_DISP++, G_CC_MODULATERGBA_PRIM, G_CC_MODULATERGBA_PRIM);
