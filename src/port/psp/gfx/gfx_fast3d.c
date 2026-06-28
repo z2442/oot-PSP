@@ -439,7 +439,15 @@ static bool gfx_is_valid_native_read_range(uintptr_t value, size_t size) {
         return false;
     }
 
-    if (gfx_is_static_prx_range(value, size) || gfx_is_graph_pool_range(value, size)) {
+    /*
+     * Keep this provenance set in sync with gfx_is_valid_native_dl_range().
+     * Display lists and texture staging data allocated from sPspSystemHeap can
+     * numerically look like segments 8-B.  If the heap is omitted here,
+     * seg_addr() translates a valid pointer through the active N64 segment and
+     * sends the renderer into unrelated frame data.
+     */
+    if (gfx_is_static_prx_range(value, size) || gfx_is_graph_pool_range(value, size) ||
+        OotPsp_IsSystemHeapRange((const void*)value, size)) {
         return true;
     }
 
@@ -3689,6 +3697,7 @@ static void gfx_dp_noop(uint32_t tag) {
 static inline bool gfx_addr_looks_segmented(uintptr_t addr) {
     uint8_t segment = addr >> 24;
     uintptr_t offset = addr & 0x00FFFFFFU;
+    bool segmentMapped;
 
     if ((segment == 0) || (segment >= NUM_SEGMENTS)) {
         return false;
@@ -3698,16 +3707,37 @@ static inline bool gfx_addr_looks_segmented(uintptr_t addr) {
         return true;
     }
 
+    segmentMapped = rsp.segments[segment] != NULL;
+#if defined(TARGET_PSP)
+    segmentMapped = segmentMapped || (gSegments[segment] != 0);
+#endif
+
     /*
-     * Dynamic display lists use segments 8 and 9 with a zero or small offset
-     * for Link's eye/mouth textures.  Those values numerically overlap PSP
-     * RAM, but an active matching segment makes the low-offset form explicit.
+     * A zero-offset reference is the canonical dynamic-segment form used by
+     * Link's eye and mouth textures (0x08000000 and 0x09000000).  Those exact
+     * values can fall inside PSP RAM, but an active matching segment makes the
+     * command's intent unambiguous.
+     */
+    if ((offset == 0) && segmentMapped) {
+        return true;
+    }
+
+    /*
+     * Provenance has to win over the low-offset collision heuristic.  Native
+     * pointers allocated near the start of PSP RAM can have values such as
+     * 0x0900AAC0; interpreting those as segment 9 first adds the active segment
+     * base and sends display-list execution into unrelated graph-pool data.
+     */
+    if (gfx_is_valid_native_read_range(addr, 1)) {
+        return false;
+    }
+
+    /*
+     * Other small segment offsets also overlap PSP RAM.  Once known native
+     * allocations have been excluded, an active matching segment makes the
+     * low-offset form explicit.
      */
     if (offset < PSP_SEGMENTED_COLLISION_OFFSET_MAX) {
-        bool segmentMapped = rsp.segments[segment] != NULL;
-#if defined(TARGET_PSP)
-        segmentMapped = segmentMapped || (gSegments[segment] != 0);
-#endif
         if (segmentMapped) {
             return true;
         }
@@ -3719,7 +3749,7 @@ static inline bool gfx_addr_looks_segmented(uintptr_t addr) {
      * valid segmented addresses.  Treat only ranges with known PSP provenance
      * as native and let every other mapped value use segment translation.
      */
-    return !gfx_is_valid_native_read_range(addr, 1);
+    return true;
 }
 
 static void gfx_log_unmapped_segment(uintptr_t addr) {

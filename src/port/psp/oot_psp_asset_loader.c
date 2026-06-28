@@ -55,6 +55,7 @@ typedef struct OotPspLoadedAssetSerialRange {
 
 typedef struct OotPspAssetRangeSerialCacheEntry {
     uintptr_t ramStart;
+    uintptr_t ramEnd;
     u32 serial;
     u32 generation;
 } OotPspAssetRangeSerialCacheEntry;
@@ -190,7 +191,7 @@ static void OotPsp_ClearAssetRangeSerialCache(void) {
     }
 }
 
-static s32 OotPsp_GetCachedAssetRangeSerial(uintptr_t ramStart, u32* serial) {
+static s32 OotPsp_GetCachedAssetRangeSerial(uintptr_t ramStart, uintptr_t ramEnd, u32* serial) {
     const OotPspAssetRangeSerialCacheEntry* set =
         sOotPspAssetRangeSerialCache[OotPsp_AssetRangeSerialCacheIndex(ramStart)];
     size_t way;
@@ -198,7 +199,8 @@ static s32 OotPsp_GetCachedAssetRangeSerial(uintptr_t ramStart, u32* serial) {
     for (way = 0; way < OOT_PSP_ASSET_RANGE_SERIAL_CACHE_WAYS; way++) {
         const OotPspAssetRangeSerialCacheEntry* entry = &set[way];
 
-        if ((entry->generation == sOotPspAssetRangeSerialCacheGeneration) && (entry->ramStart == ramStart)) {
+        if ((entry->generation == sOotPspAssetRangeSerialCacheGeneration) && (entry->ramStart == ramStart) &&
+            (entry->ramEnd == ramEnd)) {
             *serial = entry->serial;
             return true;
         }
@@ -207,12 +209,13 @@ static s32 OotPsp_GetCachedAssetRangeSerial(uintptr_t ramStart, u32* serial) {
     return false;
 }
 
-static void OotPsp_RememberAssetRangeSerial(uintptr_t ramStart, u32 serial) {
+static void OotPsp_RememberAssetRangeSerial(uintptr_t ramStart, uintptr_t ramEnd, u32 serial) {
     size_t setIndex = OotPsp_AssetRangeSerialCacheIndex(ramStart);
     size_t way = sOotPspAssetRangeSerialCacheNext[setIndex];
     OotPspAssetRangeSerialCacheEntry* entry = &sOotPspAssetRangeSerialCache[setIndex][way];
 
     entry->ramStart = ramStart;
+    entry->ramEnd = ramEnd;
     entry->serial = serial;
     entry->generation = sOotPspAssetRangeSerialCacheGeneration;
     sOotPspAssetRangeSerialCacheNext[setIndex] =
@@ -552,8 +555,7 @@ static OotPspAssetWindowCache* OotPsp_GetHotAssetCacheCandidate(const OotPspExte
     return best;
 }
 
-static s32 OotPsp_ReadPackedOpenFileRange(SceUID fd, const char* path, size_t offset, u8* out, size_t size,
-                                          s32 allowAudioYield) {
+static s32 OotPsp_ReadPackedOpenFileRange(SceUID fd, const char* path, size_t offset, u8* out, size_t size) {
     size_t remaining = size;
     size_t readOffset = offset;
 
@@ -591,10 +593,6 @@ static s32 OotPsp_ReadPackedOpenFileRange(SceUID fd, const char* path, size_t of
         remaining -= read;
         sOotPspPackedAssetPosition += read;
         sOotPspPackedAssetPositionKnown = true;
-
-        if (remaining != 0) {
-            OotPsp_CooperateWithAudioRead(allowAudioYield, &sOotPspPackedAssetPositionKnown);
-        }
     }
 
     return true;
@@ -642,8 +640,7 @@ static OotPspPackedAssetCacheBlock* OotPsp_SelectPackedCacheBlock(void) {
     return best;
 }
 
-static OotPspPackedAssetCacheBlock* OotPsp_LoadPackedCacheBlock(SceUID fd, const char* path, size_t blockIndex,
-                                                                s32 allowAudioYield) {
+static OotPspPackedAssetCacheBlock* OotPsp_LoadPackedCacheBlock(SceUID fd, const char* path, size_t blockIndex) {
     OotPspPackedAssetCacheBlock* block;
     size_t blockStart = blockIndex * OOT_PSP_PACKED_CACHE_BLOCK_SIZE;
     size_t readSize = OOT_PSP_PACKED_CACHE_BLOCK_SIZE;
@@ -686,8 +683,7 @@ static OotPspPackedAssetCacheBlock* OotPsp_LoadPackedCacheBlock(SceUID fd, const
     block->loading = true;
     block->blockIndex = blockIndex;
     block->dataSize = 0;
-    if (!OotPsp_ReadPackedOpenFileRange(fd, path, blockStart, OotPsp_PackedCacheBlockData(slot), readSize,
-                                        allowAudioYield)) {
+    if (!OotPsp_ReadPackedOpenFileRange(fd, path, blockStart, OotPsp_PackedCacheBlockData(slot), readSize)) {
         block->loading = false;
         block->valid = false;
         return NULL;
@@ -716,7 +712,7 @@ static s32 OotPsp_ReadPackedAssetFileRangeCached(SceUID fd, const char* path, si
     while (remaining != 0) {
         size_t blockIndex = cursor / OOT_PSP_PACKED_CACHE_BLOCK_SIZE;
         size_t blockOffset = cursor & (OOT_PSP_PACKED_CACHE_BLOCK_SIZE - 1);
-        OotPspPackedAssetCacheBlock* block = OotPsp_LoadPackedCacheBlock(fd, path, blockIndex, allowAudioYield);
+        OotPspPackedAssetCacheBlock* block = OotPsp_LoadPackedCacheBlock(fd, path, blockIndex);
         size_t slot;
         size_t available;
         size_t copySize;
@@ -733,6 +729,16 @@ static s32 OotPsp_ReadPackedAssetFileRangeCached(SceUID fd, const char* path, si
         out += copySize;
         cursor += copySize;
         remaining -= copySize;
+
+        /*
+         * Yield only at a cache transaction boundary. At this point no cache
+         * slot is loading and no pointer into a slot survives the unlock, so
+         * an urgent audio read may safely seek the shared file and evict any
+         * completed block before this read resumes.
+         */
+        if (remaining != 0) {
+            OotPsp_CooperateWithAudioRead(allowAudioYield, &sOotPspPackedAssetPositionKnown);
+        }
     }
 
     return true;
@@ -760,7 +766,7 @@ static s32 OotPsp_ReadPackedAssetFileRange(const OotPspExternalAsset* asset, siz
         return true;
     }
 
-    return OotPsp_ReadPackedOpenFileRange(fd, path, packedOffset, out, size, allowAudioYield);
+    return OotPsp_ReadPackedOpenFileRange(fd, path, packedOffset, out, size);
 }
 
 static size_t OotPsp_GetAssetCacheSizeLimit(const OotPspExternalAsset* asset) {
@@ -872,7 +878,7 @@ static s32 OotPsp_EnsureAssetCacheRange(OotPspAssetWindowCache* cache, const Oot
     }
 
     cache->loading = true;
-    if (!OotPsp_ReadPackedAssetFileRange(asset, windowStart, cache->data, windowSize, false, false,
+    if (!OotPsp_ReadPackedAssetFileRange(asset, windowStart, cache->data, windowSize, true, false,
                                          allowAudioYield)) {
         cache->loading = false;
         free(cache->data);
@@ -1562,7 +1568,8 @@ s32 OotPsp_GetLoadedExternalAssetRangeFlags(const void* ptr, size_t size, u32* f
     }
 
     indexedRange = OotPsp_FindLoadedAssetSerialRange(ramStart);
-    if (indexedRange != NULL) {
+    if ((indexedRange != NULL) &&
+        OotPsp_RangeContains(indexedRange->ramStart, indexedRange->ramEnd, ramStart, ramEnd)) {
         if (flags != NULL) {
             *flags = indexedRange->flags;
         }
@@ -1577,20 +1584,6 @@ s32 OotPsp_GetLoadedExternalAssetRangeFlags(const void* ptr, size_t size, u32* f
         const OotPspLoadedAssetRange* range = &sOotPspLoadedAssetRanges[i];
 
         if ((range->serial != 0) && OotPsp_RangeContains(range->ramStart, range->ramEnd, ramStart, ramEnd)) {
-            if (flags != NULL) {
-                *flags = range->flags;
-            }
-            if ((range->flags & OOT_PSP_EXTERNAL_ASSET_NATIVE) != 0) {
-                OotPsp_RememberNativeTextureRange(range);
-            }
-            return true;
-        }
-    }
-
-    for (i = 0; i < OOT_PSP_LOADED_ASSET_RANGE_COUNT; i++) {
-        const OotPspLoadedAssetRange* range = &sOotPspLoadedAssetRanges[i];
-
-        if ((range->serial != 0) && (ramStart >= range->ramStart) && (ramStart < range->ramEnd)) {
             if (flags != NULL) {
                 *flags = range->flags;
             }
@@ -1657,14 +1650,17 @@ u32 OotPsp_GetExternalAssetRangeSerial(const void* ptr, size_t size) {
         return 0;
     }
 
-    if (OotPsp_GetCachedAssetRangeSerial(ramStart, &serial)) {
+    if (OotPsp_GetCachedAssetRangeSerial(ramStart, ramEnd, &serial)) {
         return serial;
     }
 
     {
         const OotPspLoadedAssetSerialRange* range = OotPsp_FindLoadedAssetSerialRange(ramStart);
 
-        serial = (range != NULL) ? range->serial : 0;
+        serial = ((range != NULL) &&
+                  OotPsp_RangeContains(range->ramStart, range->ramEnd, ramStart, ramEnd))
+                     ? range->serial
+                     : 0;
     }
     if ((serial == 0) && !sOotPspLoadedAssetSerialRangeIndexComplete) {
         size_t i;
@@ -1672,14 +1668,15 @@ u32 OotPsp_GetExternalAssetRangeSerial(const void* ptr, size_t size) {
         for (i = 0; i < OOT_PSP_LOADED_ASSET_RANGE_COUNT; i++) {
             const OotPspLoadedAssetRange* range = &sOotPspLoadedAssetRanges[i];
 
-            if ((range->serial != 0) && (ramStart >= range->ramStart) && (ramStart < range->ramEnd)) {
+            if ((range->serial != 0) &&
+                OotPsp_RangeContains(range->ramStart, range->ramEnd, ramStart, ramEnd)) {
                 serial = range->serial;
                 break;
             }
         }
     }
 
-    OotPsp_RememberAssetRangeSerial(ramStart, serial);
+    OotPsp_RememberAssetRangeSerial(ramStart, ramEnd, serial);
     return serial;
 }
 
