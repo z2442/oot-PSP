@@ -302,15 +302,51 @@ int OotPsp_IsRuntimeByteRangeSlow(uintptr_t start, uintptr_t end) {
            ((start >= sPspStackAltStart) && (end <= sPspStackAltEnd));
 }
 
+static s32 OotPsp_IsKnownNativePointer(uintptr_t addr) {
+    u32 loadedFlags;
+
+    if ((addr < OOT_PSP_NATIVE_ADDR_START) || (addr >= OOT_PSP_NATIVE_ADDR_END)) {
+        return false;
+    }
+
+    /*
+     * Native executable/static data. The old test only used __bss_start, which
+     * caused pointers inside .bss/static storage to be misdetected as segment
+     * 8/9/A/B addresses. Use _end so the full loaded executable range is kept
+     * native.
+     */
+    if (addr < (uintptr_t)_end) {
+        return true;
+    }
+
+    if (OotPsp_IsRuntimeByteRange((void*)addr, 1)) {
+        return true;
+    }
+
+    if (OotPsp_GetLoadedExternalAssetRangeFlags((void*)addr, 1, &loadedFlags)) {
+        return true;
+    }
+
+    return false;
+}
+
 static s32 OotPsp_AddressLooksSegmented(uintptr_t addr, u32 segment) {
     uintptr_t offset = SEGMENT_OFFSET(addr);
-    u32 loadedFlags;
 
     if ((segment == 0) || (segment >= NUM_SEGMENTS)) {
         return false;
     }
 
     if ((addr & 0xF0000000U) != 0) {
+        return false;
+    }
+
+    /*
+     * Check known native PSP pointers before applying the low-offset heuristic.
+     * Real PSP pointers like 0x09001234 can otherwise look like segment 9 with
+     * a small offset.
+     */
+    if (OotPsp_IsKnownNativePointer(addr)) {
         return false;
     }
 
@@ -323,15 +359,10 @@ static s32 OotPsp_AddressLooksSegmented(uintptr_t addr, u32 segment) {
     }
 
     /*
-     * Segments 8-B overlap the PSP user-memory address window.  Preserve
-     * pointers that belong to a known live PSP allocation; values in holes in
-     * that address space are segmented addresses, regardless of their offset.
+     * Segments 8-B overlap the PSP user-memory address window. If the address is
+     * in that window but is not a known live PSP allocation, treat it as a
+     * segmented address instead of passing a fake native pointer to the renderer.
      */
-    if ((addr < (uintptr_t)__bss_start) || OotPsp_IsRuntimeByteRange((void*)addr, 1) ||
-        OotPsp_GetLoadedExternalAssetRangeFlags((void*)addr, 1, &loadedFlags)) {
-        return false;
-    }
-
     return true;
 }
 
@@ -340,7 +371,11 @@ static s32 OotPsp_IsSegmentedAddress(uintptr_t addr, u32 segment) {
 }
 
 static void* OotPsp_TranslateSegmentedAddress(uintptr_t addr, u32 segment) {
-    return (void*)(gSegments[segment] + SEGMENT_OFFSET(addr) + K0BASE);
+    /*
+     * gSegments stores PSP virtual bases in this port. Do not add K0BASE here;
+     * adding it turns a valid user pointer like 0x09000000 into 0x89000000.
+     */
+    return (void*)(gSegments[segment] + SEGMENT_OFFSET(addr));
 }
 
 static void OotPsp_LogUnmappedSegment(uintptr_t addr, u32 segment) {
@@ -358,33 +393,20 @@ static void OotPsp_LogUnmappedSegment(uintptr_t addr, u32 segment) {
 
 void* SegmentedToVirtualCompat(uintptr_t addr) {
     u32 segment;
-    s32 directSegmented;
 
     if (addr == 0) {
         return NULL;
     }
 
     segment = SEGMENT_NUMBER(addr);
-    directSegmented = OotPsp_IsSegmentedAddress(addr, segment);
 
-    if (directSegmented) {
+    if (OotPsp_IsSegmentedAddress(addr, segment)) {
         return OotPsp_TranslateSegmentedAddress(addr, segment);
-    }
-
-    if (OotPsp_IsRuntimeByteRange((void*)addr, 1)) {
-        return (void*)addr;
-    }
-
-    /*
-     * Compiled PSP assets carry native pointers, while stock OoT scene/room code
-     * expects segmented addresses. Treat mapped PSP addresses as already-virtual.
-     */
-    if ((addr >= OOT_PSP_NATIVE_ADDR_START) && (addr < OOT_PSP_NATIVE_ADDR_END)) {
-        return (void*)addr;
     }
 
     if (OotPsp_AddressLooksSegmented(addr, segment)) {
         OotPsp_LogUnmappedSegment(addr, segment);
+        return NULL;
     }
 
     return (void*)addr;
