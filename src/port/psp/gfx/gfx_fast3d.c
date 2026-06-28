@@ -158,8 +158,8 @@ struct ColorCombiner {
     bool texture_blend;
 } __attribute__((packed, aligned(4)));
 
-static struct ColorCombiner color_combiner_pool[64];
-static uint8_t color_combiner_pool_size;
+static struct ColorCombiner color_combiner;
+static bool color_combiner_valid;
 
 struct TriPipelineState {
     struct ColorCombiner *comb;
@@ -404,6 +404,12 @@ static bool gfx_is_static_prx_range(uintptr_t value, size_t size) {
     return gfx_range_contains(value, size, PSP_NATIVE_ADDR_START, (uintptr_t)__bss_start);
 }
 
+static bool gfx_is_loaded_external_range(uintptr_t value, size_t size) {
+    u32 flags;
+
+    return OotPsp_GetLoadedExternalAssetRangeFlags((const void*)value, size, &flags);
+}
+
 static bool gfx_is_valid_native_dl_range(uintptr_t value, size_t size) {
     if (!gfx_native_range_contains(value, size)) {
         return false;
@@ -421,7 +427,7 @@ static bool gfx_is_valid_native_dl_range(uintptr_t value, size_t size) {
         return true;
     }
 
-    if (OotPsp_IsLoadedNativeExternalAssetRange((const void*)value, size)) {
+    if (gfx_is_loaded_external_range(value, size)) {
         return true;
     }
 
@@ -441,7 +447,7 @@ static bool gfx_is_valid_native_read_range(uintptr_t value, size_t size) {
         return true;
     }
 
-    return OotPsp_IsLoadedNativeExternalAssetRange((const void*)value, size);
+    return gfx_is_loaded_external_range(value, size);
 }
 
 static void gfx_log_bad_data_source(const char* context, const void* addr, size_t sizeBytes) {
@@ -1340,20 +1346,15 @@ static inline struct RGBA gfx_get_vertex_rgba(const struct ColorCombiner *comb, 
 }
 
 static struct ColorCombiner *gfx_lookup_or_create_color_combiner(uint32_t cc_id) {
-    static struct ColorCombiner *prev_combiner;
-    if (prev_combiner != NULL && prev_combiner->cc_id == cc_id) {
-        return prev_combiner;
+    if (color_combiner_valid && color_combiner.cc_id == cc_id) {
+        return &color_combiner;
     }
-    
-    for (size_t i = 0; i < color_combiner_pool_size; i++) {
-        if (color_combiner_pool[i].cc_id == cc_id) {
-            return prev_combiner = &color_combiner_pool[i];
-        }
-    }
+
+    /* Buffered vertices still reference the current combiner state. */
     gfx_flush();
-    struct ColorCombiner *comb = &color_combiner_pool[color_combiner_pool_size++];
-    gfx_generate_cc(comb, cc_id);
-    return prev_combiner = comb;
+    gfx_generate_cc(&color_combiner, cc_id);
+    color_combiner_valid = true;
+    return &color_combiner;
 }
 
 extern int gfx_vram_space_available(void);
@@ -2787,8 +2788,9 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
     /* Setup to clip but if we dont, we preload correct values and fix up pointers; */
     struct LoadedVertex **clipped_vertices = v_arr;
     size_t clipped_vertices_num = 3;
-    struct LoadedVertex _clipped_vertices[18];
-    struct LoadedVertex *ptr_clipped_vertices[18];
+    /* A triangle clipped against six planes can become a nine-vertex polygon. */
+    struct LoadedVertex _clipped_vertices[21];
+    struct LoadedVertex *ptr_clipped_vertices[21];
 
     if (clip_flags & CLIP_TEST_FLAGS) {
         gfx_clip_single_vert(_clipped_vertices, &clipped_vertices_num, v_arr);
@@ -3697,12 +3699,27 @@ static inline bool gfx_addr_looks_segmented(uintptr_t addr) {
     }
 
     /*
-     * PSP pointers and N64 segment ids both occupy the 0x08-0x0B address range.
-     * Compiled PSP assets land at 0x08800000+, while scene material segments are
-     * normally referenced as 0x08000000/0x09000000/etc. Translate only the low
-     * collision window so native PSP pointers still pass through unchanged.
+     * Dynamic display lists use segments 8 and 9 with a zero or small offset
+     * for Link's eye/mouth textures.  Those values numerically overlap PSP
+     * RAM, but an active matching segment makes the low-offset form explicit.
      */
-    return offset < PSP_SEGMENTED_COLLISION_OFFSET_MAX;
+    if (offset < PSP_SEGMENTED_COLLISION_OFFSET_MAX) {
+        bool segmentMapped = rsp.segments[segment] != NULL;
+#if defined(TARGET_PSP)
+        segmentMapped = segmentMapped || (gSegments[segment] != 0);
+#endif
+        if (segmentMapped) {
+            return true;
+        }
+    }
+
+    /*
+     * PSP RAM and N64 segments 8-B share the same numeric address window.  A
+     * fixed offset cutoff cannot separate them: large room/object offsets are
+     * valid segmented addresses.  Treat only ranges with known PSP provenance
+     * as native and let every other mapped value use segment translation.
+     */
+    return !gfx_is_valid_native_read_range(addr, 1);
 }
 
 static inline bool gfx_segmented_addr_maps_loaded_external_byte(uintptr_t addr) {
@@ -3723,7 +3740,7 @@ static inline bool gfx_segmented_addr_maps_loaded_external_byte(uintptr_t addr) 
             if (gfx_normalize_native_addr(translatedValue, &normalized)) {
                 translatedValue = normalized;
             }
-            if (OotPsp_IsLoadedNativeExternalAssetRange((const void*)translatedValue, 1)) {
+            if (gfx_is_loaded_external_range(translatedValue, 1)) {
                 return true;
             }
         }
@@ -3738,7 +3755,7 @@ static inline bool gfx_segmented_addr_maps_loaded_external_byte(uintptr_t addr) 
             if (gfx_normalize_native_addr(translatedValue, &normalized)) {
                 translatedValue = normalized;
             }
-            if (OotPsp_IsLoadedNativeExternalAssetRange((const void*)translatedValue, 1)) {
+            if (gfx_is_loaded_external_range(translatedValue, 1)) {
                 return true;
             }
         }
@@ -3752,20 +3769,28 @@ static inline __attribute__((always_inline)) bool gfx_try_normalize_prx_relocate
     uintptr_t addr, uintptr_t* normalizedAddr) {
     uintptr_t candidate;
     uint8_t segment;
+    bool rawSegmentMapped = false;
+    bool candidateMapsLoadedExternal;
     bool rawIsRuntime = gfx_addr_is_native(addr) && !gfx_is_static_prx_range(addr, 1) &&
                         OotPsp_IsRuntimeByteRange((void*)addr, 1);
 
+    /*
+     * Dynamic pointers can numerically resemble PRX-relocated segmented
+     * symbols after subtracting the relocation bias. Their allocation ranges
+     * are authoritative; never reinterpret them as asset addresses.
+     */
+    if (gfx_is_graph_pool_range(addr, 1) || OotPsp_IsSystemHeapRange((const void*)addr, 1) ||
+        gfx_is_loaded_external_range(addr, 1)) {
+        return false;
+    }
+
     if (gfx_addr_looks_segmented(addr)) {
         segment = addr >> 24;
-        if ((segment < NUM_SEGMENTS) && ((addr & 0x00FFFFFFU) < PSP_SEGMENTED_COLLISION_OFFSET_MAX)) {
-            bool segmentMapped = rsp.segments[segment] != NULL;
+        if (segment < NUM_SEGMENTS) {
+            rawSegmentMapped = rsp.segments[segment] != NULL;
 #if defined(TARGET_PSP)
-            segmentMapped = segmentMapped || (gSegments[segment] != 0);
+            rawSegmentMapped = rawSegmentMapped || (gSegments[segment] != 0);
 #endif
-
-            if (segmentMapped) {
-                return false;
-            }
         }
     }
 
@@ -3773,7 +3798,7 @@ static inline __attribute__((always_inline)) bool gfx_try_normalize_prx_relocate
         return false;
     }
 
-    if (!gfx_addr_looks_segmented(candidate)) {
+    if ((candidate & 0xF0000000U) != 0) {
         return false;
     }
 
@@ -3790,7 +3815,19 @@ static inline __attribute__((always_inline)) bool gfx_try_normalize_prx_relocate
         return false;
     }
 
-    if (rawIsRuntime && !gfx_segmented_addr_maps_loaded_external_byte(candidate)) {
+    candidateMapsLoadedExternal = gfx_segmented_addr_maps_loaded_external_byte(candidate);
+
+    /*
+     * PRX relocation can turn 0x06xxxxxx into 0x0Exxxxxx.  If segment E is
+     * still mapped, treating the relocated value as a direct segmented address
+     * selects the stale E base.  A candidate that resolves into a loaded asset
+     * has unambiguous provenance and must win over that numeric collision.
+     */
+    if (!candidateMapsLoadedExternal && rawSegmentMapped) {
+        return false;
+    }
+
+    if (rawIsRuntime && !candidateMapsLoadedExternal) {
         return false;
     }
 
@@ -3888,6 +3925,7 @@ static inline void* gfx_runtime_symbol_addr(uintptr_t addr) {
 static inline void *seg_addr(uintptr_t w1) {
     void* runtimeSymbol = gfx_runtime_symbol_addr(w1);
     uintptr_t normalizedSegmented;
+    bool prxRelocatedSegmented = false;
 
     if (runtimeSymbol != NULL) {
         return runtimeSymbol;
@@ -3895,9 +3933,10 @@ static inline void *seg_addr(uintptr_t w1) {
 
     if (gfx_try_normalize_prx_relocated_segmented_addr(w1, &normalizedSegmented)) {
         w1 = normalizedSegmented;
+        prxRelocatedSegmented = true;
     }
 
-    if (gfx_addr_looks_segmented(w1)) {
+    if (prxRelocatedSegmented || gfx_addr_looks_segmented(w1)) {
         uint8_t segment = w1 >> 24;
         uintptr_t offset = w1 & 0x00FFFFFFU;
 
@@ -4215,18 +4254,20 @@ static bool gfx_translate_dl_cursor(Gfx** cmdP) {
     uintptr_t raw = (uintptr_t)*cmdP;
     uintptr_t normalized;
     uintptr_t normalizedSegmented;
+    bool prxRelocatedSegmented = false;
 
     if (gfx_try_normalize_prx_relocated_segmented_addr(raw, &normalizedSegmented)) {
         raw = normalizedSegmented;
+        prxRelocatedSegmented = true;
     }
 
-    if (gfx_normalize_native_range(raw, sizeof(Gfx), &normalized) &&
+    if (!prxRelocatedSegmented && gfx_normalize_native_range(raw, sizeof(Gfx), &normalized) &&
         gfx_is_valid_native_dl_range(normalized, sizeof(Gfx))) {
         *cmdP = (Gfx*)normalized;
         return true;
     }
 
-    if (gfx_addr_looks_segmented(raw)) {
+    if (prxRelocatedSegmented || gfx_addr_looks_segmented(raw)) {
         void* translated = seg_addr(raw);
 
         if (translated == (void*)raw) {
