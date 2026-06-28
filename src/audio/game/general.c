@@ -1664,27 +1664,27 @@ void AudioOcarina_PlayControllerInput(u8 unused) {
 
         // Interprets and transforms controller input into ocarina buttons and notes
         if (CHECK_BTN_ANY(sOcarinaInputButtonPress, OCARINA_A_MAP)) {
-            AUDIO_PRINTF("Presss NA_KEY_D4 %08x\n", OCARINA_A_MAP);
+            //AUDIO_PRINTF NA_KEY_D4 %08x\n", OCARINA_A_MAP);
             sCurOcarinaPitch = OCARINA_PITCH_D4;
             sCurOcarinaButtonIndex = OCARINA_BTN_A;
 
         } else if (CHECK_BTN_ANY(sOcarinaInputButtonPress, OCARINA_CDOWN_MAP)) {
-            AUDIO_PRINTF("Presss NA_KEY_F4 %08x\n", OCARINA_CDOWN_MAP);
+            //AUDIO_PRINTF NA_KEY_F4 %08x\n", OCARINA_CDOWN_MAP);
             sCurOcarinaPitch = OCARINA_PITCH_F4;
             sCurOcarinaButtonIndex = OCARINA_BTN_C_DOWN;
 
         } else if (CHECK_BTN_ANY(sOcarinaInputButtonPress, BTN_CRIGHT)) {
-            AUDIO_PRINTF("Presss NA_KEY_A4 %08x\n", BTN_CRIGHT);
+            //AUDIO_PRINTF NA_KEY_A4 %08x\n", BTN_CRIGHT);
             sCurOcarinaPitch = OCARINA_PITCH_A4;
             sCurOcarinaButtonIndex = OCARINA_BTN_C_RIGHT;
 
         } else if (CHECK_BTN_ANY(sOcarinaInputButtonPress, BTN_CLEFT)) {
-            AUDIO_PRINTF("Presss NA_KEY_B4 %08x\n", BTN_CLEFT);
+            //AUDIO_PRINTF NA_KEY_B4 %08x\n", BTN_CLEFT);
             sCurOcarinaPitch = OCARINA_PITCH_B4;
             sCurOcarinaButtonIndex = OCARINA_BTN_C_LEFT;
 
         } else if (CHECK_BTN_ANY(sOcarinaInputButtonPress, OCARINA_CUP_MAP)) {
-            AUDIO_PRINTF("Presss NA_KEY_D5 %08x\n", OCARINA_CUP_MAP);
+            //AUDIO_PRINTF NA_KEY_D5 %08x\n", OCARINA_CUP_MAP);
             sCurOcarinaPitch = OCARINA_PITCH_D5;
             sCurOcarinaButtonIndex = OCARINA_BTN_C_UP;
         }

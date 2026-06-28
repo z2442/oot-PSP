@@ -302,28 +302,105 @@ int OotPsp_IsRuntimeByteRangeSlow(uintptr_t start, uintptr_t end) {
            ((start >= sPspStackAltStart) && (end <= sPspStackAltEnd));
 }
 
-static s32 OotPsp_IsKnownNativePointer(uintptr_t addr) {
-    u32 loadedFlags;
+static s32 OotPsp_IsNativeUserRange(uintptr_t addr, size_t size) {
+    if (size == 0) {
+        return true;
+    }
 
     if ((addr < OOT_PSP_NATIVE_ADDR_START) || (addr >= OOT_PSP_NATIVE_ADDR_END)) {
         return false;
     }
 
+    return size <= (OOT_PSP_NATIVE_ADDR_END - addr);
+}
+
+static uintptr_t OotPsp_StripKernelAlias(uintptr_t addr) {
+    uintptr_t stripped;
+
     /*
-     * Native executable/static data. The old test only used __bss_start, which
-     * caused pointers inside .bss/static storage to be misdetected as segment
-     * 8/9/A/B addresses. Use _end so the full loaded executable range is kept
-     * native.
+     * Real PSP user code cannot safely dereference 0x88xxxxxx/0x89xxxxxx
+     * KSEG0-style aliases.  A translated segment base of 0x0901A590 must stay
+     * 0x0901A590, not 0x8901A590.  Normalize aliases defensively in case an
+     * older path already stored or passed one.
      */
-    if (addr < (uintptr_t)_end) {
+    if ((addr >= 0x80000000U) && (addr < 0xA0000000U)) {
+        stripped = addr - 0x80000000U;
+        if (OotPsp_IsNativeUserRange(stripped, 1)) {
+            return stripped;
+        }
+    }
+
+    if ((addr >= 0xA0000000U) && (addr < 0xC0000000U)) {
+        stripped = addr - 0xA0000000U;
+        if (OotPsp_IsNativeUserRange(stripped, 1)) {
+            return stripped;
+        }
+    }
+
+    return addr;
+}
+
+static s32 OotPsp_IsStaticStorageRange(const void* ptr, size_t size) {
+    if (OotPsp_IsContainedRange(ptr, size, (uintptr_t)sPspSystemHeap,
+                                (uintptr_t)sPspSystemHeap + sizeof(sPspSystemHeap))) {
         return true;
     }
 
-    if (OotPsp_IsRuntimeByteRange((void*)addr, 1)) {
+    if (OotPsp_IsContainedRange(ptr, size, (uintptr_t)sPspSram,
+                                (uintptr_t)sPspSram + sizeof(sPspSram))) {
         return true;
     }
 
-    if (OotPsp_GetLoadedExternalAssetRangeFlags((void*)addr, 1, &loadedFlags)) {
+    if (OotPsp_IsContainedRange(ptr, size, (uintptr_t)sPspFramebuffers,
+                                (uintptr_t)sPspFramebuffers + sizeof(sPspFramebuffers))) {
+        return true;
+    }
+
+    if (OotPsp_IsContainedRange(ptr, size, (uintptr_t)D_0E000000,
+                                (uintptr_t)D_0E000000 + sizeof(D_0E000000))) {
+        return true;
+    }
+
+    if (OotPsp_IsContainedRange(ptr, size, (uintptr_t)D_0F000000,
+                                (uintptr_t)D_0F000000 + sizeof(D_0F000000))) {
+        return true;
+    }
+
+    if (OotPsp_IsContainedRange(ptr, size, (uintptr_t)&sPspPreNmiBuffer,
+                                (uintptr_t)&sPspPreNmiBuffer + sizeof(sPspPreNmiBuffer))) {
+        return true;
+    }
+
+    return false;
+}
+
+static s32 OotPsp_IsKnownNativePointer(uintptr_t addr, size_t size) {
+    u32 loadedFlags;
+
+    addr = OotPsp_StripKernelAlias(addr);
+
+    if (!OotPsp_IsNativeUserRange(addr, size)) {
+        return false;
+    }
+
+    /*
+     * Keep code/rodata/data before .bss automatically native, but do not use
+     * addr < _end.  _end includes large .bss buffers and can overlap raw OoT
+     * segment-looking values such as 0x09001234 on real PSP hardware.
+     */
+    if (addr < (uintptr_t)__bss_start) {
+        return true;
+    }
+
+    if (OotPsp_IsStaticStorageRange((const void*)addr, size)) {
+        return true;
+    }
+
+    if (OotPsp_IsRuntimeByteRange((void*)addr, size)) {
+        return true;
+    }
+
+    if (OotPsp_GetLoadedExternalAssetRangeFlags((void*)addr, size, &loadedFlags)) {
         return true;
     }
 
@@ -331,7 +408,10 @@ static s32 OotPsp_IsKnownNativePointer(uintptr_t addr) {
 }
 
 static s32 OotPsp_AddressLooksSegmented(uintptr_t addr, u32 segment) {
-    uintptr_t offset = SEGMENT_OFFSET(addr);
+    uintptr_t offset;
+
+    addr = OotPsp_StripKernelAlias(addr);
+    offset = SEGMENT_OFFSET(addr);
 
     if ((segment == 0) || (segment >= NUM_SEGMENTS)) {
         return false;
@@ -341,12 +421,7 @@ static s32 OotPsp_AddressLooksSegmented(uintptr_t addr, u32 segment) {
         return false;
     }
 
-    /*
-     * Check known native PSP pointers before applying the low-offset heuristic.
-     * Real PSP pointers like 0x09001234 can otherwise look like segment 9 with
-     * a small offset.
-     */
-    if (OotPsp_IsKnownNativePointer(addr)) {
+    if (OotPsp_IsKnownNativePointer(addr, 1)) {
         return false;
     }
 
@@ -359,27 +434,33 @@ static s32 OotPsp_AddressLooksSegmented(uintptr_t addr, u32 segment) {
     }
 
     /*
-     * Segments 8-B overlap the PSP user-memory address window. If the address is
-     * in that window but is not a known live PSP allocation, treat it as a
-     * segmented address instead of passing a fake native pointer to the renderer.
+     * Segments 8-B overlap the PSP user-memory window.  If the address is in
+     * that window but is not a known live PSP allocation, treat it as segmented
+     * instead of passing a fake native pointer to the renderer.
      */
     return true;
 }
 
 static s32 OotPsp_IsSegmentedAddress(uintptr_t addr, u32 segment) {
+    addr = OotPsp_StripKernelAlias(addr);
     return OotPsp_AddressLooksSegmented(addr, segment) && (gSegments[segment] != 0);
 }
 
 static void* OotPsp_TranslateSegmentedAddress(uintptr_t addr, u32 segment) {
+    uintptr_t base = OotPsp_StripKernelAlias(gSegments[segment]);
+    uintptr_t offset = SEGMENT_OFFSET(addr);
+
     /*
-     * gSegments stores PSP virtual bases in this port. Do not add K0BASE here;
-     * adding it turns a valid user pointer like 0x09000000 into 0x89000000.
+     * Do NOT add K0BASE here.  On real PSP that turns a valid user pointer such
+     * as 0x0901A590 into 0x8901A590, matching the crash BadVAddr 0x8901BD97.
      */
-    return (void*)(gSegments[segment] + SEGMENT_OFFSET(addr));
+    return (void*)(base + offset);
 }
 
 static void OotPsp_LogUnmappedSegment(uintptr_t addr, u32 segment) {
     static s32 sUnmappedSegmentLogCount = 0;
+
+    addr = OotPsp_StripKernelAlias(addr);
 
     if (sUnmappedSegmentLogCount < 16) {
         printf("oot-psp cpu unmapped segment addr=%08lx segment=%lu offset=%06lx\n", (unsigned long)addr,
@@ -393,18 +474,21 @@ static void OotPsp_LogUnmappedSegment(uintptr_t addr, u32 segment) {
 
 void* SegmentedToVirtualCompat(uintptr_t addr) {
     u32 segment;
+    s32 looksSegmented;
 
     if (addr == 0) {
         return NULL;
     }
 
+    addr = OotPsp_StripKernelAlias(addr);
     segment = SEGMENT_NUMBER(addr);
+    looksSegmented = OotPsp_AddressLooksSegmented(addr, segment);
 
-    if (OotPsp_IsSegmentedAddress(addr, segment)) {
-        return OotPsp_TranslateSegmentedAddress(addr, segment);
-    }
+    if (looksSegmented) {
+        if (gSegments[segment] != 0) {
+            return OotPsp_TranslateSegmentedAddress(addr, segment);
+        }
 
-    if (OotPsp_AddressLooksSegmented(addr, segment)) {
         OotPsp_LogUnmappedSegment(addr, segment);
         return NULL;
     }
