@@ -3722,119 +3722,6 @@ static inline bool gfx_addr_looks_segmented(uintptr_t addr) {
     return !gfx_is_valid_native_read_range(addr, 1);
 }
 
-static inline bool gfx_segmented_addr_maps_loaded_external_byte(uintptr_t addr) {
-    uint8_t segment = addr >> 24;
-    uintptr_t offset = addr & 0x00FFFFFFU;
-    uintptr_t translatedValue;
-    uintptr_t normalized;
-
-    if ((segment == 0) || (segment >= NUM_SEGMENTS)) {
-        return false;
-    }
-
-    if (rsp.segments[segment] != NULL) {
-        uintptr_t baseValue = (uintptr_t)rsp.segments[segment];
-
-        if (offset <= (UINTPTR_MAX - baseValue)) {
-            translatedValue = baseValue + offset;
-            if (gfx_normalize_native_addr(translatedValue, &normalized)) {
-                translatedValue = normalized;
-            }
-            if (gfx_is_loaded_external_range(translatedValue, 1)) {
-                return true;
-            }
-        }
-    }
-
-#if defined(TARGET_PSP)
-    if (gSegments[segment] != 0) {
-        uintptr_t baseValue = gSegments[segment] + K0BASE;
-
-        if (offset <= (UINTPTR_MAX - baseValue)) {
-            translatedValue = baseValue + offset;
-            if (gfx_normalize_native_addr(translatedValue, &normalized)) {
-                translatedValue = normalized;
-            }
-            if (gfx_is_loaded_external_range(translatedValue, 1)) {
-                return true;
-            }
-        }
-    }
-#endif
-
-    return false;
-}
-
-static inline __attribute__((always_inline)) bool gfx_try_normalize_prx_relocated_segmented_addr(
-    uintptr_t addr, uintptr_t* normalizedAddr) {
-    uintptr_t candidate;
-    uint8_t segment;
-    bool rawSegmentMapped = false;
-    bool candidateMapsLoadedExternal;
-    bool rawIsRuntime = gfx_addr_is_native(addr) && !gfx_is_static_prx_range(addr, 1) &&
-                        OotPsp_IsRuntimeByteRange((void*)addr, 1);
-
-    /*
-     * Dynamic pointers can numerically resemble PRX-relocated segmented
-     * symbols after subtracting the relocation bias. Their allocation ranges
-     * are authoritative; never reinterpret them as asset addresses.
-     */
-    if (gfx_is_graph_pool_range(addr, 1) || OotPsp_IsSystemHeapRange((const void*)addr, 1) ||
-        gfx_is_loaded_external_range(addr, 1)) {
-        return false;
-    }
-
-    if (gfx_addr_looks_segmented(addr)) {
-        segment = addr >> 24;
-        if (segment < NUM_SEGMENTS) {
-            rawSegmentMapped = rsp.segments[segment] != NULL;
-#if defined(TARGET_PSP)
-            rawSegmentMapped = rawSegmentMapped || (gSegments[segment] != 0);
-#endif
-        }
-    }
-
-    if (!OotPsp_TryNormalizePrxRelocatedAddress(addr, &candidate)) {
-        return false;
-    }
-
-    if ((candidate & 0xF0000000U) != 0) {
-        return false;
-    }
-
-    segment = candidate >> 24;
-    if ((segment == 0) || (segment >= NUM_SEGMENTS)) {
-        return false;
-    }
-
-    if (rsp.segments[segment] == NULL
-#if defined(TARGET_PSP)
-        && (gSegments[segment] == 0)
-#endif
-    ) {
-        return false;
-    }
-
-    candidateMapsLoadedExternal = gfx_segmented_addr_maps_loaded_external_byte(candidate);
-
-    /*
-     * PRX relocation can turn 0x06xxxxxx into 0x0Exxxxxx.  If segment E is
-     * still mapped, treating the relocated value as a direct segmented address
-     * selects the stale E base.  A candidate that resolves into a loaded asset
-     * has unambiguous provenance and must win over that numeric collision.
-     */
-    if (!candidateMapsLoadedExternal && rawSegmentMapped) {
-        return false;
-    }
-
-    if (rawIsRuntime && !candidateMapsLoadedExternal) {
-        return false;
-    }
-
-    *normalizedAddr = candidate;
-    return true;
-}
-
 static void gfx_log_unmapped_segment(uintptr_t addr) {
     static s32 sUnmappedSegmentLogCount = 0;
 
@@ -3924,19 +3811,12 @@ static inline void* gfx_runtime_symbol_addr(uintptr_t addr) {
 
 static inline void *seg_addr(uintptr_t w1) {
     void* runtimeSymbol = gfx_runtime_symbol_addr(w1);
-    uintptr_t normalizedSegmented;
-    bool prxRelocatedSegmented = false;
 
     if (runtimeSymbol != NULL) {
         return runtimeSymbol;
     }
 
-    if (gfx_try_normalize_prx_relocated_segmented_addr(w1, &normalizedSegmented)) {
-        w1 = normalizedSegmented;
-        prxRelocatedSegmented = true;
-    }
-
-    if (prxRelocatedSegmented || gfx_addr_looks_segmented(w1)) {
+    if (gfx_addr_looks_segmented(w1)) {
         uint8_t segment = w1 >> 24;
         uintptr_t offset = w1 & 0x00FFFFFFU;
 
@@ -4253,21 +4133,14 @@ static void gfx_sp_s2dex_bg_rect(uint32_t opcode, const void* bgAddr) {
 static bool gfx_translate_dl_cursor(Gfx** cmdP) {
     uintptr_t raw = (uintptr_t)*cmdP;
     uintptr_t normalized;
-    uintptr_t normalizedSegmented;
-    bool prxRelocatedSegmented = false;
 
-    if (gfx_try_normalize_prx_relocated_segmented_addr(raw, &normalizedSegmented)) {
-        raw = normalizedSegmented;
-        prxRelocatedSegmented = true;
-    }
-
-    if (!prxRelocatedSegmented && gfx_normalize_native_range(raw, sizeof(Gfx), &normalized) &&
+    if (gfx_normalize_native_range(raw, sizeof(Gfx), &normalized) &&
         gfx_is_valid_native_dl_range(normalized, sizeof(Gfx))) {
         *cmdP = (Gfx*)normalized;
         return true;
     }
 
-    if (prxRelocatedSegmented || gfx_addr_looks_segmented(raw)) {
+    if (gfx_addr_looks_segmented(raw)) {
         void* translated = seg_addr(raw);
 
         if (translated == (void*)raw) {

@@ -343,33 +343,6 @@ static void* OotPsp_TranslateSegmentedAddress(uintptr_t addr, u32 segment) {
     return (void*)(gSegments[segment] + SEGMENT_OFFSET(addr) + K0BASE);
 }
 
-static s32 OotPsp_SegmentedAddressMapsLoadedExternal(uintptr_t addr, u32 segment) {
-    void* translated = OotPsp_TranslateSegmentedAddress(addr, segment);
-    u32 flags;
-
-    return OotPsp_GetLoadedExternalAssetRangeFlags(translated, 1, &flags);
-}
-
-static s32 OotPsp_TryNormalizePrxRelocatedSegmentedAddress(uintptr_t addr, uintptr_t* normalizedAddr,
-                                                           u32* normalizedSegment) {
-    uintptr_t candidate;
-    u32 segment;
-
-    if (!OotPsp_TryNormalizePrxRelocatedAddress(addr, &candidate)) {
-        return false;
-    }
-
-    segment = SEGMENT_NUMBER(candidate);
-    if (((candidate & 0xF0000000U) != 0) || (segment == 0) || (segment >= NUM_SEGMENTS) ||
-        (gSegments[segment] == 0)) {
-        return false;
-    }
-
-    *normalizedAddr = candidate;
-    *normalizedSegment = segment;
-    return true;
-}
-
 static void OotPsp_LogUnmappedSegment(uintptr_t addr, u32 segment) {
     static s32 sUnmappedSegmentLogCount = 0;
 
@@ -385,8 +358,6 @@ static void OotPsp_LogUnmappedSegment(uintptr_t addr, u32 segment) {
 
 void* SegmentedToVirtualCompat(uintptr_t addr) {
     u32 segment;
-    uintptr_t normalizedAddr;
-    u32 normalizedSegment;
     s32 directSegmented;
 
     if (addr == 0) {
@@ -395,15 +366,6 @@ void* SegmentedToVirtualCompat(uintptr_t addr) {
 
     segment = SEGMENT_NUMBER(addr);
     directSegmented = OotPsp_IsSegmentedAddress(addr, segment);
-
-    if (OotPsp_TryNormalizePrxRelocatedSegmentedAddress(addr, &normalizedAddr, &normalizedSegment)) {
-        void* normalizedPtr = OotPsp_TranslateSegmentedAddress(normalizedAddr, normalizedSegment);
-
-        if (OotPsp_SegmentedAddressMapsLoadedExternal(normalizedAddr, normalizedSegment) ||
-            (!directSegmented && !OotPsp_IsRuntimeByteRange((void*)addr, 1))) {
-            return normalizedPtr;
-        }
-    }
 
     if (directSegmented) {
         return OotPsp_TranslateSegmentedAddress(addr, segment);

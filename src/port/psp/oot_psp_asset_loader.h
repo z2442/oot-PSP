@@ -53,7 +53,6 @@ extern const size_t gOotPspStaffMessageEntriesCount;
 
 void OotPsp_AssetInit(const char* executablePath);
 const char* OotPsp_ResolveRootPath(const char* path, char* buffer, size_t bufferSize);
-s32 OotPsp_TryNormalizePrxRelocatedAddress(uintptr_t addr, uintptr_t* normalized);
 uintptr_t OotPsp_NormalizeVrom(uintptr_t vrom);
 void OotPsp_NormalizeRomFile(RomFile* file);
 s32 OotPsp_IsNativeExternalTextureRange(const void* ptr, size_t size);

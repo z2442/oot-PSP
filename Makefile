@@ -1449,6 +1449,7 @@ PSP_PORT_NATIVE_SEGMENT_OBJECTS := $(patsubst %.c,$(PSP_PORT_BUILD_DIR)/%.o,$(PS
 PSP_PORT_PROBE_OBJECT := $(PSP_PORT_BUILD_DIR)/$(PSP_PORT_PROBE_SOURCE:.c=.o)
 PSP_PORT_LIBRARY := $(PSP_PORT_BUILD_DIR)/liboot_psp_platform.a
 PSP_PORT_ELF := $(PSP_PORT_BUILD_DIR)/oot-psp-port.elf
+PSP_PORT_PRX_ELF := $(PSP_PORT_BUILD_DIR)/oot-psp-port.prx.elf
 PSP_PORT_STRIPPED_ELF := $(PSP_PORT_BUILD_DIR)/oot-psp-port.stripped.elf
 PSP_PORT_PRX := $(PSP_PORT_BUILD_DIR)/oot-psp-port.prx
 PSP_PORT_PBP := $(PSP_PORT_BUILD_DIR)/EBOOT.PBP
@@ -1755,7 +1756,10 @@ endif
 		-Wl,--start-group $(PSP_PORT_LIBRARY) -Wl,--end-group $(PSP_PORT_LDFLAGS)
 	psp-fixup-imports $@
 
-$(PSP_PORT_PRX): $(PSP_PORT_ELF)
+$(PSP_PORT_PRX_ELF): $(PSP_PORT_ELF) $(PSP_PORT_ASSET_SEGMENT_SOURCE) tools/psp_port_strip_asset_relocs.py
+	$(PYTHON) tools/psp_port_strip_asset_relocs.py $< $(PSP_PORT_ASSET_SEGMENT_SOURCE) $@
+
+$(PSP_PORT_PRX): $(PSP_PORT_PRX_ELF)
 	psp-prxgen $< $@
 
 $(PSP_PORT_STRIPPED_ELF): $(PSP_PORT_ELF)

@@ -9,9 +9,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define OOT_PSP_DEFAULT_PRX_RELOCATION_BIAS 0x08800000U
-#define OOT_PSP_RELOCATION_BIAS_MIN         0x08000000U
-#define OOT_PSP_RELOCATION_BIAS_MAX         0x10000000U
 #define OOT_PSP_NATIVE_ADDR_START           0x08800000U
 #define OOT_PSP_NATIVE_ADDR_END             0x0C000000U
 #define OOT_PSP_LOADED_ASSET_RANGE_COUNT    4096
@@ -86,6 +83,7 @@ typedef struct OotPspPackedAssetCacheBlock {
     size_t dataSize;
     u32 lastUsed;
     s32 valid;
+    s32 loading;
 } OotPspPackedAssetCacheBlock;
 
 typedef struct OotPspPinnedAssetWindowCache {
@@ -94,9 +92,6 @@ typedef struct OotPspPinnedAssetWindowCache {
 } OotPspPinnedAssetWindowCache;
 
 static char sOotPspAssetRoot[256];
-extern u8 _ftext[];
-static uintptr_t sOotPspPrxRelocationBias = OOT_PSP_DEFAULT_PRX_RELOCATION_BIAS;
-static s32 sOotPspPrxRelocationBiasInitialized = false;
 static s32 sOotPspOriginalRangesSorted = -1;
 static SceUID sOotPspAssetSema = -1;
 static SceUID sOotPspPackedAssetFd = -1;
@@ -615,7 +610,7 @@ static OotPspPackedAssetCacheBlock* OotPsp_FindPackedCacheBlock(size_t blockInde
     for (i = 0; i < sOotPspPackedCacheBlockCount; i++) {
         OotPspPackedAssetCacheBlock* block = &sOotPspPackedCacheBlocks[i];
 
-        if (block->valid && (block->blockIndex == blockIndex)) {
+        if (block->valid && !block->loading && (block->blockIndex == blockIndex)) {
             block->lastUsed = OotPsp_NextAssetCacheClock();
             return block;
         }
@@ -630,6 +625,10 @@ static OotPspPackedAssetCacheBlock* OotPsp_SelectPackedCacheBlock(void) {
 
     for (i = 0; i < sOotPspPackedCacheBlockCount; i++) {
         OotPspPackedAssetCacheBlock* block = &sOotPspPackedCacheBlocks[i];
+
+        if (block->loading) {
+            continue;
+        }
 
         if (!block->valid) {
             return block;
@@ -677,15 +676,26 @@ static OotPspPackedAssetCacheBlock* OotPsp_LoadPackedCacheBlock(SceUID fd, const
     }
 
     slot = (size_t)(block - sOotPspPackedCacheBlocks);
+    /*
+     * Foreground reads can release the asset-loader semaphore between I/O
+     * chunks so the audio thread can refill. Reserve this cache slot before
+     * starting I/O; otherwise audio can observe the old block as valid or
+     * select the same storage while it contains a partially loaded new block.
+     */
+    block->valid = false;
+    block->loading = true;
+    block->blockIndex = blockIndex;
+    block->dataSize = 0;
     if (!OotPsp_ReadPackedOpenFileRange(fd, path, blockStart, OotPsp_PackedCacheBlockData(slot), readSize,
                                         allowAudioYield)) {
+        block->loading = false;
         block->valid = false;
         return NULL;
     }
 
-    block->blockIndex = blockIndex;
     block->dataSize = readSize;
     block->lastUsed = OotPsp_NextAssetCacheClock();
+    block->loading = false;
     block->valid = true;
     return block;
 }
@@ -1491,95 +1501,13 @@ static s32 OotPsp_TryNormalizeExternalRange(uintptr_t vromStart, uintptr_t vromE
     return false;
 }
 
-static uintptr_t OotPsp_GetPrxRelocationBias(void) {
-    if (!sOotPspPrxRelocationBiasInitialized) {
-        sOotPspPrxRelocationBiasInitialized = true;
-
-        uintptr_t textBias = (uintptr_t)_ftext;
-        if ((textBias >= OOT_PSP_RELOCATION_BIAS_MIN) && (textBias < OOT_PSP_RELOCATION_BIAS_MAX)) {
-            sOotPspPrxRelocationBias = textBias;
-        } else if (gOotPspExternalAssetCount != 0) {
-            uintptr_t relocatedStart = (uintptr_t)_AudiobankSegmentRomStart;
-            uintptr_t expectedStart = gOotPspExternalAssets[0].vromStart;
-
-            if (relocatedStart >= expectedStart) {
-                uintptr_t bias = relocatedStart - expectedStart;
-
-                if ((bias >= OOT_PSP_RELOCATION_BIAS_MIN) && (bias < OOT_PSP_RELOCATION_BIAS_MAX)) {
-                    sOotPspPrxRelocationBias = bias;
-                }
-            }
-        }
-
-        if (sOotPspPrxRelocationBias != OOT_PSP_DEFAULT_PRX_RELOCATION_BIAS) {
-            printf("oot-psp asset relocation bias=%08lx\n", (unsigned long)sOotPspPrxRelocationBias);
-        }
-    }
-
-    return sOotPspPrxRelocationBias;
-}
-
-static s32 OotPsp_TryNormalizePrxRelocatedAddressWithBias(uintptr_t addr, uintptr_t bias, uintptr_t* normalized) {
-    if ((bias == 0) || (addr < bias)) {
-        return false;
-    }
-
-    *normalized = addr - bias;
-    return true;
-}
-
-s32 OotPsp_TryNormalizePrxRelocatedAddress(uintptr_t addr, uintptr_t* normalized) {
-    uintptr_t detectedBias;
-
-    if (normalized == NULL) {
-        return false;
-    }
-
-    detectedBias = OotPsp_GetPrxRelocationBias();
-    if (OotPsp_TryNormalizePrxRelocatedAddressWithBias(addr, detectedBias, normalized)) {
-        return true;
-    }
-
-    if ((detectedBias != OOT_PSP_DEFAULT_PRX_RELOCATION_BIAS) &&
-        OotPsp_TryNormalizePrxRelocatedAddressWithBias(addr, OOT_PSP_DEFAULT_PRX_RELOCATION_BIAS, normalized)) {
-        return true;
-    }
-
-    return false;
-}
-
-static s32 OotPsp_TryNormalizeBiasedRange(uintptr_t vromStart, uintptr_t vromEnd, uintptr_t bias,
-                                          uintptr_t* normalizedStart, uintptr_t* normalizedEnd) {
-    if ((bias == 0) || (vromStart < bias) || (vromEnd < bias)) {
-        return false;
-    }
-
-    return OotPsp_TryNormalizeExternalRange(vromStart - bias, vromEnd - bias, normalizedStart, normalizedEnd);
-}
-
 static s32 OotPsp_NormalizeVromRange(uintptr_t vromStart, uintptr_t vromEnd, uintptr_t* normalizedStart,
                                      uintptr_t* normalizedEnd) {
-    uintptr_t detectedBias;
-
     if ((normalizedStart == NULL) || (normalizedEnd == NULL) || (vromEnd < vromStart)) {
         return false;
     }
 
-    if (OotPsp_TryNormalizeExternalRange(vromStart, vromEnd, normalizedStart, normalizedEnd)) {
-        return true;
-    }
-
-    detectedBias = OotPsp_GetPrxRelocationBias();
-    if (OotPsp_TryNormalizeBiasedRange(vromStart, vromEnd, detectedBias, normalizedStart, normalizedEnd)) {
-        return true;
-    }
-    if ((detectedBias != OOT_PSP_DEFAULT_PRX_RELOCATION_BIAS) &&
-        OotPsp_TryNormalizeBiasedRange(vromStart, vromEnd, OOT_PSP_DEFAULT_PRX_RELOCATION_BIAS, normalizedStart,
-                                       normalizedEnd)) {
-        return true;
-    }
-
-    return false;
+    return OotPsp_TryNormalizeExternalRange(vromStart, vromEnd, normalizedStart, normalizedEnd);
 }
 
 uintptr_t OotPsp_NormalizeVrom(uintptr_t vrom) {
