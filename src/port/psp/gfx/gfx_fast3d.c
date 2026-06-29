@@ -629,10 +629,11 @@ typedef enum GfxTextureSwapMode {
 typedef struct GfxTextureSwapState {
     GfxTextureSwapMode mode;
     uintptr_t rangeStart;
+    uintptr_t rangeEnd;
 } GfxTextureSwapState;
 
 static GfxTextureSwapState gfx_texture_source_swap_state(const uint8_t* addr, uint32_t sizeBytes) {
-    GfxTextureSwapState state = { GFX_TEXTURE_SWAP_NONE, 0 };
+    GfxTextureSwapState state = { GFX_TEXTURE_SWAP_NONE, 0, 0 };
 #if defined(TARGET_PSP)
     u32 loadedFlags;
 
@@ -651,7 +652,7 @@ static GfxTextureSwapState gfx_texture_source_swap_state(const uint8_t* addr, ui
         state.mode = ((loadedFlags & OOT_PSP_EXTERNAL_ASSET_NATIVE) != 0) ? GFX_TEXTURE_SWAP_MAPPED
                                                                           : GFX_TEXTURE_SWAP_NONE;
         if (state.mode == GFX_TEXTURE_SWAP_MAPPED) {
-            OotPsp_GetNativeExternalTextureRangeStart(addr, sizeBytes, &state.rangeStart);
+            OotPsp_GetNativeExternalTextureMappingRange(addr, &state.rangeStart, &state.rangeEnd);
         }
         return state;
     }
@@ -665,21 +666,26 @@ static GfxTextureSwapState gfx_texture_source_swap_state(const uint8_t* addr, ui
 }
 
 static inline uint8_t gfx_read_texture_source_u8(const uint8_t* addr, uint32_t offset,
-                                                 const GfxTextureSwapState* swapState) {
+                                                 GfxTextureSwapState* swapState) {
 #if defined(TARGET_PSP)
     uintptr_t source = (uintptr_t)addr + offset;
 
     if (swapState->mode == GFX_TEXTURE_SWAP_MAPPED) {
-        if (swapState->rangeStart != 0) {
-            source = swapState->rangeStart + ((source - swapState->rangeStart) ^ 7U);
-        } else {
-            const void* mapped;
+        uintptr_t relative;
+        uintptr_t mappedRelative;
 
-            if (OotPsp_MapNativeExternalTextureByte((const void*)source, &mapped)) {
-                source = (uintptr_t)mapped;
-            } else {
-                source ^= 7U;
-            }
+        if ((source < swapState->rangeStart) || (source >= swapState->rangeEnd)) {
+            OotPsp_GetNativeExternalTextureMappingRange((const void*)source, &swapState->rangeStart,
+                                                        &swapState->rangeEnd);
+        }
+
+        relative = source - swapState->rangeStart;
+        mappedRelative = relative ^ 7U;
+        if ((swapState->rangeStart != 0) &&
+            (mappedRelative < (swapState->rangeEnd - swapState->rangeStart))) {
+            source = swapState->rangeStart + mappedRelative;
+        } else {
+            source ^= 7U;
         }
     } else if (swapState->mode == GFX_TEXTURE_SWAP_DIRECT) {
         source ^= 7U;
@@ -694,9 +700,11 @@ static inline uint8_t gfx_read_texture_source_u8(const uint8_t* addr, uint32_t o
 }
 
 static inline uint16_t gfx_read_texture_source_be16(const uint8_t* addr, uint32_t offset,
-                                                    const GfxTextureSwapState* swapState) {
-    return (gfx_read_texture_source_u8(addr, offset, swapState) << 8) |
-           gfx_read_texture_source_u8(addr, offset + 1, swapState);
+                                                    GfxTextureSwapState* swapState) {
+    uint16_t hi = gfx_read_texture_source_u8(addr, offset, swapState);
+    uint16_t lo = gfx_read_texture_source_u8(addr, offset + 1, swapState);
+
+    return (hi << 8) | lo;
 }
 
 #if defined(TARGET_PSP)
@@ -1783,7 +1791,7 @@ static void import_texture_rgba32(int tile) {
 }
 
 static uint8_t gfx_texture_read_4b(int tile, uint32_t x, const uint8_t* row,
-                                   const GfxTextureSwapState* swapState) {
+                                   GfxTextureSwapState* swapState) {
     uint32_t texel = rdp.loaded_texture[tile].source_nibble_offset + x;
     uint8_t byte = gfx_read_texture_source_u8(row, texel >> 1, swapState);
 
