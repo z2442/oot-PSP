@@ -33,6 +33,7 @@
 #endif
 
 #include "psp_texture_manager.h"
+#include "gfx_fast3d.h"
 #include "oot_psp_controls.h"
 #include "oot_psp_memory.h"
 
@@ -1070,12 +1071,21 @@ static void gfx_scegu_set_zmode_decal(bool zmode_decal) {
 }
 
 static void gfx_scegu_set_viewport(int x, int y, int width, int height) {
-    sceGuViewport(2048 - (SCR_WIDTH / 2) + x + (width / 2), 2048 + (SCR_HEIGHT / 2) - y - (height / 2), width, height);
-    sceGuScissor(x, SCR_HEIGHT - y - height, x + width, SCR_HEIGHT - y);
+    int originX = (SCR_WIDTH - (int)gfx_current_dimensions.width) / 2;
+    int originY = (SCR_HEIGHT - (int)gfx_current_dimensions.height) / 2;
+
+    sceGuViewport(2048 - (SCR_WIDTH / 2) + originX + x + (width / 2),
+                  2048 + (SCR_HEIGHT / 2) - originY - y - (height / 2), width, height);
+    sceGuScissor(originX + x, SCR_HEIGHT - originY - y - height, originX + x + width,
+                 SCR_HEIGHT - originY - y);
 }
 
 static void gfx_scegu_set_scissor(int x, int y, int width, int height) {
-    sceGuScissor(x, SCR_HEIGHT - y - height, x + width, SCR_HEIGHT - y);
+    int originX = (SCR_WIDTH - (int)gfx_current_dimensions.width) / 2;
+    int originY = (SCR_HEIGHT - (int)gfx_current_dimensions.height) / 2;
+
+    sceGuScissor(originX + x, SCR_HEIGHT - originY - y - height, originX + x + width,
+                 SCR_HEIGHT - originY - y);
 }
 
 static void gfx_scegu_set_use_alpha(bool use_alpha) {
@@ -1132,13 +1142,26 @@ static void gfx_scegu_draw_triangles(float buf_vbo[], UNUSED size_t buf_vbo_len,
 }
 
 void gfx_scegu_draw_triangles_2d(float buf_vbo[], UNUSED size_t buf_vbo_len, UNUSED size_t buf_vbo_num_tris) {
+    VertexColor *quad;
+    int originX;
+    int originY;
+
     if (!is_shader_enabled(cur_shader->shader_id)) {
         gfx_scegu_apply_shader(get_shader_from_id(get_shader_remap(cur_shader->shader_id)));
     }
 
-    void *quad_buf = sceGuGetMemory(sizeof(VertexColor) * 2);
-    OotPsp_MemcpyVfpu(quad_buf, buf_vbo, sizeof(VertexColor) * 2);
-    sceGuDrawArray(GU_SPRITES, GU_TEXTURE_16BIT | GU_COLOR_8888 | GU_VERTEX_16BIT | GU_TRANSFORM_2D, 2, 0, quad_buf);
+    quad = sceGuGetMemory(sizeof(VertexColor) * 2);
+    OotPsp_MemcpyVfpu(quad, buf_vbo, sizeof(VertexColor) * 2);
+
+    /* GU_TRANSFORM_2D bypasses the centered 3D viewport, so apply its origin to screen-space rectangles explicitly. */
+    originX = (SCR_WIDTH - (int)gfx_current_dimensions.width) / 2;
+    originY = (SCR_HEIGHT - (int)gfx_current_dimensions.height) / 2;
+    quad[0].x += originX;
+    quad[0].y += originY;
+    quad[1].x += originX;
+    quad[1].y += originY;
+
+    sceGuDrawArray(GU_SPRITES, GU_TEXTURE_16BIT | GU_COLOR_8888 | GU_VERTEX_16BIT | GU_TRANSFORM_2D, 2, 0, quad);
 }
 
 static void gfx_scegu_init(void) {

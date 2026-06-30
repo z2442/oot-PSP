@@ -6,6 +6,9 @@
 #include "gfx/gfx_rendering_api.h"
 #include "gfx/gfx_window_psp.h"
 
+#define OOT_PSP_DISPLAY_WIDTH  480
+#define OOT_PSP_DISPLAY_HEIGHT 272
+
 extern struct GfxRenderingAPI gfx_scegu_api;
 extern void gfx_scegu_request_pause_background(void);
 extern void gfx_scegu_set_pause_background_active(bool active);
@@ -54,6 +57,18 @@ void OotPspRenderer_RenderTask(const OSTask* task) {
 
     dl = (Gfx*)task->t.data_ptr;
     OotPspRenderer_RenderDisplayList(dl);
+}
+
+void OotPspRenderer_SetJpegBackgroundResolution(bool active, uint32_t width, uint32_t height) {
+    OotPspRenderer_Init();
+
+    if (!active || (width == 0) || (height == 0) || (width > OOT_PSP_DISPLAY_WIDTH) ||
+        (height > OOT_PSP_DISPLAY_HEIGHT)) {
+        width = OOT_PSP_DISPLAY_WIDTH;
+        height = OOT_PSP_DISPLAY_HEIGHT;
+    }
+
+    gfx_set_dimensions(width, height);
 }
 
 void OotPspRenderer_RequestPauseBackground(void) {

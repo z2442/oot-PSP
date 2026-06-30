@@ -78,6 +78,7 @@ typedef struct JpegDecoderState {
 } JpegDecoderState; // size = 0x14
 
 s32 Jpeg_IsJpeg(void* data);
+s32 JpegPsp_WasDecoded(void* data);
 s32 Jpeg_Decode(void* data, void* zbuffer, void* work, u32 workSize);
 
 void JpegUtils_ProcessQuantizationTable(u8* dqt, JpegQuantizationTable* qt, u8 count);

@@ -288,10 +288,35 @@ void Jpeg_ParseMarkers(u8* ptr, JpegContext* ctx) {
 #define JPEG_PSP_MAX_HEIGHT SCREEN_HEIGHT
 #define JPEG_PSP_RGBA_SIZE (JPEG_PSP_MAX_WIDTH * JPEG_PSP_MAX_HEIGHT * 4)
 #define JPEG_PSP_RGBA16_SIZE (JPEG_PSP_MAX_WIDTH * JPEG_PSP_MAX_HEIGHT * sizeof(u16))
+#define JPEG_PSP_DECODED_IMAGE_MAX 64
 
 static u8 sPspJpegInput[JPEG_PSP_RGBA16_SIZE] __attribute__((aligned(64)));
 static u8 sPspJpegRgba[JPEG_PSP_RGBA_SIZE] __attribute__((aligned(64)));
+static void* sPspDecodedImages[JPEG_PSP_DECODED_IMAGE_MAX];
+static s32 sPspDecodedImageCount;
 static s32 sPspJpegInitialized;
+
+s32 JpegPsp_WasDecoded(void* data) {
+    s32 i;
+
+    for (i = 0; i < sPspDecodedImageCount; i++) {
+        if (sPspDecodedImages[i] == data) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void JpegPsp_RecordDecodedImage(void* data) {
+    if (JpegPsp_WasDecoded(data)) {
+        return;
+    }
+
+    if (sPspDecodedImageCount < JPEG_PSP_DECODED_IMAGE_MAX) {
+        sPspDecodedImages[sPspDecodedImageCount++] = data;
+    }
+}
 
 static s32 JpegPsp_CopyCompressedImage(const u8* data, JpegByteLayout layout, u8* out, size_t outCapacity,
                                        size_t* outSize) {
@@ -499,7 +524,16 @@ static s32 JpegPsp_Decode(void* data, void* output) {
     }
 
     sceKernelDcacheWritebackRange(dst, JPEG_PSP_RGBA16_SIZE);
+    if ((layout == JPEG_BYTE_LAYOUT_PSP_TEXTURE_WORDS) ||
+        OotPsp_IsNativeExternalTextureRange(output, JPEG_PSP_RGBA16_SIZE)) {
+        JpegPsp_RecordDecodedImage(output);
+    }
     return 0;
+}
+#else
+s32 JpegPsp_WasDecoded(void* data) {
+    (void)data;
+    return false;
 }
 #endif
 

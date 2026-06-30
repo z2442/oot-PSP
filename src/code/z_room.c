@@ -25,6 +25,9 @@
 #include "room.h"
 #include "save.h"
 #include "skin_matrix.h"
+#if PLATFORM_PSP
+#include "oot_psp_renderer.h"
+#endif
 
 Vec3f D_801270A0 = { 0.0f, 0.0f, 0.0f };
 
@@ -590,6 +593,61 @@ void Room_Init(PlayState* play, Room* room) {
     room->segment = NULL;
 }
 
+#if PLATFORM_PSP
+static s32 sPspPendingRoomHasJpegBackground;
+static u16 sPspPendingRoomWidth;
+static u16 sPspPendingRoomHeight;
+
+static s32 Room_GetPspJpegBackgroundResolution(Room* room, u16* width, u16* height) {
+    RoomShapeImageBase* imageBase;
+
+    if ((room->segment == NULL) || (room->roomShape == NULL) ||
+        (room->roomShape->base.type != ROOM_SHAPE_TYPE_IMAGE)) {
+        return false;
+    }
+
+    imageBase = &room->roomShape->image.base;
+    if (imageBase->amountType == ROOM_SHAPE_IMAGE_AMOUNT_SINGLE) {
+        RoomShapeImageSingle* image = &room->roomShape->image.single;
+        void* source = SEGMENTED_TO_VIRTUAL(image->source);
+
+        if ((source != NULL) && (Jpeg_IsJpeg(source) || JpegPsp_WasDecoded(source))) {
+            *width = image->width;
+            *height = image->height;
+            return true;
+        }
+    } else if (imageBase->amountType == ROOM_SHAPE_IMAGE_AMOUNT_MULTI) {
+        RoomShapeImageMulti* image = &room->roomShape->image.multi;
+        RoomShapeImageMultiBgEntry* backgrounds = SEGMENTED_TO_VIRTUAL(image->backgrounds);
+        s32 i;
+
+        for (i = 0; i < image->numBackgrounds; i++) {
+            void* source = SEGMENTED_TO_VIRTUAL(backgrounds[i].source);
+
+            if ((source != NULL) && (Jpeg_IsJpeg(source) || JpegPsp_WasDecoded(source))) {
+                *width = backgrounds[i].width;
+                *height = backgrounds[i].height;
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+static void Room_SetPspPendingRenderResolution(Room* room) {
+    sPspPendingRoomWidth = 0;
+    sPspPendingRoomHeight = 0;
+    sPspPendingRoomHasJpegBackground =
+        Room_GetPspJpegBackgroundResolution(room, &sPspPendingRoomWidth, &sPspPendingRoomHeight);
+}
+
+static void Room_ApplyPspPendingRenderResolution(void) {
+    OotPspRenderer_SetJpegBackgroundResolution(sPspPendingRoomHasJpegBackground, sPspPendingRoomWidth,
+                                               sPspPendingRoomHeight);
+}
+#endif
+
 static u32 Room_GetRomFileSize(RomFile* roomFile) {
 #if PLATFORM_PSP
     if ((roomFile->vromStart != 0) && (roomFile->vromEnd == 0)) {
@@ -770,6 +828,12 @@ s32 Room_ProcessRoomRequest(PlayState* play, RoomContext* roomCtx) {
             gSegments[3] = OS_K0_TO_PHYSICAL(roomCtx->curRoom.segment);
 
             Scene_ExecuteCommands(play, roomCtx->curRoom.segment);
+#if PLATFORM_PSP
+            Room_SetPspPendingRenderResolution(&roomCtx->curRoom);
+            if (roomCtx->prevRoom.num < 0) {
+                Room_ApplyPspPendingRenderResolution();
+            }
+#endif
             Player_SetBootData(play, GET_PLAYER(play));
             Actor_SpawnTransitionActors(play, &play->actorCtx);
         } else {
@@ -799,6 +863,10 @@ void Room_FinishRoomChange(PlayState* play, RoomContext* roomCtx) {
     // Delete the previous room
     roomCtx->prevRoom.num = -1;
     roomCtx->prevRoom.segment = NULL;
+
+#if PLATFORM_PSP
+    Room_ApplyPspPendingRenderResolution();
+#endif
 
     func_80031B14(play, &play->actorCtx);
     Actor_SpawnTransitionActors(play, &play->actorCtx);

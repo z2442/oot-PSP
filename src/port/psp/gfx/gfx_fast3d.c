@@ -4540,6 +4540,18 @@ void gfx_get_dimensions(uint32_t *width, uint32_t *height) {
     gfx_wapi->get_dimensions(width, height);
 }
 
+void gfx_set_dimensions(uint32_t width, uint32_t height) {
+    if ((width == 0) || (height == 0) ||
+        ((gfx_current_dimensions.width == width) && (gfx_current_dimensions.height == height))) {
+        return;
+    }
+
+    gfx_current_dimensions.width = width;
+    gfx_current_dimensions.height = height;
+    gfx_update_screen_metrics();
+    gfx_rapi->on_resize();
+}
+
 
 float times[30];
 float time_avg;
