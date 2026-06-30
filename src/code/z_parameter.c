@@ -3387,10 +3387,20 @@ void Interface_Draw(PlayState* play) {
     s16 svar4;
     s16 svar5;
     s16 timerId;
+#if PLATFORM_PSP
+    uintptr_t savedSegment2;
+    uintptr_t savedSegment7;
+    uintptr_t savedSegment8;
+    uintptr_t savedSegmentB;
+#endif
 
     OPEN_DISPS(play->state.gfxCtx, "../z_parameter.c", 3405);
 
 #if PLATFORM_PSP
+    savedSegment2 = gSegments[0x02];
+    savedSegment7 = gSegments[0x07];
+    savedSegment8 = gSegments[0x08];
+    savedSegmentB = gSegments[0x0B];
     Interface_SetPspSegmentBase(0x02, interfaceCtx->parameterSegment);
     Interface_SetPspSegmentBase(0x07, interfaceCtx->doActionSegment);
     Interface_SetPspSegmentBase(0x08, interfaceCtx->iconItemSegment);
@@ -4218,6 +4228,13 @@ void Interface_Draw(PlayState* play) {
     }
 
     CLOSE_DISPS(play->state.gfxCtx, "../z_parameter.c", 4269);
+
+#if PLATFORM_PSP
+    gSegments[0x02] = savedSegment2;
+    gSegments[0x07] = savedSegment7;
+    gSegments[0x08] = savedSegment8;
+    gSegments[0x0B] = savedSegmentB;
+#endif
 }
 
 void Interface_Update(PlayState* play) {
