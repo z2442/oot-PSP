@@ -1071,7 +1071,13 @@ void KaleidoScope_MoveCursorToSpecialPos(PlayState* play, u16 specialPos) {
 }
 
 void KaleidoScope_DrawQuadTextureRGBA32(GraphicsContext* gfxCtx, void* texture, u16 width, u16 height, u16 point) {
+#if PLATFORM_PSP
+    /* Callers pass asset symbols here. Resolve them as segmented addresses even
+     * when segment 9 numerically overlaps the PSP system heap. */
+    texture = SEGMENTED_TO_VIRTUAL_EXPLICIT(texture);
+#else
     texture = KALEIDO_SEGMENTED_PTR(texture);
+#endif
 
     OPEN_DISPS(gfxCtx, "../z_kaleido_scope_PAL.c", 748);
 

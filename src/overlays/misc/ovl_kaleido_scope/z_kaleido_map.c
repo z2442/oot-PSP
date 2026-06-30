@@ -253,7 +253,7 @@ void KaleidoScope_DrawDungeonMap(PlayState* play, GraphicsContext* gfxCtx) {
 
     for (i = 0, j = 4; i < 3; i++, j += 4) {
         if (CHECK_DUNGEON_ITEM(i, gSaveContext.mapIndex)) {
-            gDPLoadTextureBlock(POLY_OPA_DISP++, KALEIDO_MAP_TEXTURE(dungeonItemTexs[i]), G_IM_FMT_RGBA,
+            gDPLoadTextureBlock(POLY_OPA_DISP++, SEGMENTED_TO_VIRTUAL_EXPLICIT(dungeonItemTexs[i]), G_IM_FMT_RGBA,
                                 G_IM_SIZ_32b, 24, 24, 0, G_TX_WRAP | G_TX_NOMIRROR, G_TX_WRAP | G_TX_NOMIRROR,
                                 G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
 

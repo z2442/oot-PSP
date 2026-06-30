@@ -496,6 +496,28 @@ void* SegmentedToVirtualCompat(uintptr_t addr) {
     return (void*)addr;
 }
 
+void* SegmentedToVirtualExplicit(uintptr_t addr) {
+    u32 segment;
+
+    if (addr == 0) {
+        return NULL;
+    }
+
+    addr = OotPsp_StripKernelAlias(addr);
+    segment = SEGMENT_NUMBER(addr);
+
+    if ((segment == 0) || (segment >= NUM_SEGMENTS) || ((addr & 0xF0000000U) != 0)) {
+        return (void*)addr;
+    }
+
+    if (gSegments[segment] != 0) {
+        return OotPsp_TranslateSegmentedAddress(addr, segment);
+    }
+
+    OotPsp_LogUnmappedSegment(addr, segment);
+    return NULL;
+}
+
 void Regs_Init(void) {
     memset(&sRegEditor, 0, sizeof(sRegEditor));
     R_UPDATE_RATE = 1;
