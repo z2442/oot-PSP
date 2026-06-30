@@ -103,6 +103,9 @@ def emit(output: Path, version: str) -> None:
     lines.append("")
     table_segments = {entry["name"] for entry in scenes if entry["name"] in external_segments}
     table_segments.update(
+        entry["title"] for entry in scenes if entry["title"] != "none" and entry["title"] in external_segments
+    )
+    table_segments.update(
         entry["name"] for entry in objects if entry["kind"] in {"object", "empty"} and entry["name"] in external_segments
     )
     emit_rom_segment_externs(lines, table_segments)
@@ -126,14 +129,24 @@ def emit(output: Path, version: str) -> None:
     lines.append("SceneTableEntry gSceneTable[SCENE_ID_MAX] = {")
     for entry in scenes:
         scene_name = entry["name"]
+        title_name = entry["title"]
         scene_enum = entry["enum"]
         draw = entry["draw"]
         unk10 = entry["unk10"].strip()
         unk12 = entry["unk12"].strip()
+        title_file = (
+            f"ROM_FILE({title_name})"
+            if title_name != "none" and title_name in external_segments
+            else "ROM_FILE_UNSET"
+        )
         if scene_name in external_segments:
-            lines.append(f"    [{scene_enum}] = {{ ROM_FILE({scene_name}), ROM_FILE_UNSET, {unk10}, {draw}, {unk12}, 0 }},")
+            lines.append(
+                f"    [{scene_enum}] = {{ ROM_FILE({scene_name}), {title_file}, {unk10}, {draw}, {unk12}, 0 }},"
+            )
         else:
-            lines.append(f"    [{scene_enum}] = {{ ROM_FILE_UNSET, ROM_FILE_UNSET, {unk10}, {draw}, {unk12}, 0 }},")
+            lines.append(
+                f"    [{scene_enum}] = {{ ROM_FILE_UNSET, {title_file}, {unk10}, {draw}, {unk12}, 0 }},"
+            )
     lines.append("};")
     lines.append("")
     lines.append("void OotPsp_ResolveRoomList(RomFile* roomFiles, s32 count) {")
