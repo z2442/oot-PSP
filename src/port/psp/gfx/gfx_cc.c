@@ -13,7 +13,9 @@ void gfx_cc_get_features(uint32_t shader_id, struct CCFeatures* cc_features) {
     cc_features->opt_fog = (shader_id & SHADER_OPT_FOG) != 0;
     cc_features->opt_texture_edge = (shader_id & SHADER_OPT_TEXTURE_EDGE) != 0;
     cc_features->opt_noise = (shader_id & SHADER_OPT_NOISE) != 0;
-    cc_features->opt_texture_blend = (shader_id & SHADER_OPT_TEXTURE_BLEND) != 0;
+    cc_features->opt_texture_blend_shade = (shader_id & SHADER_OPT_TEXTURE_BLEND_SHADE) != 0;
+    cc_features->opt_texture_blend =
+        (shader_id & (SHADER_OPT_TEXTURE_BLEND | SHADER_OPT_TEXTURE_BLEND_SHADE)) != 0;
 
     cc_features->used_textures[0] = false;
     cc_features->used_textures[1] = false;

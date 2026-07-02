@@ -1328,7 +1328,7 @@ static void gfx_generate_cc(struct ColorCombiner *comb, uint32_t cc_id) {
         gfx_cc_pick_vertex_color_source(c[1], shader_input_mapping[1], shader_input_count[1]);
     comb->texture_blend = cc_features.opt_texture_blend;
     if (cc_features.opt_texture_blend) {
-        comb->vertex_color_source[0] = CC_ENV;
+        comb->vertex_color_source[0] = cc_features.opt_texture_blend_shade ? CC_SHADE : CC_ENV;
     }
 }
 
@@ -3427,6 +3427,13 @@ static bool gfx_cc_is_two_cycle_texture_tint(uint32_t a0, uint32_t b0, uint32_t 
            (d1 == G_CCMUX_ENVIRONMENT);
 }
 
+static bool gfx_cc_is_two_cycle_texture_shade_prim_tint(uint32_t a0, uint32_t b0, uint32_t c0, uint32_t d0,
+                                                        uint32_t a1, uint32_t b1, uint32_t c1, uint32_t d1) {
+    return (a0 == G_CCMUX_TEXEL1) && (b0 == G_CCMUX_TEXEL0) && (c0 == G_CCMUX_PRIM_LOD_FRAC) &&
+           (d0 == G_CCMUX_TEXEL0) && (a1 == G_CCMUX_SHADE) && (b1 == G_CCMUX_PRIMITIVE) &&
+           (c1 == G_CCMUX_COMBINED) && (d1 == G_CCMUX_PRIMITIVE);
+}
+
 static bool gfx_cc_is_two_cycle_texture_blend_mul_shade(uint32_t a0, uint32_t b0, uint32_t c0, uint32_t d0,
                                                         uint32_t a1, uint32_t b1, uint32_t c1, uint32_t d1) {
     return (a0 == G_CCMUX_TEXEL1) && (b0 == G_CCMUX_TEXEL0) && (c0 == G_CCMUX_ENV_ALPHA) &&
@@ -3454,14 +3461,14 @@ static bool gfx_cc_is_combined_mul_primitive(uint32_t a, uint32_t b, uint32_t c,
 }
 
 static void gfx_dp_set_combine_mode(uint32_t rgb, uint32_t alpha, bool color_mul_env, bool color_mul_prim,
-                                    bool texture_blend, bool two_texture_blend) {
+                                    bool texture_blend, bool texture_blend_shade, bool two_texture_blend) {
     if (rdp.combine_two_texture_blend != two_texture_blend) {
         /* Do not let vertices from the one-pass and two-pass paths share a batch. */
         gfx_flush();
     }
     rdp.combine_mode = rgb | (alpha << 12);
     if (texture_blend) {
-        rdp.combine_mode |= SHADER_OPT_TEXTURE_BLEND;
+        rdp.combine_mode |= texture_blend_shade ? SHADER_OPT_TEXTURE_BLEND_SHADE : SHADER_OPT_TEXTURE_BLEND;
     }
     rdp.combine_color_mul_env = color_mul_env;
     rdp.combine_color_mul_prim = color_mul_prim;
@@ -3610,7 +3617,7 @@ static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int3
         
         // Color combiner is turned off in copy mode
         gfx_dp_set_combine_mode(color_comb(0, 0, 0, G_CCMUX_TEXEL0), color_comb(0, 0, 0, G_ACMUX_TEXEL0),
-                                false, false, false, false);
+                                false, false, false, false, false);
         
         // Per documentation one extra pixel is added in this modes to each edge
         lrx += 1 << 2;
@@ -3684,7 +3691,7 @@ static void gfx_dp_fill_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t
     bool saved_combine_two_texture_blend = rdp.combine_two_texture_blend;
     if (use_fill_color) {
         gfx_dp_set_combine_mode(color_comb(0, 0, 0, G_CCMUX_SHADE), color_comb(0, 0, 0, G_ACMUX_SHADE), false, false,
-                                false, false);
+                                false, false, false);
     }
     gfx_draw_rectangle(ulx, uly, lrx, lry, gfx_rectangle_covers_screen(ulx, uly, lrx, lry),
                        gfx_rectangle_covers_width(ulx, lrx));
@@ -4197,7 +4204,7 @@ static void gfx_sp_s2dex_bg_rect(uint32_t opcode, const void* bgAddr) {
     savedTwoTextureBlend = rdp.combine_two_texture_blend;
     if ((rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_COPY) {
         gfx_dp_set_combine_mode(color_comb(0, 0, 0, G_CCMUX_TEXEL0), color_comb(0, 0, 0, G_ACMUX_TEXEL0), false,
-                                false, false, false);
+                                false, false, false, false);
     }
 
     gfx_draw_rectangle(frameX, frameY, frameX + frameW, frameY + frameH, false, false);
@@ -4472,6 +4479,7 @@ static void gfx_run_dl(Gfx* cmd) {
                                                                                G_CCMUX_COMBINED,
                                                                                G_CCMUX_PRIMITIVE);
                 bool textureBlend = gfx_cc_is_texture_prim_env_blend(rgbA0, rgbB0, rgbC0, rgbD0);
+                bool textureBlendShade = false;
                 bool twoTextureBlend = false;
                 uint32_t rgbComb = color_comb(rgbA0, rgbB0, rgbC0, rgbD0);
                 uint32_t alphaComb = color_comb(alphaA0, alphaB0, alphaC0, alphaD0);
@@ -4511,9 +4519,22 @@ static void gfx_run_dl(Gfx* cmd) {
                     }
                     textureBlend = true;
                 }
+
+                if (gfx_cc_is_two_cycle_texture_shade_prim_tint(rgbA0, rgbB0, rgbC0, rgbD0, rgbA1, rgbB1,
+                                                                rgbC1, rgbD1)) {
+                    /*
+                     * Recovery hearts tint their texture between PRIMITIVE and per-vertex SHADE in cycle two.
+                     * Preserve both colored endpoints with the GU blend unit instead of displaying cycle one's
+                     * grayscale texture.  The GU blend direction is reversed, but both endpoints are heart colors.
+                     */
+                    rgbComb = color_comb(G_CCMUX_TEXEL0, G_CCMUX_0, G_CCMUX_SHADE, G_CCMUX_0);
+                    textureBlend = true;
+                    textureBlendShade = true;
+                }
 #endif
 
                 gfx_dp_set_combine_mode(rgbComb, alphaComb, colorMulEnv, colorMulPrim, textureBlend,
+                                        textureBlendShade,
                                         twoTextureBlend);
                     /*color_comb(C0(5, 4), C1(24, 4), C0(0, 5), C1(6, 3)),
                     color_comb(C1(21, 3), C1(3, 3), C1(18, 3), C1(0, 3)));*/
