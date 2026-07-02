@@ -4491,8 +4491,19 @@ static void gfx_run_dl(Gfx* cmd) {
                 }
 
                 if (gfx_cc_is_two_cycle_texture_tint(rgbA0, rgbB0, rgbC0, rgbD0, rgbA1, rgbB1, rgbC1, rgbD1)) {
+                    /*
+                     * The second RDP cycle tints the first cycle between ENVIRONMENT and PRIMITIVE:
+                     *
+                     *   (PRIMITIVE - ENVIRONMENT) * COMBINED + ENVIRONMENT
+                     *
+                     * The GU cannot execute both cycles, so use TEXEL0 as the approximation for COMBINED and
+                     * let GU_TFX_BLEND preserve both tint endpoints.  Modulating TEXEL0 by PRIMITIVE (the old
+                     * fallback) discarded ENVIRONMENT completely, which made spiritual stones and other gems
+                     * too dark and gave them the wrong hue.
+                     */
                     rgbComb = color_comb(G_CCMUX_TEXEL0, G_CCMUX_0, G_CCMUX_PRIMITIVE, G_CCMUX_0);
                     alphaComb = color_comb(G_ACMUX_TEXEL0, G_ACMUX_0, G_ACMUX_PRIMITIVE, G_ACMUX_0);
+                    textureBlend = true;
                 }
 #endif
 
