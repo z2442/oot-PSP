@@ -32,6 +32,10 @@
 #include "player.h"
 #include "save.h"
 
+#if PLATFORM_PSP
+#include "oot_psp_renderer.h"
+#endif
+
 #include "assets/objects/gameplay_keep/eff_lightning.h"
 #include "assets/objects/gameplay_keep/eff_shockwave.h"
 #include "assets/objects/gameplay_keep/raindrop_model.h"
@@ -273,9 +277,13 @@ s32 Environment_ZBufValToFixedPoint(s32 zBufferVal) {
 }
 
 u16 Environment_GetPixelDepth(s32 x, s32 y) {
+#if PLATFORM_PSP
+    return OotPspRenderer_IsDepthClear(x, y) ? GPACK_ZDZ(G_MAXFBZ, 0) : 0;
+#else
     s32 pixelDepth = gZBuffer[y][x];
 
     return pixelDepth;
+#endif
 }
 
 void Environment_GraphCallback(GraphicsContext* gfxCtx, void* param) {

@@ -16,6 +16,8 @@ extern void gfx_scegu_request_home_menu_background(void);
 extern void gfx_scegu_set_home_menu_background_active(bool active);
 extern void gfx_scegu_render_home_menu(int selectedIndex, int screen, int controlSelectedIndex,
                                        const char* statusMessage);
+extern bool gfx_scegu_depth_is_clear(int32_t x, int32_t y);
+extern bool gfx_scegu_depth_test(int32_t x, int32_t y, float projectedZ);
 
 static bool sInitialized;
 
@@ -57,6 +59,16 @@ void OotPspRenderer_RenderTask(const OSTask* task) {
 
     dl = (Gfx*)task->t.data_ptr;
     OotPspRenderer_RenderDisplayList(dl);
+}
+
+bool OotPspRenderer_IsDepthClear(int32_t x, int32_t y) {
+    OotPspRenderer_Init();
+    return gfx_scegu_depth_is_clear(x, y);
+}
+
+bool OotPspRenderer_DepthTest(int32_t x, int32_t y, float projectedZ) {
+    OotPspRenderer_Init();
+    return gfx_scegu_depth_test(x, y, projectedZ);
 }
 
 void OotPspRenderer_SetJpegBackgroundResolution(bool active, uint32_t width, uint32_t height) {

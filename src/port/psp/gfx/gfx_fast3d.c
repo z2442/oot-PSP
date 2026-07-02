@@ -83,6 +83,7 @@
 #define GU_PSM_T32		(7) /* Texture */
 extern void gfx_scegu_draw_triangles_2d(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris);
 extern float identity_matrix[4][4];
+extern Mtx D_01000000;
 
 #if defined(TARGET_PSP)
 struct GfxCmdSnapshot {
@@ -3873,6 +3874,10 @@ static bool gfx_validate_dl_cursor(uintptr_t raw, Gfx** cmdP) {
 }
 
 static inline void* gfx_runtime_symbol_addr(uintptr_t addr) {
+    if (addr == (uintptr_t)&D_01000000 && rsp.segments[1] != NULL) {
+        return rsp.segments[1];
+    }
+
     switch (addr) {
         case PSP_ASSET_SYMBOL_GIDENTITYMTX:
             return &gIdentityMtx;

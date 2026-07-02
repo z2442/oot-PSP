@@ -284,6 +284,7 @@ static int active_texture_tile = -1;
 static bool gl_blend = false;
 static void *sDrawBuffer;
 static void *sDisplayBuffer;
+static void *sDepthBuffer;
 static bool sPauseBgActive;
 static bool sPauseBgCaptureRequested;
 static bool sPauseBgCaptured;
@@ -300,6 +301,46 @@ static bool sHomeMenuFontInitTried;
 
 static void *gfx_scegu_vram_cpu_addr(const void *vramBuffer) {
     return (void *)(((uintptr_t)sceGeEdramGetAddr() | 0x40000000U) + ((uintptr_t)vramBuffer & 0x00FFFFFFU));
+}
+
+static bool gfx_scegu_read_depth(int32_t x, int32_t y, uint16_t *depth) {
+    const float scale = (float)gfx_current_dimensions.height / 240.0f;
+    const int32_t screenX = (int32_t)(240.0f + ((x - 160) * scale));
+    const int32_t screenY = (int32_t)(((272.0f - gfx_current_dimensions.height) * 0.5f) + (y * scale));
+    const volatile uint16_t *depthBuffer;
+
+    if (sDepthBuffer == NULL || screenX < 0 || screenX >= SCR_WIDTH || screenY < 0 || screenY >= SCR_HEIGHT) {
+        return false;
+    }
+
+    depthBuffer = (const volatile uint16_t *)gfx_scegu_vram_cpu_addr(sDepthBuffer);
+    *depth = depthBuffer[(screenY * BUF_WIDTH) + screenX];
+    return true;
+}
+
+bool gfx_scegu_depth_is_clear(int32_t x, int32_t y) {
+    uint16_t depth;
+
+    return gfx_scegu_read_depth(x, y, &depth) && depth == 0;
+}
+
+bool gfx_scegu_depth_test(int32_t x, int32_t y, float projectedZ) {
+    uint16_t depth;
+    uint32_t projectedDepth;
+
+    if (!gfx_scegu_read_depth(x, y, &depth)) {
+        return false;
+    }
+
+    if (projectedZ < 0.0f) {
+        projectedZ = 0.0f;
+    } else if (projectedZ > 1.0f) {
+        projectedZ = 1.0f;
+    }
+
+    /* The PSP depth range is reversed: 0 is the far plane and 0xFFFF is the near plane. */
+    projectedDepth = (uint32_t)((1.0f - projectedZ) * 65535.0f);
+    return projectedDepth >= depth;
 }
 
 static void gfx_scegu_copy_framebuffer_cpu(void *dst, const void *src) {
@@ -1176,6 +1217,7 @@ static void gfx_scegu_init(void) {
 
     sDrawBuffer = fbp0;
     sDisplayBuffer = fbp1;
+    sDepthBuffer = zbp;
     sPauseBgBuffer = getStaticVramBuffer(BUF_WIDTH, SCR_HEIGHT, GU_PSM_5650);
 
     sceGuStart(GU_DIRECT, list);

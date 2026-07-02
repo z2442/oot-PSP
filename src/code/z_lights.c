@@ -6,6 +6,10 @@
 #include "light.h"
 #include "play_state.h"
 
+#if PLATFORM_PSP
+#include "oot_psp_renderer.h"
+#endif
+
 #include "assets/objects/gameplay_keep/fairy_skel.h"
 
 #define LIGHTS_BUFFER_SIZE 32
@@ -330,8 +334,10 @@ void Lights_GlowCheck(PlayState* play) {
             f32 cappedInvWDest;
             f32 wX;
             f32 wY;
+#if !PLATFORM_PSP
             s32 wZ;
             s32 zBuf;
+#endif
 
             pos.x = params->x;
             pos.y = params->y;
@@ -342,10 +348,17 @@ void Lights_GlowCheck(PlayState* play) {
             wY = multDest.y * cappedInvWDest;
 
             if ((multDest.z > 1.0f) && (fabsf(wX) < 1.0f) && (fabsf(wY) < 1.0f)) {
+                // Obtain the z-buffer value for the screen pixel corresponding to the center of the glow.
+#if PLATFORM_PSP
+                if (OotPspRenderer_DepthTest((s32)((wX * (SCREEN_WIDTH / 2)) + (SCREEN_WIDTH / 2)),
+                                             (s32)((wY * -(SCREEN_HEIGHT / 2)) + (SCREEN_HEIGHT / 2)),
+                                             multDest.z * cappedInvWDest)) {
+                    params->drawGlow = true;
+                }
+#else
                 // Compute screen z value assuming the viewport scale and translation both have value G_MAXZ / 2
                 // The multiplication by 32 follows from how the RSP microcode computes the screen z value.
                 wZ = (s32)((multDest.z * cappedInvWDest) * ((G_MAXZ / 2) * 32)) + ((G_MAXZ / 2) * 32);
-                // Obtain the z-buffer value for the screen pixel corresponding to the center of the glow.
                 zBuf = gZBuffer[(s32)((wY * -(SCREEN_HEIGHT / 2)) + (SCREEN_HEIGHT / 2))]
                                [(s32)((wX * (SCREEN_WIDTH / 2)) + (SCREEN_WIDTH / 2))]
                        << 2;
@@ -357,6 +370,7 @@ void Lights_GlowCheck(PlayState* play) {
                 if (wZ < (Environment_ZBufValToFixedPoint(zBuf) >> 3)) {
                     params->drawGlow = true;
                 }
+#endif
             }
         }
         node = node->next;
