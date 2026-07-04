@@ -13,6 +13,25 @@ static inline u32 OotPspVfpu_FloatBits(f32 value) {
     return bits.u;
 }
 
+/*
+ * Compute both values together: vrot shares the VFPU's angle reduction and
+ * avoids two software libm calls for the common matrix-rotation case.
+ */
+static inline void OotPspVfpu_SinCos(f32 radians, f32* sinOut, f32* cosOut) {
+    u32 radiansBits = OotPspVfpu_FloatBits(radians);
+
+    __asm__ volatile(
+        "mtv %[radians], S002\n"
+        "vcst.s S003, VFPU_2_PI\n"
+        "vmul.s S002, S002, S003\n"
+        "vrot.p C000, S002, [s, c]\n"
+        "sv.s S000, 0(%[sinOut])\n"
+        "sv.s S001, 0(%[cosOut])\n"
+        :
+        : [radians] "r"(radiansBits), [sinOut] "r"(sinOut), [cosOut] "r"(cosOut)
+        : "memory");
+}
+
 static inline void OotPspVfpu_MtxFIdentity(MtxF* dest) {
     __asm__ volatile(
         "vmidt.q M000\n"

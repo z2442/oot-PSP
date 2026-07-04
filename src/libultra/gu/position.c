@@ -1,5 +1,9 @@
 #include "ultra64.h"
 
+#if PLATFORM_PSP
+#include "port/psp/oot_psp_vfpu_matrix.h"
+#endif
+
 /**
  * guPositionF
  * Creates a rotation/parallel translation modeling matrix (floating point)
@@ -13,12 +17,18 @@ void guPositionF(f32 mf[4][4], f32 rot, f32 pitch, f32 yaw, f32 scale, f32 x, f3
     pitch *= D_80134D00;
     yaw *= D_80134D00;
 
+#if PLATFORM_PSP
+    OotPspVfpu_SinCos(rot, &sinr, &cosr);
+    OotPspVfpu_SinCos(pitch, &sinp, &cosp);
+    OotPspVfpu_SinCos(yaw, &sinh, &cosh);
+#else
     sinr = sinf(rot);
     cosr = cosf(rot);
     sinp = sinf(pitch);
     cosp = cosf(pitch);
     sinh = sinf(yaw);
     cosh = cosf(yaw);
+#endif
 
     mf[0][0] = (cosp * cosh) * scale;
     mf[0][1] = (cosp * sinh) * scale;

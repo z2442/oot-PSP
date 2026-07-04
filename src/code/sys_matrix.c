@@ -133,8 +133,12 @@ void Matrix_RotateX(f32 x, u8 mode) {
         if (x != 0) {
             cmf = sCurrentMatrix;
 
+#if PLATFORM_PSP
+            OotPspVfpu_SinCos(x, &sin, &cos);
+#else
             sin = sinf(x);
             cos = cosf(x);
+#endif
 
 #if PLATFORM_PSP
             OotPspVfpu_MtxFRotateX(cmf, sin, cos);
@@ -164,8 +168,12 @@ void Matrix_RotateX(f32 x, u8 mode) {
         cmf = sCurrentMatrix;
 
         if (x != 0) {
+#if PLATFORM_PSP
+            OotPspVfpu_SinCos(x, &sin, &cos);
+#else
             sin = sinf(x);
             cos = cosf(x);
+#endif
         } else {
             sin = 0.0f;
             cos = 1.0f;
@@ -201,8 +209,12 @@ void Matrix_RotateY(f32 y, u8 mode) {
         if (y != 0) {
             cmf = sCurrentMatrix;
 
+#if PLATFORM_PSP
+            OotPspVfpu_SinCos(y, &sin, &cos);
+#else
             sin = sinf(y);
             cos = cosf(y);
+#endif
 
 #if PLATFORM_PSP
             OotPspVfpu_MtxFRotateY(cmf, sin, cos);
@@ -232,8 +244,12 @@ void Matrix_RotateY(f32 y, u8 mode) {
         cmf = sCurrentMatrix;
 
         if (y != 0) {
+#if PLATFORM_PSP
+            OotPspVfpu_SinCos(y, &sin, &cos);
+#else
             sin = sinf(y);
             cos = cosf(y);
+#endif
         } else {
             sin = 0.0f;
             cos = 1.0f;
@@ -269,8 +285,12 @@ void Matrix_RotateZ(f32 z, u8 mode) {
         if (z != 0) {
             cmf = sCurrentMatrix;
 
+#if PLATFORM_PSP
+            OotPspVfpu_SinCos(z, &sin, &cos);
+#else
             sin = sinf(z);
             cos = cosf(z);
+#endif
 
 #if PLATFORM_PSP
             OotPspVfpu_MtxFRotateZ(cmf, sin, cos);
@@ -300,8 +320,12 @@ void Matrix_RotateZ(f32 z, u8 mode) {
         cmf = sCurrentMatrix;
 
         if (z != 0) {
+#if PLATFORM_PSP
+            OotPspVfpu_SinCos(z, &sin, &cos);
+#else
             sin = sinf(z);
             cos = cosf(z);
+#endif
         } else {
             sin = 0.0f;
             cos = 1.0f;
@@ -974,8 +998,12 @@ void Matrix_RotateAxis(f32 angle, Vec3f* axis, u8 mode) {
         if (angle != 0) {
             cmf = sCurrentMatrix;
 
+#if PLATFORM_PSP
+            OotPspVfpu_SinCos(angle, &sin, &cos);
+#else
             sin = sinf(angle);
             cos = cosf(angle);
+#endif
 
             temp1 = cmf->xx;
             temp2 = cmf->xy;
@@ -1005,8 +1033,12 @@ void Matrix_RotateAxis(f32 angle, Vec3f* axis, u8 mode) {
         cmf = sCurrentMatrix;
 
         if (angle != 0) {
+#if PLATFORM_PSP
+            OotPspVfpu_SinCos(angle, &sin, &cos);
+#else
             sin = sinf(angle);
             cos = cosf(angle);
+#endif
             rCos = 1.0f - cos;
 
             cmf->xx = axis->x * axis->x * rCos + cos;

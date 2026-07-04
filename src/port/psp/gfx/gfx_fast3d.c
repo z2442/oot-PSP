@@ -111,8 +111,16 @@ struct LoadedVertex {
 
 #if defined(TARGET_PSP)
 typedef char LoadedVertex_vfpu_size_check[(sizeof(struct LoadedVertex) == 48) ? 1 : -1];
+typedef char Vtx_vfpu_size_check[(sizeof(Vtx) == 16) ? 1 : -1];
+/* Keep the assembly entry point to four arguments so it does not depend on PSP EABI extension registers. */
+struct GfxVfpuTransformMatrices {
+    const float (*model)[4];
+    const float (*projection)[4];
+};
 extern uint32_t gfx_clip_to_hyperplane_vfpu(struct LoadedVertex *dest, const struct LoadedVertex *source,
                                             const float plane[4], uint32_t inCount);
+extern void gfx_transform_vertices_vfpu(struct LoadedVertex* dest, const Vtx* source, uint32_t count,
+                                        const struct GfxVfpuTransformMatrices* matrices);
 #endif
 
 typedef struct VertexColor {
@@ -2595,9 +2603,11 @@ struct ShaderProgram {
 };
 
 static bool gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *vertices) {
+#if !defined(TARGET_PSP)
     float temp_vec[4] __attribute__((aligned(16)));
     float model_vec[4] __attribute__((aligned(16)));
     float proj_vec[4] __attribute__((aligned(16)));
+#endif
     const float hudAnchorOffsetNdc = sHudViewportFullscreen ? sHudAnchorOffsetNdc : 0.0f;
 #if defined(TARGET_PSP)
     const void* normalizedSource;
@@ -2615,12 +2625,27 @@ static bool gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
         return false;
     }
     vertices = (const Vtx*)normalizedSource;
+
+    {
+        const struct GfxVfpuTransformMatrices matrices = {
+            rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1],
+            rsp.P_matrix,
+        };
+
+        gfx_transform_vertices_vfpu(&rsp.loaded_vertices[dest_index], vertices, n_vertices, &matrices);
+    }
 #endif
     for (size_t i = 0; i < n_vertices; i++, dest_index++) {
         const Vtx_t *v = &vertices[i].v;
         const Vtx_tn *vn = &vertices[i].n;
         struct LoadedVertex *d = &rsp.loaded_vertices[dest_index];
 
+#if defined(TARGET_PSP)
+        float w = d->_w;
+        float x = gfx_adjust_x_for_aspect_ratio(d->_x);
+        const float y = d->_y;
+        const float z = d->_z;
+#else
         temp_vec[0] = v->ob[0];
         temp_vec[1] = v->ob[1];
         temp_vec[2] = v->ob[2];
@@ -2633,6 +2658,7 @@ static bool gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
         float x = gfx_adjust_x_for_aspect_ratio(proj_vec[0]);
         const float y = proj_vec[1];
         const float z = proj_vec[2];
+#endif
 
         if (hudAnchorOffsetNdc != 0.0f) {
             x += hudAnchorOffsetNdc * w;
@@ -2704,9 +2730,11 @@ static bool gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
         if (z < -w) d->clip_rej |= Z_POS;
         if (z > w) d->clip_rej |= Z_NEG;
 
+#if !defined(TARGET_PSP)
         d->x = model_vec[0];
         d->y = model_vec[1];
         d->z = model_vec[2];
+#endif
         d->w = w;
 
         d->_x = x;

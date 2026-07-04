@@ -1,14 +1,27 @@
 #include "ultra64.h"
 
+#if PLATFORM_PSP
+#include "port/psp/oot_psp_vfpu_matrix.h"
+#endif
+
 void guPerspectiveF(f32 mf[4][4], u16* perspNorm, f32 fovy, f32 aspect, f32 near, f32 far, f32 scale) {
     f32 yscale;
+#if PLATFORM_PSP
+    f32 sine;
+    f32 cosine;
+#endif
     s32 row;
     s32 col;
 
     guMtxIdentF(mf);
 
     fovy *= GU_PI / 180.0;
+#if PLATFORM_PSP
+    OotPspVfpu_SinCos(fovy / 2, &sine, &cosine);
+    yscale = cosine / sine;
+#else
     yscale = cosf(fovy / 2) / sinf(fovy / 2);
+#endif
     mf[0][0] = yscale / aspect;
     mf[1][1] = yscale;
     mf[2][2] = (near + far) / (near - far);

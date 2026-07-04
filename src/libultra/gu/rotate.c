@@ -1,5 +1,9 @@
 #include "ultra64.h"
 
+#if PLATFORM_PSP
+#include "port/psp/oot_psp_vfpu_matrix.h"
+#endif
+
 void guRotateF(f32 m[4][4], f32 a, f32 x, f32 y, f32 z) {
     static f32 dtor = M_PI / 180.0f;
     f32 sine;
@@ -18,8 +22,12 @@ void guRotateF(f32 m[4][4], f32 a, f32 x, f32 y, f32 z) {
 
     a *= dtor;
 
+#if PLATFORM_PSP
+    OotPspVfpu_SinCos(a, &sine, &cosine);
+#else
     sine = sinf(a);
     cosine = cosf(a);
+#endif
 
     t = 1.0f - cosine;
     ab = x * y * t;
