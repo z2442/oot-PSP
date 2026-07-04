@@ -2481,6 +2481,12 @@ static void gfx_sp_matrix(uint8_t parameters, const int32_t *addr) {
 #endif
 
     if (parameters & G_MTX_PROJECTION) {
+        /*
+         * Pending vertices still use the projection currently installed in the
+         * backend. Submit them before replacing it. Model-view changes do not
+         * need this: SPVertex has already transformed and lit those vertices.
+         */
+        gfx_flush();
         if (parameters & G_MTX_LOAD) {
             memcpy(rsp.P_matrix, matrix, sizeof(matrix));
         } else {
@@ -2505,8 +2511,6 @@ static void gfx_sp_pop_matrix(uint32_t count) {
     if (count == 0) {
         return;
     }
-
-    gfx_flush();
 
     while (count--) {
         if (rsp.modelview_matrix_stack_size > 1) {
@@ -4292,7 +4296,6 @@ static void gfx_run_dl(Gfx* cmd) {
         switch (opcode) {
             // RSP commands:
             case G_MTX:
-                gfx_flush();
 #ifdef F3DEX_GBI_2
                 gfx_sp_matrix(C0(0, 8) ^ G_MTX_PUSH, (const int32_t *) seg_addr(cmd->words.w1));
 #else
