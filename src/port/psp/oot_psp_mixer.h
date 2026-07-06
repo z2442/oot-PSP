@@ -31,6 +31,7 @@ void OotPspMixer_UnkCmd19(s32 arg1, s32 arg2, s32 size, s32 arg4);
 void OotPspMixer_InitVme(void);
 void OotPspMixer_ShutdownVme(void);
 void OotPspMixer_ExecuteCommandList(const Acmd* cmdList, s32 cmdCount);
+void OotPspMixer_ExecuteCommandListMe(const Acmd* cmdList, s32 cmdCount);
 void OotPspMixer_InvalidateStateCache(void);
 
 #if defined(OOT_PSP_MIXER_INLINE)

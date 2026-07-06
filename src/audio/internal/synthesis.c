@@ -5,6 +5,7 @@
 #include "ultra64.h"
 #include "audio.h"
 #if defined(TARGET_PSP)
+#include "oot_psp_asset_loader.h"
 #include "oot_psp_audio_commands.h"
 #endif
 
@@ -54,6 +55,7 @@ u32 sEnvMixerOp = _SHIFTL(A_ENVMIXER, 24, 8);
 #define OOT_PSP_AUDIO_REVERB_DESC_ITEMS2 1
 
 static u8 sOotPspAudioSynthBadSampleLogged;
+static u32 sOotPspAudioMeCacheEpoch = 1;
 static OotPspAudioReverbDownsampleCmd sOotPspAudioReverbDownsampleCmds[OOT_PSP_AUDIO_REVERB_COUNT]
                                                                              [OOT_PSP_AUDIO_REVERB_FRAMES]
                                                                              [OOT_PSP_AUDIO_REVERB_UPDATES]
@@ -64,6 +66,14 @@ static s32 OotPspAudioSynth_IsAlignedNativePtr(const void* ptr) {
     u32 addr = (u32)ptr;
 
     return (addr >= OOT_PSP_AUDIO_NATIVE_PTR_START) && (addr < OOT_PSP_AUDIO_NATIVE_PTR_END) && ((addr & 3) == 0);
+}
+
+static s32 OotPspAudioSynth_CanCacheSampleSpan(const void* ptr, u32 size) {
+    uintptr_t start = (uintptr_t)ptr & ~(OOT_PSP_AUDIO_SAMPLE_CACHE_PAGE_SIZE - 1);
+    uintptr_t end = ((uintptr_t)ptr + size + OOT_PSP_AUDIO_SAMPLE_CACHE_PAGE_SIZE - 1) &
+                    ~(OOT_PSP_AUDIO_SAMPLE_CACHE_PAGE_SIZE - 1);
+
+    return OotPsp_IsLoadedNativeExternalAssetRange((const void*)start, end - start);
 }
 
 static OotPspAudioReverbDownsampleCmd* OotPspAudioSynth_SetupReverbRingCmd(SynthesisReverb* reverb,
@@ -85,7 +95,9 @@ static OotPspAudioReverbDownsampleCmd* OotPspAudioSynth_SetupReverbRingCmd(Synth
     pspCmd->startPos = bufItem->startPos;
     pspCmd->lengthA = bufItem->lengthA;
     pspCmd->lengthB = bufItem->lengthB;
+    pspCmd->bufSizePerChan = reverb->bufSizePerChan;
     pspCmd->downsampleRate = reverb->downsampleRate;
+    pspCmd->cacheEpoch = sOotPspAudioMeCacheEpoch;
 
     return pspCmd;
 }
@@ -94,6 +106,13 @@ static OotPspAudioReverbDownsampleCmd* OotPspAudioSynth_SetupReverbDownsampleCmd
                                                                                  ReverbRingBufferItem* bufItem,
                                                                                  s16 updateIndex) {
     return OotPspAudioSynth_SetupReverbRingCmd(reverb, bufItem, updateIndex, OOT_PSP_AUDIO_REVERB_DESC_ITEMS);
+}
+
+void OotPspAudioSynth_InvalidateMeCaches(void) {
+    sOotPspAudioMeCacheEpoch++;
+    if (sOotPspAudioMeCacheEpoch == 0) {
+        sOotPspAudioMeCacheEpoch = 1;
+    }
 }
 #endif
 
@@ -1094,7 +1113,15 @@ Acmd* AudioSynth_ProcessNote(s32 noteIndex, NoteSubEu* noteSubEu, NoteSynthesisS
                     if (1) {}
                     if (1) {}
                     nEntries = SAMPLES_PER_FRAME * sample->book->header.order * sample->book->header.numPredictors;
+#if defined(TARGET_PSP)
+                    if (OotPsp_IsLoadedNativeExternalAssetRange(gAudioCtx.curLoadedBook, nEntries)) {
+                        aOotPspAudioLoadAdpcmCached(cmd++, nEntries, gAudioCtx.curLoadedBook);
+                    } else {
+                        aLoadADPCM(cmd++, nEntries, gAudioCtx.curLoadedBook);
+                    }
+#else
                     aLoadADPCM(cmd++, nEntries, gAudioCtx.curLoadedBook);
+#endif
                 }
             }
 
@@ -1198,7 +1225,16 @@ Acmd* AudioSynth_ProcessNote(s32 noteIndex, NoteSubEu* noteSubEu, NoteSynthesisS
                     sampleDataStartPad = (u32)sampleData & 0xF;
                     aligned = ALIGN16((nFramesToDecode * frameSize) + SAMPLES_PER_FRAME);
                     addr = DMEM_COMPRESSED_ADPCM_DATA - aligned;
+#if defined(TARGET_PSP)
+                    if ((sample->medium == MEDIUM_RAM) && OotPspAudioSynth_CanCacheSampleSpan(
+                                                              sampleData - sampleDataStartPad, aligned)) {
+                        aOotPspAudioLoadSampleCached(cmd++, sampleData - sampleDataStartPad, addr, aligned);
+                    } else {
+                        aLoadBuffer(cmd++, sampleData - sampleDataStartPad, addr, aligned);
+                    }
+#else
                     aLoadBuffer(cmd++, sampleData - sampleDataStartPad, addr, aligned);
+#endif
                 } else {
                     nSamplesToDecode = 0;
                     sampleDataStartPad = 0;

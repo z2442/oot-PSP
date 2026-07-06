@@ -1583,7 +1583,7 @@ PSP_PORT_CFLAGS += -pg -g -fno-omit-frame-pointer -fno-optimize-sibling-calls
 endif
 PSP_PORT_AUDIO_ME_CFLAGS := $(filter-out -pg,$(PSP_PORT_CFLAGS)) $(PSP_AUDIO_ME_OPT_CFLAGS)
 
-PSP_PORT_LIBS := -L$(PSP_PORT_PSPSDK)/lib -L$(PSP_PORT_PREFIX)/lib -lme-core -lpspgu -lpspgum -lpspjpeg \
+PSP_PORT_LIBS := -L$(PSP_PORT_PSPSDK)/lib -L$(PSP_PORT_PREFIX)/lib -lme-core -lpspdmac -lpspgu -lpspgum -lpspjpeg \
 	-lpspdisplay -lpspge -lpspfpu -lpspctrl -lpsppower -lpspaudio -lpspdebug
 ifneq ($(PSP_PORT_INTRAFONT_LIB),)
 PSP_PORT_LIBS += -lintrafont

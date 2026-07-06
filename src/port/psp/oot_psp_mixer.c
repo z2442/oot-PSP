@@ -18,11 +18,13 @@
 
 #if defined(TARGET_PSP)
 #if OOT_PSP_AUDIO_MIXER_VME
+#include <me-core-mapper/me-core-mapper.h>
 #include <me-core-mapper/me-lib.h>
 #endif
 #include <pspkernel.h>
 #endif
 #include <string.h>
+#include <stddef.h>
 
 #define OOT_PSP_DMEM_SIZE 0x2000
 #define ROUND_UP_64(v) (((v) + 63) & ~63)
@@ -37,9 +39,49 @@
 #define OOT_PSP_ENVMIXER_VME_HALF_SAMPLES 8
 #define OOT_PSP_ENVMIXER_VME_BLOCK_SAMPLES (2 * OOT_PSP_ENVMIXER_VME_HALF_SAMPLES)
 #define OOT_PSP_MIXER_VME_MUL_OP 0x00204000
+#define OOT_PSP_SAMPLE_CACHE_SLOTS 16
+#define OOT_PSP_SAMPLE_CACHE_SLOT_SIZE OOT_PSP_AUDIO_SAMPLE_CACHE_PAGE_SIZE
+#define OOT_PSP_BOOK_CACHE_SLOTS 8
+#define OOT_PSP_BOOK_CACHE_MAX_SIZE (8 * 2 * 8 * sizeof(s16))
+#define OOT_PSP_REVERB_CACHE_SLOTS 4
+#define OOT_PSP_REVERB_CACHE_MAX_SAMPLES 0x2000
 
-#define DMEM_U8(addr) (&sMixer.dmem.u8[(u16)(addr)])
-#define DMEM_S16(addr) (&sMixer.dmem.s16[(u16)(addr) / sizeof(s16)])
+typedef struct {
+    const void* source;
+    u16 size;
+    u16 age;
+    u8 data[OOT_PSP_SAMPLE_CACHE_SLOT_SIZE];
+} OotPspMixerSampleCacheEntry;
+
+typedef struct {
+    OotPspMixerSampleCacheEntry entries[OOT_PSP_SAMPLE_CACHE_SLOTS];
+    u16 clock;
+} OotPspMixerSampleCache;
+
+typedef struct {
+    const s16* source;
+    u16 size;
+    u16 age;
+    s16 data[OOT_PSP_BOOK_CACHE_MAX_SIZE / sizeof(s16)];
+} OotPspMixerBookCacheEntry;
+
+typedef struct {
+    OotPspMixerBookCacheEntry entries[OOT_PSP_BOOK_CACHE_SLOTS];
+    u16 clock;
+} OotPspMixerBookCache;
+
+typedef struct {
+    const s16* mainLeft;
+    const s16* mainRight;
+    u32 epoch;
+    u16 samplesPerChan;
+    s16 left[OOT_PSP_REVERB_CACHE_MAX_SAMPLES];
+    s16 right[OOT_PSP_REVERB_CACHE_MAX_SAMPLES];
+} OotPspMixerReverbCacheEntry;
+
+typedef struct {
+    OotPspMixerReverbCacheEntry entries[OOT_PSP_REVERB_CACHE_SLOTS];
+} OotPspMixerReverbCache;
 
 typedef struct {
     u16 in;
@@ -63,9 +105,31 @@ typedef struct {
         s16 s16[OOT_PSP_DMEM_SIZE / sizeof(s16)];
         u8 u8[OOT_PSP_DMEM_SIZE];
     } dmem;
+    OotPspMixerSampleCache* sampleCache;
+    OotPspMixerBookCache* bookCache;
+    OotPspMixerReverbCache* reverbCache;
 } OotPspMixerState;
 
-static OotPspMixerState sMixer __attribute__((aligned(64)));
+typedef struct {
+    OotPspMixerState mixer;
+    OotPspMixerSampleCache sampleCache;
+    OotPspMixerBookCache bookCache;
+    OotPspMixerReverbCache reverbCache;
+} OotPspMixerMeStorage;
+
+static OotPspMixerState sCpuMixer __attribute__((aligned(64)));
+static OotPspMixerMeStorage* sMeStorage;
+static OotPspMixerState* sCurrentMixer = &sCpuMixer;
+static s32 sExecutingOnMe;
+
+static OotPspMixerState* OotPspMixer_GetState(void) {
+    return sCurrentMixer;
+}
+
+#define OOT_PSP_MIXER_STATE() OotPspMixerState* mixer = OotPspMixer_GetState()
+#define sMixer (*mixer)
+#define DMEM_U8(addr) (&sMixer.dmem.u8[(u16)(addr)])
+#define DMEM_S16(addr) (&sMixer.dmem.s16[(u16)(addr) / sizeof(s16)])
 
 #if defined(TARGET_PSP) && OOT_PSP_AUDIO_MIXER_VME
 static volatile s32 sMixerVmeReady;
@@ -138,6 +202,15 @@ static s16 OotPspMixer_Vadd(s16 left, s16 right) {
 void OotPspMixer_InitVme(void) {
 #if defined(TARGET_PSP) && OOT_PSP_AUDIO_MIXER_VME
     if (meLibGetCpuId() == 1) {
+        OotPspMixerMeStorage* storage = meCoreEDRAMAlloc(ROUND_UP_64(sizeof(OotPspMixerMeStorage)));
+
+        if (storage != NULL) {
+            memset(storage, 0, sizeof(*storage));
+            storage->mixer.sampleCache = &storage->sampleCache;
+            storage->mixer.bookCache = &storage->bookCache;
+            storage->mixer.reverbCache = &storage->reverbCache;
+            sMeStorage = storage;
+        }
         vmeLibEnable();
         vmeLibWipe();
         meLibSync();
@@ -152,6 +225,10 @@ void OotPspMixer_ShutdownVme(void) {
         sMixerVmeReady = 0;
         meLibSync();
         vmeLibDisable();
+        if (sMeStorage != NULL) {
+            meCoreEDRAMFree(sMeStorage);
+            sMeStorage = NULL;
+        }
     }
 #endif
 }
@@ -186,22 +263,161 @@ static void OotPspMixer_DecodeAdpcmHalf(s16** outPtr, const s16 table[2][8], con
 }
 
 void OotPspMixer_ClearBuffer(u16 dmem, s32 nbytes) {
+    OOT_PSP_MIXER_STATE();
     memset(DMEM_U8(dmem), 0, ROUND_UP_16(nbytes));
 }
 
 void OotPspMixer_LoadBuffer(const void* source, u16 dmemDest, u16 nbytes) {
+    OOT_PSP_MIXER_STATE();
     memcpy(DMEM_U8(dmemDest), source, ROUND_DOWN_16(nbytes));
 }
 
+static u16 OotPspMixer_NextCacheAge(u16* clock, void* entries, size_t entrySize, s32 entryCount,
+                                    size_t ageOffset) {
+    u16 age = ++*clock;
+    s32 i;
+
+    if (age != 0) {
+        return age;
+    }
+
+    age = *clock = 1;
+    for (i = 0; i < entryCount; i++) {
+        *(u16*)((u8*)entries + (i * entrySize) + ageOffset) = 0;
+    }
+    return age;
+}
+
+static OotPspMixerSampleCacheEntry* OotPspMixer_GetSampleCachePage(OotPspMixerState* mixer,
+                                                                   const u8* pageSource) {
+    OotPspMixerSampleCache* cache = mixer->sampleCache;
+    OotPspMixerSampleCacheEntry* victim = NULL;
+    s32 i;
+
+    if (cache == NULL) {
+        return NULL;
+    }
+
+    for (i = 0; i < OOT_PSP_SAMPLE_CACHE_SLOTS; i++) {
+        OotPspMixerSampleCacheEntry* entry = &cache->entries[i];
+
+        if (entry->source == pageSource) {
+            entry->age = OotPspMixer_NextCacheAge(&cache->clock, cache->entries, sizeof(cache->entries[0]),
+                                                  OOT_PSP_SAMPLE_CACHE_SLOTS,
+                                                  offsetof(OotPspMixerSampleCacheEntry, age));
+            return entry;
+        }
+        if ((victim == NULL) || (entry->source == NULL) || (entry->age < victim->age)) {
+            victim = entry;
+            if (entry->source == NULL) {
+                break;
+            }
+        }
+    }
+
+    memcpy(victim->data, pageSource, OOT_PSP_SAMPLE_CACHE_SLOT_SIZE);
+    victim->source = pageSource;
+    victim->size = OOT_PSP_SAMPLE_CACHE_SLOT_SIZE;
+    victim->age = OotPspMixer_NextCacheAge(&cache->clock, cache->entries, sizeof(cache->entries[0]),
+                                           OOT_PSP_SAMPLE_CACHE_SLOTS,
+                                           offsetof(OotPspMixerSampleCacheEntry, age));
+    return victim;
+}
+
+static void OotPspMixer_LoadSampleCached(const void* source, u16 dmemDest, u16 nbytes) {
+    OOT_PSP_MIXER_STATE();
+    const u8* src = source;
+    u8* dst = DMEM_U8(dmemDest);
+    u16 remaining = ROUND_DOWN_16(nbytes);
+
+    if (sMixer.sampleCache == NULL) {
+        memcpy(dst, src, remaining);
+        return;
+    }
+
+    while (remaining != 0) {
+        const u8* pageSource = (const u8*)((uintptr_t)src & ~(OOT_PSP_SAMPLE_CACHE_SLOT_SIZE - 1));
+        u16 pageOffset = src - pageSource;
+        u16 todo = OOT_PSP_SAMPLE_CACHE_SLOT_SIZE - pageOffset;
+        OotPspMixerSampleCacheEntry* entry;
+
+        if (todo > remaining) {
+            todo = remaining;
+        }
+        entry = OotPspMixer_GetSampleCachePage(mixer, pageSource);
+        if (entry == NULL) {
+            memcpy(dst, src, todo);
+        } else {
+            memcpy(dst, entry->data + pageOffset, todo);
+        }
+        src += todo;
+        dst += todo;
+        remaining -= todo;
+    }
+}
+
 void OotPspMixer_SaveBuffer(u16 dmemSrc, void* dest, u16 nbytes) {
+    OOT_PSP_MIXER_STATE();
     memcpy(dest, DMEM_U8(dmemSrc), ROUND_DOWN_16(nbytes));
 }
 
+static OotPspMixerReverbCacheEntry* OotPspMixer_GetReverbCache(
+    OotPspMixerState* mixer, const OotPspAudioReverbDownsampleCmd* desc) {
+    OotPspMixerReverbCache* cache = mixer->reverbCache;
+    OotPspMixerReverbCacheEntry* victim = NULL;
+    s32 i;
+
+    if ((cache == NULL) || (desc == NULL) || (desc->leftRingBuf == NULL) || (desc->rightRingBuf == NULL) ||
+        (desc->bufSizePerChan == 0) || (desc->bufSizePerChan > OOT_PSP_REVERB_CACHE_MAX_SAMPLES)) {
+        return NULL;
+    }
+
+    for (i = 0; i < OOT_PSP_REVERB_CACHE_SLOTS; i++) {
+        OotPspMixerReverbCacheEntry* entry = &cache->entries[i];
+
+        if ((entry->epoch == desc->cacheEpoch) && (entry->mainLeft == desc->leftRingBuf) &&
+            (entry->mainRight == desc->rightRingBuf) && (entry->samplesPerChan == desc->bufSizePerChan)) {
+            return entry;
+        }
+        if ((victim == NULL) && (entry->epoch != desc->cacheEpoch)) {
+            victim = entry;
+        }
+    }
+
+    if (victim == NULL) {
+        uintptr_t key = ((uintptr_t)desc->leftRingBuf >> 6) ^ ((uintptr_t)desc->rightRingBuf >> 10);
+
+        victim = &cache->entries[key & (OOT_PSP_REVERB_CACHE_SLOTS - 1)];
+    }
+
+#if defined(TARGET_PSP) && OOT_PSP_AUDIO_MIXER_VME
+    {
+        u32 bytes = desc->bufSizePerChan * sizeof(s16);
+        uintptr_t leftStart = (uintptr_t)desc->leftRingBuf & ~63U;
+        uintptr_t rightStart = (uintptr_t)desc->rightRingBuf & ~63U;
+        uintptr_t leftEnd = ((uintptr_t)desc->leftRingBuf + bytes + 63) & ~63U;
+        uintptr_t rightEnd = ((uintptr_t)desc->rightRingBuf + bytes + 63) & ~63U;
+
+        meLibDcacheInvalidateRange((u32)leftStart, leftEnd - leftStart);
+        meLibDcacheInvalidateRange((u32)rightStart, rightEnd - rightStart);
+    }
+#endif
+    memcpy(victim->left, desc->leftRingBuf, desc->bufSizePerChan * sizeof(s16));
+    memcpy(victim->right, desc->rightRingBuf, desc->bufSizePerChan * sizeof(s16));
+    victim->mainLeft = desc->leftRingBuf;
+    victim->mainRight = desc->rightRingBuf;
+    victim->samplesPerChan = desc->bufSizePerChan;
+    victim->epoch = desc->cacheEpoch;
+    return victim;
+}
+
 static void OotPspMixer_ReverbDownsample(u16 dmemLeft, const OotPspAudioReverbDownsampleCmd* desc) {
+    OOT_PSP_MIXER_STATE();
+    OotPspMixerReverbCacheEntry* cacheEntry = OotPspMixer_GetReverbCache(mixer, desc);
     const s16* left = DMEM_S16(dmemLeft);
     const s16* right = DMEM_S16(dmemLeft + DMEM_1CH_SIZE);
-    s16* leftRing = desc->leftRingBuf;
-    s16* rightRing = desc->rightRingBuf;
+    s16* leftRing = (cacheEntry != NULL) ? cacheEntry->left : desc->leftRingBuf;
+    s16* rightRing = (cacheEntry != NULL) ? cacheEntry->right : desc->rightRingBuf;
     s32 startPos = desc->startPos;
     s32 step = desc->downsampleRate;
     s32 lengthASamples = desc->lengthA / (s32)sizeof(s16);
@@ -221,10 +437,12 @@ static void OotPspMixer_ReverbDownsample(u16 dmemLeft, const OotPspAudioReverbDo
 }
 
 static void OotPspMixer_ReverbSave(u16 dmemLeft, const OotPspAudioReverbDownsampleCmd* desc) {
+    OOT_PSP_MIXER_STATE();
+    OotPspMixerReverbCacheEntry* cacheEntry = OotPspMixer_GetReverbCache(mixer, desc);
     const s16* left = DMEM_S16(dmemLeft);
     const s16* right = DMEM_S16(dmemLeft + DMEM_1CH_SIZE);
-    s16* leftRing = desc->leftRingBuf;
-    s16* rightRing = desc->rightRingBuf;
+    s16* leftRing = (cacheEntry != NULL) ? cacheEntry->left : desc->leftRingBuf;
+    s16* rightRing = (cacheEntry != NULL) ? cacheEntry->right : desc->rightRingBuf;
     s32 startPos = desc->startPos;
     s32 lengthASamples = desc->lengthA / (s32)sizeof(s16);
     s32 lengthBSamples = desc->lengthB / (s32)sizeof(s16);
@@ -243,10 +461,12 @@ static void OotPspMixer_ReverbSave(u16 dmemLeft, const OotPspAudioReverbDownsamp
 }
 
 static void OotPspMixer_ReverbLoad(u16 dmemLeft, const OotPspAudioReverbDownsampleCmd* desc) {
+    OOT_PSP_MIXER_STATE();
+    OotPspMixerReverbCacheEntry* cacheEntry = OotPspMixer_GetReverbCache(mixer, desc);
     s16* left = DMEM_S16(dmemLeft);
     s16* right = DMEM_S16(dmemLeft + DMEM_1CH_SIZE);
-    const s16* leftRing = desc->leftRingBuf;
-    const s16* rightRing = desc->rightRingBuf;
+    const s16* leftRing = (cacheEntry != NULL) ? cacheEntry->left : desc->leftRingBuf;
+    const s16* rightRing = (cacheEntry != NULL) ? cacheEntry->right : desc->rightRingBuf;
     s32 startPos = desc->startPos;
     s32 lengthASamples = desc->lengthA / (s32)sizeof(s16);
     s32 lengthBSamples = desc->lengthB / (s32)sizeof(s16);
@@ -265,16 +485,62 @@ static void OotPspMixer_ReverbLoad(u16 dmemLeft, const OotPspAudioReverbDownsamp
 }
 
 void OotPspMixer_LoadADPCM(s32 numEntriesBytes, const s16* book) {
-    memcpy(sMixer.adpcmTable, book, numEntriesBytes);
+    OOT_PSP_MIXER_STATE();
+    if ((book != NULL) && (numEntriesBytes > 0) && (numEntriesBytes <= (s32)sizeof(sMixer.adpcmTable))) {
+        memcpy(sMixer.adpcmTable, book, numEntriesBytes);
+    }
+}
+
+static void OotPspMixer_LoadADPCMCached(s32 numEntriesBytes, const s16* book) {
+    OOT_PSP_MIXER_STATE();
+    OotPspMixerBookCache* cache = sMixer.bookCache;
+    OotPspMixerBookCacheEntry* victim = NULL;
+    s32 i;
+
+    if ((book == NULL) || (numEntriesBytes <= 0) || (numEntriesBytes > (s32)sizeof(sMixer.adpcmTable))) {
+        return;
+    }
+    if (cache == NULL) {
+        memcpy(sMixer.adpcmTable, book, numEntriesBytes);
+        return;
+    }
+
+    for (i = 0; i < OOT_PSP_BOOK_CACHE_SLOTS; i++) {
+        OotPspMixerBookCacheEntry* entry = &cache->entries[i];
+
+        if ((entry->source == book) && (entry->size == numEntriesBytes)) {
+            entry->age = OotPspMixer_NextCacheAge(&cache->clock, cache->entries, sizeof(cache->entries[0]),
+                                                  OOT_PSP_BOOK_CACHE_SLOTS,
+                                                  offsetof(OotPspMixerBookCacheEntry, age));
+            memcpy(sMixer.adpcmTable, entry->data, numEntriesBytes);
+            return;
+        }
+        if ((victim == NULL) || (entry->source == NULL) || (entry->age < victim->age)) {
+            victim = entry;
+            if (entry->source == NULL) {
+                break;
+            }
+        }
+    }
+
+    memcpy(victim->data, book, numEntriesBytes);
+    victim->source = book;
+    victim->size = numEntriesBytes;
+    victim->age = OotPspMixer_NextCacheAge(&cache->clock, cache->entries, sizeof(cache->entries[0]),
+                                           OOT_PSP_BOOK_CACHE_SLOTS,
+                                           offsetof(OotPspMixerBookCacheEntry, age));
+    memcpy(sMixer.adpcmTable, victim->data, numEntriesBytes);
 }
 
 void OotPspMixer_SetBuffer(UNUSED u8 flags, u16 dmemIn, u16 dmemOut, u16 nbytes) {
+    OOT_PSP_MIXER_STATE();
     sMixer.in = dmemIn;
     sMixer.out = dmemOut;
     sMixer.nbytes = nbytes;
 }
 
 void OotPspMixer_Interleave(u16 dmemOut, u16 dmemLeft, u16 dmemRight, u16 count) {
+    OOT_PSP_MIXER_STATE();
     s16* out = DMEM_S16(dmemOut);
     s16* left = DMEM_S16(dmemLeft);
     s16* right = DMEM_S16(dmemRight);
@@ -288,6 +554,7 @@ void OotPspMixer_Interleave(u16 dmemOut, u16 dmemLeft, u16 dmemRight, u16 count)
 }
 
 void OotPspMixer_Interl(u16 dmemIn, u16 dmemOut, u16 count) {
+    OOT_PSP_MIXER_STATE();
     s16* in = DMEM_S16(dmemIn);
     s16* out = DMEM_S16(dmemOut);
     s32 samples = ROUND_UP_8(count);
@@ -299,6 +566,7 @@ void OotPspMixer_Interl(u16 dmemIn, u16 dmemOut, u16 count) {
 }
 
 void OotPspMixer_DMEMMove(u16 dmemIn, u16 dmemOut, s32 nbytes) {
+    OOT_PSP_MIXER_STATE();
     u8 block[16];
     s32 count = ROUND_UP_16(nbytes);
     s32 offset;
@@ -310,10 +578,12 @@ void OotPspMixer_DMEMMove(u16 dmemIn, u16 dmemOut, s32 nbytes) {
 }
 
 void OotPspMixer_SetLoop(ADPCM_STATE* state) {
+    OOT_PSP_MIXER_STATE();
     sMixer.adpcmLoopState = state;
 }
 
 void OotPspMixer_ADPCMdec(u8 flags, ADPCM_STATE state) {
+    OOT_PSP_MIXER_STATE();
     u8* in = DMEM_U8(sMixer.in);
     s16* out = DMEM_S16(sMixer.out);
     s32 nbytes = ROUND_UP_32(sMixer.nbytes);
@@ -373,6 +643,7 @@ void OotPspMixer_ADPCMdec(u8 flags, ADPCM_STATE state) {
 }
 
 void OotPspMixer_S8Dec(u8 flags, ADPCM_STATE state) {
+    OOT_PSP_MIXER_STATE();
     s8* in = (s8*)DMEM_U8(sMixer.in);
     s16* out = DMEM_S16(sMixer.out);
     s32 samples = ROUND_UP_32(sMixer.nbytes) / sizeof(s16);
@@ -395,6 +666,7 @@ void OotPspMixer_S8Dec(u8 flags, ADPCM_STATE state) {
 }
 
 void OotPspMixer_Resample(u8 flags, u16 pitch, RESAMPLE_STATE state) {
+    OOT_PSP_MIXER_STATE();
     s16 tmp[16];
     s16* inInitial = DMEM_S16(sMixer.in);
     s16* in = inInitial;
@@ -446,6 +718,7 @@ void OotPspMixer_Resample(u8 flags, u16 pitch, RESAMPLE_STATE state) {
 }
 
 void OotPspMixer_ResampleZoh(u16 pitch, u16 pitchAccu) {
+    OOT_PSP_MIXER_STATE();
     s16* out = DMEM_S16(sMixer.out);
     s32 samples = ROUND_UP_8(sMixer.nbytes) / sizeof(s16);
     u32 accumulator = ((u32)sMixer.in << 16) | pitchAccu;
@@ -459,6 +732,7 @@ void OotPspMixer_ResampleZoh(u16 pitch, u16 pitchAccu) {
 }
 
 void OotPspMixer_EnvSetup1(s32 initialReverb, s32 rampReverb, s32 rampLeft, s32 rampRight) {
+    OOT_PSP_MIXER_STATE();
     sMixer.env.initialReverb = initialReverb;
     sMixer.env.rampReverb = rampReverb;
     sMixer.env.rampLeft = rampLeft;
@@ -466,6 +740,7 @@ void OotPspMixer_EnvSetup1(s32 initialReverb, s32 rampReverb, s32 rampLeft, s32 
 }
 
 void OotPspMixer_EnvSetup2(s32 volLeft, s32 volRight) {
+    OOT_PSP_MIXER_STATE();
     sMixer.env.volLeft = volLeft;
     sMixer.env.volRight = volRight;
 }
@@ -542,7 +817,7 @@ static s16 OotPspMixer_MixSampleFastVerified(s16 in, s16 out, s16 gain) {
 
 #if defined(TARGET_PSP) && OOT_PSP_AUDIO_MIXER_VME
 static s32 OotPspMixer_IsVmeAvailable(void) {
-    return sMixerVmeReady && (meLibGetCpuId() == 1);
+    return sMixerVmeReady && sExecutingOnMe;
 }
 
 static volatile s32* OotPspMixer_VmeTopLane(s32 lane) {
@@ -685,6 +960,7 @@ static s32 OotPspMixer_MixVme(s16* in, s16* out, s16 gain, s32 samples) {
 
 static void OotPspMixer_EnvMixerCpu(u16 dmemSrc, s32 aiBufLen, s32 swapLR, s32 x0, s32 x1, s32 x2, s32 x3,
                                     u32 dmemDests) {
+    OOT_PSP_MIXER_STATE();
     s16* in = DMEM_S16(dmemSrc);
     s16* dryLeft = DMEM_S16(((dmemDests >> 24) & 0xFF) << 4);
     s16* dryRight = DMEM_S16(((dmemDests >> 16) & 0xFF) << 4);
@@ -752,6 +1028,7 @@ static void OotPspMixer_EnvMixerCpu(u16 dmemSrc, s32 aiBufLen, s32 swapLR, s32 x
 #if defined(TARGET_PSP) && OOT_PSP_AUDIO_MIXER_VME
 static s32 OotPspMixer_EnvMixerVme(u16 dmemSrc, s32 aiBufLen, s32 swapLR, s32 x0, s32 x1, s32 x2, s32 x3,
                                    u32 dmemDests) {
+    OOT_PSP_MIXER_STATE();
     s16* in = DMEM_S16(dmemSrc);
     s16* dryLeft = DMEM_S16(((dmemDests >> 24) & 0xFF) << 4);
     s16* dryRight = DMEM_S16(((dmemDests >> 16) & 0xFF) << 4);
@@ -910,6 +1187,7 @@ void OotPspMixer_EnvMixer(u16 dmemSrc, s32 aiBufLen, s32 swapLR, s32 x0, s32 x1,
 }
 
 void OotPspMixer_Mix(s32 countQuads, s16 gain, u16 dmemIn, u16 dmemOut) {
+    OOT_PSP_MIXER_STATE();
     s16* in = DMEM_S16(dmemIn);
     s16* out = DMEM_S16(dmemOut);
     s32 samples = ROUND_UP_32((countQuads & 0xFF) << 4) / sizeof(s16);
@@ -961,6 +1239,7 @@ void OotPspMixer_Mix(s32 countQuads, s16 gain, u16 dmemIn, u16 dmemOut) {
 }
 
 void OotPspMixer_AddMixer(s32 nbytes, u16 dmemIn, u16 dmemOut, UNUSED s16 gain) {
+    OOT_PSP_MIXER_STATE();
     s16* in = DMEM_S16(dmemIn);
     s16* out = DMEM_S16(dmemOut);
     s32 encodedBytes = ROUND_DOWN_16(nbytes);
@@ -977,6 +1256,7 @@ void OotPspMixer_AddMixer(s32 nbytes, u16 dmemIn, u16 dmemOut, UNUSED s16 gain) 
 }
 
 void OotPspMixer_Duplicate(s32 numCopies, u16 dmemSrc, u16 dmemDest) {
+    OOT_PSP_MIXER_STATE();
     s32 i;
 
     for (i = 0; i < numCopies; i++) {
@@ -985,6 +1265,7 @@ void OotPspMixer_Duplicate(s32 numCopies, u16 dmemSrc, u16 dmemDest) {
 }
 
 void OotPspMixer_CopyBlocks(s32 numBlocks, u16 dmemSrc, u16 dmemDest, s32 blockSize) {
+    OOT_PSP_MIXER_STATE();
     u8 block[32];
     s32 blockBytes = ROUND_UP_32(blockSize);
     s32 blockIndex;
@@ -1001,6 +1282,7 @@ void OotPspMixer_CopyBlocks(s32 numBlocks, u16 dmemSrc, u16 dmemDest, s32 blockS
 }
 
 void OotPspMixer_Filter(u8 flags, s32 countOrBuf, void* state) {
+    OOT_PSP_MIXER_STATE();
     s16* save = state;
     s16* input;
     s16* out = sMixer.filterScratch;
@@ -1141,6 +1423,7 @@ void OotPspMixer_Filter(u8 flags, s32 countOrBuf, void* state) {
 }
 
 void OotPspMixer_HiLoGain(s32 gain, u16 dmemIn, UNUSED u16 dmemOut, s32 nbytes) {
+    OOT_PSP_MIXER_STATE();
     s16* out = DMEM_S16(dmemIn);
     s32 samples = ROUND_UP_32(nbytes) / sizeof(s16);
     s32 i;
@@ -1152,6 +1435,7 @@ void OotPspMixer_HiLoGain(s32 gain, u16 dmemIn, UNUSED u16 dmemOut, s32 nbytes) 
 }
 
 void OotPspMixer_UnkCmd3(s32 arg1, s32 arg2, s32 size) {
+    OOT_PSP_MIXER_STATE();
     s16* src = DMEM_S16(arg1);
     s16* dst = DMEM_S16(arg2);
     s32 samples = ROUND_UP_32(size) / sizeof(s16);
@@ -1185,7 +1469,7 @@ void OotPspMixer_UnkCmd19(UNUSED s32 arg1, UNUSED s32 arg2, UNUSED s32 size, UNU
      */
 }
 
-void OotPspMixer_ExecuteCommandList(const Acmd* cmdList, s32 cmdCount) {
+static void OotPspMixer_ExecuteCommandListInternal(const Acmd* cmdList, s32 cmdCount) {
     s32 i;
 
     for (i = 0; i < cmdCount; i++) {
@@ -1241,6 +1525,10 @@ void OotPspMixer_ExecuteCommandList(const Acmd* cmdList, s32 cmdCount) {
                 OotPspMixer_LoadADPCM(w0 & 0xFFFFFF, (const s16*)(uintptr_t)w1);
                 break;
 
+            case OOT_PSP_A_LOAD_ADPCM_CACHED:
+                OotPspMixer_LoadADPCMCached(w0 & 0xFFFFFF, (const s16*)(uintptr_t)w1);
+                break;
+
             case A_MIXER:
                 OotPspMixer_Mix((w0 >> 16) & 0xFF, (s16)w0, (w1 >> 16) & 0xFFFF, w1 & 0xFFFF);
                 break;
@@ -1293,6 +1581,11 @@ void OotPspMixer_ExecuteCommandList(const Acmd* cmdList, s32 cmdCount) {
                 OotPspMixer_LoadBuffer((const void*)(uintptr_t)w1, w0 & 0xFFFF, ((w0 >> 16) & 0xFF) << 4);
                 break;
 
+            case OOT_PSP_A_LOAD_SAMPLE_CACHED:
+                OotPspMixer_LoadSampleCached((const void*)(uintptr_t)w1, w0 & 0xFFFF,
+                                             ((w0 >> 16) & 0xFF) << 4);
+                break;
+
             case A_SAVEBUFF:
                 OotPspMixer_SaveBuffer(w0 & 0xFFFF, (void*)(uintptr_t)w1, ((w0 >> 16) & 0xFF) << 4);
                 break;
@@ -1315,8 +1608,18 @@ void OotPspMixer_ExecuteCommandList(const Acmd* cmdList, s32 cmdCount) {
     }
 }
 
+void OotPspMixer_ExecuteCommandList(const Acmd* cmdList, s32 cmdCount) {
+    sCurrentMixer = &sCpuMixer;
+    sExecutingOnMe = false;
+    OotPspMixer_ExecuteCommandListInternal(cmdList, cmdCount);
+}
+
+void OotPspMixer_ExecuteCommandListMe(const Acmd* cmdList, s32 cmdCount) {
+    sCurrentMixer = (sMeStorage != NULL) ? &sMeStorage->mixer : &sCpuMixer;
+    sExecutingOnMe = true;
+    OotPspMixer_ExecuteCommandListInternal(cmdList, cmdCount);
+}
+
 void OotPspMixer_InvalidateStateCache(void) {
-#if defined(TARGET_PSP)
-    sceKernelDcacheInvalidateRange(&sMixer, ROUND_UP_64(sizeof(sMixer)));
-#endif
+    /* The CPU fallback state is no longer shared with the ME-local mixer state. */
 }

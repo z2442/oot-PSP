@@ -5,6 +5,9 @@
 #include "ultra64.h"
 #include "versions.h"
 #include "audio.h"
+#if defined(TARGET_PSP)
+#include "oot_psp_audio_commands.h"
+#endif
 
 #if defined(TARGET_PSP) && !defined(OOT_PSP_AUDIO_SOURCE_FREQUENCY)
 #define OOT_PSP_AUDIO_SOURCE_FREQUENCY 22050
@@ -1202,6 +1205,9 @@ void AudioHeap_Init(void) {
     intMask = osSetIntMask(OS_IM_NONE);
     osWritebackDCacheAll();
     osSetIntMask(intMask);
+#if defined(TARGET_PSP)
+    OotPspAudioSynth_InvalidateMeCaches();
+#endif
 }
 
 /**

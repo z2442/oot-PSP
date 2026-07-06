@@ -3,7 +3,9 @@
 #include "oot_psp_memory.h"
 #include "segment_symbols.h"
 
+#include <pspdmac.h>
 #include <pspiofilemgr.h>
+#include <pspkernel.h>
 #include <pspthreadman.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,6 +42,9 @@
 #define OOT_PSP_ASSET_READ_ZERO_RETRY_USEC  1000
 #define OOT_PSP_AUDIO_READ_BACKOFF_USEC     1000
 #define OOT_PSP_AUDIO_READ_BACKOFF_MAX_USEC 2000
+#define OOT_PSP_ASSET_DMA_COPY_MIN_SIZE     0x1000
+#define OOT_PSP_ASSET_DMA_COPY_MAX_SIZE     OOT_PSP_PACKED_CACHE_BLOCK_SIZE
+#define OOT_PSP_ASSET_CACHE_LINE_SIZE       64
 
 typedef struct OotPspLoadedAssetRange {
     uintptr_t ramStart;
@@ -717,7 +722,68 @@ static OotPspPackedAssetCacheBlock* OotPsp_LoadPackedCacheBlock(SceUID fd, const
     return block;
 }
 
+static void OotPsp_WritebackCacheRange(const void* address, size_t size) {
+    uintptr_t start;
+    uintptr_t end;
+
+    if ((address == NULL) || (size == 0)) {
+        return;
+    }
+
+    start = (uintptr_t)address & ~(OOT_PSP_ASSET_CACHE_LINE_SIZE - 1);
+    end = ((uintptr_t)address + size + OOT_PSP_ASSET_CACHE_LINE_SIZE - 1) &
+          ~(OOT_PSP_ASSET_CACHE_LINE_SIZE - 1);
+    sceKernelDcacheWritebackRange((void*)start, end - start);
+}
+
+static void OotPsp_WritebackCacheBoundaries(const void* address, size_t size) {
+    uintptr_t start;
+    uintptr_t last;
+    uintptr_t startLine;
+    uintptr_t lastLine;
+
+    if ((address == NULL) || (size == 0)) {
+        return;
+    }
+
+    start = (uintptr_t)address;
+    last = start + size - 1;
+    startLine = start & ~(OOT_PSP_ASSET_CACHE_LINE_SIZE - 1);
+    lastLine = last & ~(OOT_PSP_ASSET_CACHE_LINE_SIZE - 1);
+
+    if ((start & (OOT_PSP_ASSET_CACHE_LINE_SIZE - 1)) != 0) {
+        OotPsp_WritebackCacheRange((const void*)startLine, OOT_PSP_ASSET_CACHE_LINE_SIZE);
+    }
+    if ((((last + 1) & (OOT_PSP_ASSET_CACHE_LINE_SIZE - 1)) != 0) && (lastLine != startLine)) {
+        OotPsp_WritebackCacheRange((const void*)lastLine, OOT_PSP_ASSET_CACHE_LINE_SIZE);
+    }
+}
+
+static s32 OotPsp_TryDmaAssetCopy(void* dst, const void* src, size_t size) {
+    uintptr_t start;
+    uintptr_t end;
+
+    if ((size < OOT_PSP_ASSET_DMA_COPY_MIN_SIZE) || (size > OOT_PSP_ASSET_DMA_COPY_MAX_SIZE) ||
+        ((((uintptr_t)dst | (uintptr_t)src | size) & 0xF) != 0)) {
+        return false;
+    }
+
+    OotPsp_WritebackCacheRange(src, size);
+    OotPsp_WritebackCacheBoundaries(dst, size);
+    start = (uintptr_t)dst & ~(OOT_PSP_ASSET_CACHE_LINE_SIZE - 1);
+    end = ((uintptr_t)dst + size + OOT_PSP_ASSET_CACHE_LINE_SIZE - 1) &
+          ~(OOT_PSP_ASSET_CACHE_LINE_SIZE - 1);
+    sceKernelDcacheInvalidateRange((void*)start, end - start);
+    return sceDmacTryMemcpy(dst, src, size) == 0;
+}
+
 static void OotPsp_CopyAssetBytes(void* dst, const void* src, size_t size, s32 useVfpuCopy) {
+    /* Foreground cache copies may use DMA. Audio reads retain CPU fallback so
+     * they never occupy the DMA channel needed by the PCM output ring. */
+    if (useVfpuCopy && !OotPspAudioBackend_NeedsRefillUrgently() && OotPsp_TryDmaAssetCopy(dst, src, size)) {
+        return;
+    }
+
     if (useVfpuCopy) {
         OotPsp_MemcpyVfpu(dst, src, size);
     } else {
