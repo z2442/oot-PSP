@@ -580,7 +580,7 @@ static OotPspAssetWindowCache* OotPsp_GetHotAssetCacheCandidate(const OotPspExte
 }
 
 static s32 OotPsp_ReadPackedOpenFileRange(SceUID fd, const char* path, size_t offset, u8* out, size_t size,
-                                          s32 allowAudioYield) {
+                                          size_t maxReadChunk, s32 allowAudioYield) {
     size_t remaining = size;
     size_t readOffset = offset;
 
@@ -603,7 +603,7 @@ static s32 OotPsp_ReadPackedOpenFileRange(SceUID fd, const char* path, size_t of
             sOotPspPackedAssetPositionKnown = true;
         }
 
-        chunk = remaining > OOT_PSP_ASSET_READ_CHUNK_SIZE ? OOT_PSP_ASSET_READ_CHUNK_SIZE : (int)remaining;
+        chunk = remaining > maxReadChunk ? (int)maxReadChunk : (int)remaining;
         read = OotPsp_ReadAssetChunk(fd, out, chunk, path, readOffset);
 
         if (read <= 0) {
@@ -728,7 +728,7 @@ static OotPspPackedAssetCacheBlock* OotPsp_LoadPackedCacheBlock(SceUID fd, const
     block->blockIndex = blockIndex;
     block->dataSize = 0;
     if (!OotPsp_ReadPackedOpenFileRange(fd, path, blockStart, OotPsp_PackedCacheBlockData(slot), readSize,
-                                        false)) {
+                                        OOT_PSP_PACKED_CACHE_BLOCK_SIZE, false)) {
         block->loading = false;
         block->valid = false;
         return NULL;
@@ -873,7 +873,10 @@ static s32 OotPsp_ReadPackedAssetFileRange(const OotPspExternalAsset* asset, siz
         return true;
     }
 
-    return OotPsp_ReadPackedOpenFileRange(fd, path, packedOffset, out, size, allowAudioYield);
+    return OotPsp_ReadPackedOpenFileRange(fd, path, packedOffset, out, size,
+                                          allowAudioYield ? OOT_PSP_ASSET_READ_CHUNK_SIZE
+                                                          : OOT_PSP_PACKED_CACHE_BLOCK_SIZE,
+                                          allowAudioYield);
 }
 
 static size_t OotPsp_GetAssetCacheSizeLimit(const OotPspExternalAsset* asset) {

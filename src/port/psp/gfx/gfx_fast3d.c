@@ -167,8 +167,12 @@ struct ColorCombiner {
     bool texture_blend;
 } __attribute__((packed, aligned(4)));
 
-static struct ColorCombiner color_combiner;
-static bool color_combiner_valid;
+#define COLOR_COMBINER_CACHE_COUNT 64
+typedef struct ColorCombinerCacheEntry {
+    struct ColorCombiner combiner;
+    bool valid;
+} ColorCombinerCacheEntry;
+static ColorCombinerCacheEntry color_combiner_cache[COLOR_COMBINER_CACHE_COUNT];
 
 struct TriPipelineState {
     struct ColorCombiner *comb;
@@ -1200,6 +1204,11 @@ uint32_t clip_to_frustum( struct LoadedVertex * v0, struct LoadedVertex * v1, ui
 
 static struct LoadedVertex temp_a[12];
 static struct LoadedVertex temp_b[12];
+/* The display-list renderer is single-threaded and the clipper already uses
+ * the static temp_a/temp_b pair. Keep retessellation scratch beside it so the
+ * common, unclipped triangle path does not reserve over 1 KiB of stack. */
+static struct LoadedVertex sClippedVertices[21] __attribute__((aligned(16)));
+static struct LoadedVertex* sClippedVertexPtrs[21];
 
 void gfx_clip_single_vert( struct LoadedVertex *p_p_vertices, size_t *p_num_vertices, struct LoadedVertex *v_arr[3])
 {
@@ -1448,15 +1457,20 @@ static inline struct RGBA gfx_get_vertex_rgba(const struct ColorCombiner *comb, 
 }
 
 static struct ColorCombiner *gfx_lookup_or_create_color_combiner(uint32_t cc_id) {
-    if (color_combiner_valid && color_combiner.cc_id == cc_id) {
-        return &color_combiner;
+    size_t cacheIndex = (cc_id ^ (cc_id >> 12) ^ (cc_id >> 24)) & (COLOR_COMBINER_CACHE_COUNT - 1);
+    ColorCombinerCacheEntry* entry = &color_combiner_cache[cacheIndex];
+
+    if (entry->valid && entry->combiner.cc_id == cc_id) {
+        return &entry->combiner;
     }
 
-    /* Buffered vertices still reference the current combiner state. */
+    /* Buffered vertices can still reference this cache slot. Flush before a
+     * collision replaces it; unlike the old linear pool this cache cannot
+     * overflow when a scene uses more than 64 distinct combine modes. */
     gfx_flush();
-    gfx_generate_cc(&color_combiner, cc_id);
-    color_combiner_valid = true;
-    return &color_combiner;
+    gfx_generate_cc(&entry->combiner, cc_id);
+    entry->valid = true;
+    return &entry->combiner;
 }
 
 extern int gfx_vram_space_available(void);
@@ -2692,6 +2706,8 @@ static bool gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
     float proj_vec[4] __attribute__((aligned(16)));
 #endif
     const float hudAnchorOffsetNdc = sHudViewportFullscreen ? sHudAnchorOffsetNdc : 0.0f;
+    const uint32_t geometryMode = rsp.geometry_mode;
+    const uint8_t directionalLightCount = rsp.current_num_lights - 1;
 #if defined(TARGET_PSP)
     const void* normalizedSource;
 
@@ -2718,6 +2734,18 @@ static bool gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
         gfx_transform_vertices_vfpu(&rsp.loaded_vertices[dest_index], vertices, n_vertices, &matrices);
     }
 #endif
+    if ((geometryMode & G_LIGHTING) && rsp.lights_changed) {
+        static const Light_t lookat_x = {{0, 0, 0}, 0, {0, 0, 0}, 0, {127, 0, 0}, 0};
+        static const Light_t lookat_y = {{0, 0, 0}, 0, {0, 0, 0}, 0, {0, 127, 0}, 0};
+
+        for (int i = 0; i < directionalLightCount; i++) {
+            calculate_normal_dir(&rsp.current_lights[i], rsp.current_lights_coeffs[i]);
+        }
+        calculate_normal_dir(&lookat_x, rsp.current_lookat_coeffs[0]);
+        calculate_normal_dir(&lookat_y, rsp.current_lookat_coeffs[1]);
+        rsp.lights_changed = false;
+    }
+
     for (size_t i = 0; i < n_vertices; i++, dest_index++) {
         const Vtx_t *v = &vertices[i].v;
         const Vtx_tn *vn = &vertices[i].n;
@@ -2750,28 +2778,17 @@ static bool gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
         short U = v->tc[0] * rsp.texture_scaling_factor.s >> 16;
         short V = v->tc[1] * rsp.texture_scaling_factor.t >> 16;
         
-        if (rsp.geometry_mode & G_LIGHTING) {
-            if (rsp.lights_changed) {
-                for (int i = 0; i < rsp.current_num_lights - 1; i++) {
-                    calculate_normal_dir(&rsp.current_lights[i], rsp.current_lights_coeffs[i]);
-                }
-                static const Light_t lookat_x = {{0, 0, 0}, 0, {0, 0, 0}, 0, {127, 0, 0}, 0};
-                static const Light_t lookat_y = {{0, 0, 0}, 0, {0, 0, 0}, 0, {0, 127, 0}, 0};
-                calculate_normal_dir(&lookat_x, rsp.current_lookat_coeffs[0]);
-                calculate_normal_dir(&lookat_y, rsp.current_lookat_coeffs[1]);
-                rsp.lights_changed = false;
-            }
+        if (geometryMode & G_LIGHTING) {
+            unsigned int r = rsp.current_lights[directionalLightCount].col[0];
+            unsigned int g = rsp.current_lights[directionalLightCount].col[1];
+            unsigned int b = rsp.current_lights[directionalLightCount].col[2];
             
-            unsigned int r = rsp.current_lights[rsp.current_num_lights - 1].col[0];
-            unsigned int g = rsp.current_lights[rsp.current_num_lights - 1].col[1];
-            unsigned int b = rsp.current_lights[rsp.current_num_lights - 1].col[2];
-            
-            for (int i = 0; i < rsp.current_num_lights - 1; i++) {
+            for (int i = 0; i < directionalLightCount; i++) {
                 float intensity = 0;
                 intensity += vn->n[0] * rsp.current_lights_coeffs[i][0];
                 intensity += vn->n[1] * rsp.current_lights_coeffs[i][1];
                 intensity += vn->n[2] * rsp.current_lights_coeffs[i][2];
-                intensity /= 127.0f;
+                intensity *= (1.0f / 127.0f);
                 if (intensity > 0.0f) {
                     r += intensity * rsp.current_lights[i].col[0];
                     g += intensity * rsp.current_lights[i].col[1];
@@ -2783,7 +2800,7 @@ static bool gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
             d->color.g = g > 255 ? 255 : g;
             d->color.b = b > 255 ? 255 : b;
             
-            if (rsp.geometry_mode & G_TEXTURE_GEN) {
+            if (geometryMode & G_TEXTURE_GEN) {
                 float dotx = 0, doty = 0;
                 dotx += vn->n[0] * rsp.current_lookat_coeffs[0][0];
                 dotx += vn->n[1] * rsp.current_lookat_coeffs[0][1];
@@ -2792,8 +2809,8 @@ static bool gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
                 doty += vn->n[1] * rsp.current_lookat_coeffs[1][1];
                 doty += vn->n[2] * rsp.current_lookat_coeffs[1][2];
                 
-                U = (int32_t)((dotx / 127.0f + 1.0f) / 4.0f * rsp.texture_scaling_factor.s);
-                V = (int32_t)((doty / 127.0f + 1.0f) / 4.0f * rsp.texture_scaling_factor.t);
+                U = (int32_t)((dotx * (1.0f / 127.0f) + 1.0f) * 0.25f * rsp.texture_scaling_factor.s);
+                V = (int32_t)((doty * (1.0f / 127.0f) + 1.0f) * 0.25f * rsp.texture_scaling_factor.t);
             }
         } else {
             d->color.r = v->cn[0];
@@ -2903,8 +2920,26 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
         // The whole triangle lies outside the visible area
         return;
     }
-#if !defined(TARGET_PSP)
     const uint32_t cull_mode = rsp.geometry_mode & G_CULL_BOTH;
+#if defined(TARGET_PSP)
+    /* Fully visible vertices have positive W, so the sign of this homogeneous
+     * cross product matches the perspective-divided screen-space triangle.
+     * Reject backfaces before color/UV generation without three divides. Keep
+     * partially clipped triangles on the conservative path below. */
+    if ((cull_mode != 0) && (clip_flags == 0)) {
+        const float dx1 = v1->_x * v2->_w - v2->_x * v1->_w;
+        const float dy1 = v1->_y * v2->_w - v2->_y * v1->_w;
+        const float dx2 = v3->_x * v2->_w - v2->_x * v3->_w;
+        const float dy2 = v3->_y * v2->_w - v2->_y * v3->_w;
+        const float cross = dx1 * dy2 - dy1 * dx2;
+
+        if (((cull_mode == G_CULL_FRONT) && (cross <= 0.0f)) ||
+            ((cull_mode == G_CULL_BACK) && (cross >= 0.0f)) ||
+            (cull_mode == G_CULL_BOTH)) {
+            return;
+        }
+    }
+#else
     if (cull_mode != 0) {
         const float inv_w1 = 1.0f / v1->_w;
         const float inv_w2 = 1.0f / v2->_w;
@@ -2939,11 +2974,8 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
     struct LoadedVertex **clipped_vertices = v_arr;
     size_t clipped_vertices_num = 3;
     /* A triangle clipped against six planes can become a nine-vertex polygon. */
-    struct LoadedVertex _clipped_vertices[21];
-    struct LoadedVertex *ptr_clipped_vertices[21];
-
     if (clip_flags & CLIP_TEST_FLAGS) {
-        gfx_clip_single_vert(_clipped_vertices, &clipped_vertices_num, v_arr);
+        gfx_clip_single_vert(sClippedVertices, &clipped_vertices_num, v_arr);
 
         if (!clipped_vertices_num) {
             /* No idea if this is possible */
@@ -2951,9 +2983,9 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
         }
         size_t i;
         for (i = 0; i < clipped_vertices_num; i++) {
-            ptr_clipped_vertices[i] = &_clipped_vertices[i];
+            sClippedVertexPtrs[i] = &sClippedVertices[i];
         }
-        clipped_vertices = ptr_clipped_vertices;
+        clipped_vertices = sClippedVertexPtrs;
     }
 
     gfx_prepare_tri_pipeline_state();

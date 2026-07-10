@@ -135,10 +135,17 @@ static void swizzle_fast(unsigned char *out, const unsigned char *in, unsigned i
         for (blockx = 0; blockx < width_blocks; ++blockx) {
             const unsigned int *src = (unsigned int *) xsrc;
             for (j = 0; j < 8; ++j) {
-                *(dst++) = *(src++);
-                *(dst++) = *(src++);
-                *(dst++) = *(src++);
-                *(dst++) = *(src++);
+                __asm__ volatile(
+                    ".set push\n"
+                    ".set noreorder\n"
+                    "ulv.q C000, 0(%[src])\n"
+                    "sv.q C000, 0(%[dst])\n"
+                    ".set pop\n"
+                    :
+                    : [src] "r"(src), [dst] "r"(dst)
+                    : "memory");
+                dst += 4;
+                src += 4;
                 src += src_pitch;
             }
             xsrc += 16;
