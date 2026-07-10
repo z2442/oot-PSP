@@ -281,6 +281,8 @@ static uint8_t shader_program_pool_size;
 static struct ShaderProgram *cur_shader = NULL;
 static struct SamplerState tmu_state[2];
 static int active_texture_tile = -1;
+static struct SamplerState sAppliedSamplerState;
+static bool sAppliedSamplerStateValid;
 static bool gl_blend = false;
 static void *sDrawBuffer;
 static void *sDisplayBuffer;
@@ -967,8 +969,21 @@ static inline int nextpow2(int v) {
 }
 
 static inline void gfx_scegu_apply_tmu_state(const int tile) {
-    sceGuTexFilter(tmu_state[tile].min_filter, tmu_state[tile].mag_filter);
-    sceGuTexWrap(tmu_state[tile].wrap_s, tmu_state[tile].wrap_t);
+    const struct SamplerState* desired = &tmu_state[tile];
+
+    if (!sAppliedSamplerStateValid || (desired->min_filter != sAppliedSamplerState.min_filter) ||
+        (desired->mag_filter != sAppliedSamplerState.mag_filter)) {
+        sceGuTexFilter(desired->min_filter, desired->mag_filter);
+        sAppliedSamplerState.min_filter = desired->min_filter;
+        sAppliedSamplerState.mag_filter = desired->mag_filter;
+    }
+    if (!sAppliedSamplerStateValid || (desired->wrap_s != sAppliedSamplerState.wrap_s) ||
+        (desired->wrap_t != sAppliedSamplerState.wrap_t)) {
+        sceGuTexWrap(desired->wrap_s, desired->wrap_t);
+        sAppliedSamplerState.wrap_s = desired->wrap_s;
+        sAppliedSamplerState.wrap_t = desired->wrap_t;
+    }
+    sAppliedSamplerStateValid = true;
 }
 
 static void gfx_scegu_set_sampler_parameters(const int tile, const bool linear_filter, const uint32_t cms,
@@ -1001,8 +1016,8 @@ static void gfx_scegu_select_texture(int tile, uint32_t texture_id) {
     gfx_scegu_apply_tmu_state(tile);
 }
 
-/* Used for rescaling textures ROUGHLY into pow2 dims */
-static unsigned int __attribute__((aligned(16))) scaled[256 * 256 * sizeof(unsigned int)]; /* 16kb */
+/* Used for rescaling textures into power-of-two dimensions (256 KiB at 32 bpp). */
+static unsigned int __attribute__((aligned(16))) scaled[256 * 256];
 static void gfx_scegu_resample_32bit(const unsigned int *in, int inwidth, int inheight, unsigned int *out, int outwidth, int outheight) {
     int i, j;
     const unsigned int *inrow;
@@ -1208,6 +1223,7 @@ void gfx_scegu_draw_triangles_2d(float buf_vbo[], UNUSED size_t buf_vbo_len, UNU
 static void gfx_scegu_init(void) {
     sceGuInit();
     active_texture_tile = -1;
+    sAppliedSamplerStateValid = false;
     memset(tmu_state, 0, sizeof(tmu_state));
 
     void *fbp0 = getStaticVramBuffer(BUF_WIDTH, SCR_HEIGHT, GU_PSM_5650);
@@ -1271,6 +1287,13 @@ static void gfx_scegu_start_frame(void) {
     bool hasHomeMenuBackground;
     bool hasPauseBackground;
     bool hasStaticBackground;
+
+    /* GU state can be changed by intraFont and other callback rendering between
+     * game frames. Revalidate once per frame, then suppress redundant texture
+     * image/filter/wrap commands inside the frame. */
+    texman_invalidate_binding();
+    active_texture_tile = -1;
+    sAppliedSamplerStateValid = false;
 
     if (sHomeMenuBgCaptureRequested) {
         gfx_scegu_copy_framebuffer_from_vram(sHomeMenuBgBuffer, sDisplayBuffer);

@@ -26,6 +26,7 @@
 #define OOT_PSP_PACKED_CACHE_ALLOC_STEP     (1024 * 1024)
 #define OOT_PSP_PACKED_CACHE_MAX_BLOCK_COUNT \
     (OOT_PSP_PACKED_CACHE_TARGET_SIZE / OOT_PSP_PACKED_CACHE_BLOCK_SIZE)
+#define OOT_PSP_PACKED_CACHE_LOOKUP_COUNT     256
 #define OOT_PSP_NATIVE_TEXTURE_RANGE_CACHE_COUNT 8
 #define OOT_PSP_NATIVE_ASSET_RANGE_CACHE_COUNT   8
 #define OOT_PSP_NATIVE_BYTE_RANGE_PAGE_SHIFT     10
@@ -119,6 +120,7 @@ static u8* sOotPspPackedCacheData;
 static size_t sOotPspPackedCacheBlockCount;
 static s32 sOotPspPackedCacheInitTried = false;
 static OotPspPackedAssetCacheBlock sOotPspPackedCacheBlocks[OOT_PSP_PACKED_CACHE_MAX_BLOCK_COUNT];
+static OotPspPackedAssetCacheBlock* sOotPspPackedCacheLookup[OOT_PSP_PACKED_CACHE_LOOKUP_COUNT];
 static OotPspLoadedAssetRange sOotPspLoadedAssetRanges[OOT_PSP_LOADED_ASSET_RANGE_COUNT];
 static OotPspLoadedAssetSerialRange sOotPspLoadedAssetSerialRanges[OOT_PSP_LOADED_ASSET_RANGE_COUNT];
 static const OotPspLoadedAssetRange* sOotPspNativeTextureRangeCache[OOT_PSP_NATIVE_TEXTURE_RANGE_CACHE_COUNT];
@@ -136,6 +138,7 @@ static s32 sOotPspLoadedAssetSerialRangeIndexComplete = true;
 static size_t sOotPspNativeTextureRangeCacheNext;
 static size_t sOotPspNativeAssetRangeCacheNext;
 static size_t sOotPspLoadedAssetRangeNext;
+static size_t sOotPspLoadedAssetRangeHighWater;
 static u32 sOotPspLoadedAssetSerial = 1;
 static u32 sOotPspAssetCacheClock;
 static volatile s32 sOotPspForegroundAssetReadWaiters;
@@ -315,6 +318,7 @@ const char* OotPsp_ResolveRootPath(const char* path, char* buffer, size_t buffer
 
 static void OotPsp_ClearPackedAssetCache(void) {
     memset(sOotPspPackedCacheBlocks, 0, sizeof(sOotPspPackedCacheBlocks));
+    memset(sOotPspPackedCacheLookup, 0, sizeof(sOotPspPackedCacheLookup));
 }
 
 static void OotPsp_InitPackedAssetCache(void) {
@@ -628,13 +632,21 @@ static u8* OotPsp_PackedCacheBlockData(size_t slot) {
 }
 
 static OotPspPackedAssetCacheBlock* OotPsp_FindPackedCacheBlock(size_t blockIndex) {
+    const size_t lookupIndex = blockIndex & (OOT_PSP_PACKED_CACHE_LOOKUP_COUNT - 1);
+    OotPspPackedAssetCacheBlock* block = sOotPspPackedCacheLookup[lookupIndex];
     size_t i;
 
+    if ((block != NULL) && block->valid && !block->loading && (block->blockIndex == blockIndex)) {
+        block->lastUsed = OotPsp_NextAssetCacheClock();
+        return block;
+    }
+
     for (i = 0; i < sOotPspPackedCacheBlockCount; i++) {
-        OotPspPackedAssetCacheBlock* block = &sOotPspPackedCacheBlocks[i];
+        block = &sOotPspPackedCacheBlocks[i];
 
         if (block->valid && !block->loading && (block->blockIndex == blockIndex)) {
             block->lastUsed = OotPsp_NextAssetCacheClock();
+            sOotPspPackedCacheLookup[lookupIndex] = block;
             return block;
         }
     }
@@ -698,6 +710,13 @@ static OotPspPackedAssetCacheBlock* OotPsp_LoadPackedCacheBlock(SceUID fd, const
     }
 
     slot = (size_t)(block - sOotPspPackedCacheBlocks);
+    if (block->valid) {
+        size_t oldLookupIndex = block->blockIndex & (OOT_PSP_PACKED_CACHE_LOOKUP_COUNT - 1);
+
+        if (sOotPspPackedCacheLookup[oldLookupIndex] == block) {
+            sOotPspPackedCacheLookup[oldLookupIndex] = NULL;
+        }
+    }
     /*
      * Foreground reads can release the asset-loader semaphore between I/O
      * chunks so the audio thread can refill. Reserve this cache slot before
@@ -719,6 +738,7 @@ static OotPspPackedAssetCacheBlock* OotPsp_LoadPackedCacheBlock(SceUID fd, const
     block->lastUsed = OotPsp_NextAssetCacheClock();
     block->loading = false;
     block->valid = true;
+    sOotPspPackedCacheLookup[blockIndex & (OOT_PSP_PACKED_CACHE_LOOKUP_COUNT - 1)] = block;
     return block;
 }
 
@@ -1325,7 +1345,7 @@ static void OotPsp_ClearLoadedAssetRange(void* ram, size_t size) {
 
     cleared = OotPsp_ClearLoadedAssetSerialRanges(ramStart, ramEnd);
 
-    for (i = 0; i < OOT_PSP_LOADED_ASSET_RANGE_COUNT; i++) {
+    for (i = 0; i < sOotPspLoadedAssetRangeHighWater; i++) {
         OotPspLoadedAssetRange* range = &sOotPspLoadedAssetRanges[i];
 
         if (OotPsp_RangesOverlap(range->ramStart, range->ramEnd, ramStart, ramEnd)) {
@@ -1357,20 +1377,30 @@ static void OotPsp_StoreLoadedAssetRange(void* ram, size_t size, uintptr_t asset
     }
 
     for (i = 0; i < OOT_PSP_LOADED_ASSET_RANGE_COUNT; i++) {
-        if (sOotPspLoadedAssetRanges[i].ramStart == sOotPspLoadedAssetRanges[i].ramEnd) {
-            slot = i;
+        size_t candidate = sOotPspLoadedAssetRangeNext + i;
+
+        if (candidate >= OOT_PSP_LOADED_ASSET_RANGE_COUNT) {
+            candidate -= OOT_PSP_LOADED_ASSET_RANGE_COUNT;
+        }
+        if (sOotPspLoadedAssetRanges[candidate].ramStart == sOotPspLoadedAssetRanges[candidate].ramEnd) {
+            slot = candidate;
             break;
         }
     }
 
     if (slot == OOT_PSP_LOADED_ASSET_RANGE_COUNT) {
         slot = sOotPspLoadedAssetRangeNext;
-        sOotPspLoadedAssetRangeNext = (sOotPspLoadedAssetRangeNext + 1) % OOT_PSP_LOADED_ASSET_RANGE_COUNT;
+    }
+    sOotPspLoadedAssetRangeNext = (slot + 1) % OOT_PSP_LOADED_ASSET_RANGE_COUNT;
+    if (slot >= sOotPspLoadedAssetRangeHighWater) {
+        sOotPspLoadedAssetRangeHighWater = slot + 1;
     }
 
     range = &sOotPspLoadedAssetRanges[slot];
-    OotPsp_ForgetNativeTextureRangeCache(range);
-    OotPsp_ClearNativeByteRangeCache();
+    if (range->serial != 0) {
+        OotPsp_ForgetNativeTextureRangeCache(range);
+        OotPsp_ClearNativeByteRangeCache();
+    }
     range->ramStart = ramStart;
     range->ramEnd = ramEnd;
     range->assetOffsetStart = assetOffsetStart;
@@ -1570,7 +1600,9 @@ static void OotPsp_RegisterLoadedAssetRanges(void* ram, size_t size, uintptr_t v
         return;
     }
 
-    OotPsp_ClearLoadedAssetRange(ram, size);
+    /* OotPsp_AssetReadLocked clears the entire destination before doing any
+     * I/O. Avoid repeating the 4K-entry overlap scan for every successful
+     * cache hit or packed-file chunk registered here. */
     OotPsp_StoreLoadedAssetRange((void*)ramStart, size, vromStart, asset->flags & ~OOT_PSP_EXTERNAL_ASSET_TEXTURE_WORDS,
                                  serial);
     OotPsp_StoreLoadedAssetSerialRange(ramStart, ramEnd, serial,
@@ -1760,7 +1792,7 @@ s32 OotPsp_GetLoadedExternalAssetRangeFlags(const void* ptr, size_t size, u32* f
         return false;
     }
 
-    for (i = 0; i < OOT_PSP_LOADED_ASSET_RANGE_COUNT; i++) {
+    for (i = 0; i < sOotPspLoadedAssetRangeHighWater; i++) {
         const OotPspLoadedAssetRange* range = &sOotPspLoadedAssetRanges[i];
 
         if ((range->serial != 0) && OotPsp_RangeContains(range->ramStart, range->ramEnd, ramStart, ramEnd)) {
@@ -1796,7 +1828,7 @@ s32 OotPsp_IsNativeExternalTextureRange(const void* ptr, size_t size) {
         return false;
     }
 
-    for (i = 0; i < OOT_PSP_LOADED_ASSET_RANGE_COUNT; i++) {
+    for (i = 0; i < sOotPspLoadedAssetRangeHighWater; i++) {
         const OotPspLoadedAssetRange* range = &sOotPspLoadedAssetRanges[i];
 
         if (((range->flags & (OOT_PSP_EXTERNAL_ASSET_NATIVE | OOT_PSP_EXTERNAL_ASSET_TEXTURE_WORDS)) ==
@@ -1838,7 +1870,7 @@ u32 OotPsp_GetExternalAssetRangeSerial(const void* ptr, size_t size) {
     if ((serial == 0) && !sOotPspLoadedAssetSerialRangeIndexComplete) {
         size_t i;
 
-        for (i = 0; i < OOT_PSP_LOADED_ASSET_RANGE_COUNT; i++) {
+        for (i = 0; i < sOotPspLoadedAssetRangeHighWater; i++) {
             const OotPspLoadedAssetRange* range = &sOotPspLoadedAssetRanges[i];
 
             if ((range->serial != 0) &&
@@ -1882,7 +1914,7 @@ s32 OotPsp_GetNativeExternalTextureMappingRange(const void* ptr, uintptr_t* ramS
 
     /* Prefer a texture subrange because its u64 byte-swap phase can differ
      * from the enclosing asset when the texture starts at an unaligned offset. */
-    for (i = 0; i < OOT_PSP_LOADED_ASSET_RANGE_COUNT; i++) {
+    for (i = 0; i < sOotPspLoadedAssetRangeHighWater; i++) {
         const OotPspLoadedAssetRange* range = &sOotPspLoadedAssetRanges[i];
 
         if (!OotPsp_IsNativeLoadedTextureByteRange(range, ram)) {
@@ -1907,7 +1939,7 @@ s32 OotPsp_GetNativeExternalTextureMappingRange(const void* ptr, uintptr_t* ramS
         }
     }
 
-    for (i = 0; i < OOT_PSP_LOADED_ASSET_RANGE_COUNT; i++) {
+    for (i = 0; i < sOotPspLoadedAssetRangeHighWater; i++) {
         const OotPspLoadedAssetRange* range = &sOotPspLoadedAssetRanges[i];
 
         if (!OotPsp_IsNativeLoadedAssetByteRange(range, ram)) {
@@ -1952,7 +1984,7 @@ s32 OotPsp_GetNativeExternalTextureRangeStart(const void* ptr, size_t size, uint
         }
     }
 
-    for (i = 0; i < OOT_PSP_LOADED_ASSET_RANGE_COUNT; i++) {
+    for (i = 0; i < sOotPspLoadedAssetRangeHighWater; i++) {
         const OotPspLoadedAssetRange* range = &sOotPspLoadedAssetRanges[i];
 
         if (((range->flags & (OOT_PSP_EXTERNAL_ASSET_NATIVE | OOT_PSP_EXTERNAL_ASSET_TEXTURE_WORDS)) ==
@@ -1975,7 +2007,7 @@ s32 OotPsp_GetNativeExternalTextureRangeStart(const void* ptr, size_t size, uint
         }
     }
 
-    for (i = 0; i < OOT_PSP_LOADED_ASSET_RANGE_COUNT; i++) {
+    for (i = 0; i < sOotPspLoadedAssetRangeHighWater; i++) {
         const OotPspLoadedAssetRange* range = &sOotPspLoadedAssetRanges[i];
 
         if (OotPsp_IsNativeLoadedAssetByteRange(range, ramStart) &&
@@ -2022,7 +2054,7 @@ s32 OotPsp_MapNativeExternalTextureByte(const void* ptr, const void** mapped) {
         }
     }
 
-    for (i = 0; i < OOT_PSP_LOADED_ASSET_RANGE_COUNT; i++) {
+    for (i = 0; i < sOotPspLoadedAssetRangeHighWater; i++) {
         const OotPspLoadedAssetRange* range = &sOotPspLoadedAssetRanges[i];
 
         if (!OotPsp_IsNativeLoadedTextureByteRange(range, ram)) {
@@ -2042,7 +2074,7 @@ s32 OotPsp_MapNativeExternalTextureByte(const void* ptr, const void** mapped) {
         }
     }
 
-    for (i = 0; i < OOT_PSP_LOADED_ASSET_RANGE_COUNT; i++) {
+    for (i = 0; i < sOotPspLoadedAssetRangeHighWater; i++) {
         const OotPspLoadedAssetRange* range = &sOotPspLoadedAssetRanges[i];
 
         /*

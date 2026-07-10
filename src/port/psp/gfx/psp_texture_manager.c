@@ -25,6 +25,7 @@ static void *psp_tex_buffer_start = NULL;
 static void *psp_tex_buffer_max = NULL;
 static unsigned int psp_tex_number = 0;
 unsigned int psp_tex_bound = 0;
+static unsigned int sPspTexGuBound = 0;
 static unsigned int sIntensityClut[256] __attribute__((aligned(16)));
 static int sIntensityClutInited = 0;
 
@@ -154,6 +155,7 @@ void texman_reset(void *buf, unsigned int size) {
     memset(textures, 0, sizeof(textures));
     psp_tex_number = 0;
     psp_tex_bound = 0;
+    sPspTexGuBound = 0;
     psp_tex_buffer = psp_tex_buffer_start = buf;
     psp_tex_buffer_max = buf + size;
 #ifdef DEBUG
@@ -167,6 +169,7 @@ void texman_clear(void) {
     memset(textures, 0, sizeof(textures));
     psp_tex_number = 0;
     psp_tex_bound = 0;
+    sPspTexGuBound = 0;
     psp_tex_buffer = psp_tex_buffer_start;
 #ifdef DEBUG
     char msg[64];
@@ -349,6 +352,10 @@ void texman_bind_tex(unsigned int num) {
     }
 
     current = &textures[num];
+    if (sPspTexGuBound == num) {
+        psp_tex_bound = num;
+        return;
+    }
 #ifdef DEBUG
     /* Note this will SPAM if you enable */
     // if (psp_tex_bound != num)
@@ -363,6 +370,11 @@ void texman_bind_tex(unsigned int num) {
     sceGuTexMode(current->type, 0, 0, current->swizzled);
     sceGuTexImage(0, current->width, current->height, current->width, current->location);
     psp_tex_bound = num;
+    sPspTexGuBound = num;
+}
+
+void texman_invalidate_binding(void) {
+    sPspTexGuBound = 0;
 }
 
 unsigned int texman_get_bound(void) {
