@@ -111,74 +111,7 @@ printf("%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n", shader_id,
 */
 
 // clang-format off
-static uint32_t shader_ids[27] =
-{
-69       ,
-512      ,
-909      ,
-1361     ,
-2560     ,
-17059909 ,
-17062400 ,
-17305729 ,
-18092101 ,
-18874437 ,
-18874880 ,
-18875277 ,
-18876928 ,
-27263045 ,
-27265536 ,
-27265647 ,
-52428869 ,
-52429312 ,
-52431360 ,
-84168773 ,
-85983744 ,
-94374400 ,
-127928832,
-153092165,
-153092608,
-153093005,
-153094656
-};
-
-static uint32_t shader_remap[27*2] = {
-69       ,69       ,
-512      ,512      ,
-909      ,909      ,
-1361     ,1361     ,
-2560     ,2560     ,
-17059909 ,17059909 ,
-17062400 ,17062400 ,
-17305729 ,17305729 ,
-18092101 ,18092101 ,
-18874437 ,18874437 ,
-18874880 ,18874880 ,
-18875277 ,18875277 ,
-18876928 ,18876928 ,
-27263045 ,27263045 ,
-27265536 ,27265536 ,
-27265647 ,27265647 ,
-52428869 ,52428869 ,
-52429312 ,52429312 ,
-52431360 ,52431360 ,
-84168773 ,84168773 ,
-85983744 ,85983744 ,
-94374400 ,94374400 ,
-127928832,127928832,
-153092165,69,
-153092608,69,
-153093005,69,
-153094656,69
-};
 // clang-format on
-
-static uint32_t shader_broken[27] = {
-    153092165, // Noise
-    153092608, // Noise
-    153093005, // Noise
-    153094656  // Noise
-};
 
 unsigned int __attribute__((aligned(64))) list[262144 * 2];
 
@@ -279,6 +212,7 @@ typedef struct VertexColor {
 static struct ShaderProgram shader_program_pool[64];
 static uint8_t shader_program_pool_size;
 static struct ShaderProgram *cur_shader = NULL;
+static struct ShaderProgram *sAppliedShader = NULL;
 static struct SamplerState tmu_state[2];
 static int active_texture_tile = -1;
 static struct SamplerState sAppliedSamplerState;
@@ -718,32 +652,28 @@ static void gfx_scegu_render_controller_mapping(int selectedIndex, const char* s
     gfx_scegu_draw_fallback_text_centered(SCR_WIDTH / 2, 158, "Back", 4, gfx_scegu_rgba(218, 224, 218, 255));
 }
 
-static inline uint32_t get_shader_index(uint32_t id) {
-    size_t i;
-    for (i = 0; i < 27; i++) {
-        if (shader_ids[i] == id) {
-            return i;
-        }
-    }
-    char msg[32];
-    sprintf(msg, "ERROR! Shader not known %lu\n", (unsigned long)id);
-    sceIoWrite(2, msg, strlen(msg));
-    return 0;
-}
-
 static inline uint32_t get_shader_remap(uint32_t id) {
-    size_t index = get_shader_index(id);
-    return shader_remap[index * 2 + 1];
+    switch (id) {
+        case 153092165:
+        case 153092608:
+        case 153093005:
+        case 153094656:
+            return 69;
+        default:
+            return id;
+    }
 }
 
 static inline bool is_shader_enabled(uint32_t id) {
-    size_t i;
-    for (i = 0; i < 27; i++) {
-        if (shader_broken[i] == id) {
+    switch (id) {
+        case 153092165:
+        case 153092608:
+        case 153093005:
+        case 153094656:
             return false;
-        }
+        default:
+            return true;
     }
-    return true;
 }
 
 static struct ShaderProgram *get_shader_from_id(uint32_t id) {
@@ -822,6 +752,10 @@ static void gfx_scegu_apply_shader(struct ShaderProgram *prg) {
     if (prg == NULL) {
         return;
     }
+    if (sAppliedShader == prg) {
+        prg->enabled = true;
+        return;
+    }
 
     if (use_texture) {
         sceGuEnable(GU_TEXTURE_2D);
@@ -886,12 +820,14 @@ static void gfx_scegu_apply_shader(struct ShaderProgram *prg) {
     }
 
     prg->enabled = true;
+    sAppliedShader = prg;
 }
 
 static void gfx_scegu_unload_shader(struct ShaderProgram *old_prg) {
     if (cur_shader && (cur_shader == old_prg || !old_prg)) {
         cur_shader->enabled = false;
         cur_shader = NULL;
+        sAppliedShader = NULL;
     }
 }
 
@@ -1094,7 +1030,7 @@ static void gfx_scegu_upload_texture(const uint8_t *rgba32_buf, int width, int h
         if (type == GU_PSM_8888) {
             gfx_scegu_resample_32bit((const unsigned int *) rgba32_buf, width, height, (void *) scaled, scaled_width, scaled_height);
             texman_upload_swizzle(scaled_width, scaled_height, type, (void *) scaled);
-        } else if (type == GU_PSM_5551) {
+        } else if ((type == GU_PSM_5551) || (type == GU_PSM_4444)) {
             gfx_scegu_resample_16bit((const unsigned short *) rgba32_buf, width, height, (void *) scaled, scaled_width, scaled_height);
             texman_upload_swizzle(scaled_width, scaled_height, type, (void *) scaled);
         } else {
@@ -1223,6 +1159,7 @@ void gfx_scegu_draw_triangles_2d(float buf_vbo[], UNUSED size_t buf_vbo_len, UNU
 static void gfx_scegu_init(void) {
     sceGuInit();
     active_texture_tile = -1;
+    sAppliedShader = NULL;
     sAppliedSamplerStateValid = false;
     memset(tmu_state, 0, sizeof(tmu_state));
 
@@ -1293,6 +1230,7 @@ static void gfx_scegu_start_frame(void) {
      * image/filter/wrap commands inside the frame. */
     texman_invalidate_binding();
     active_texture_tile = -1;
+    sAppliedShader = NULL;
     sAppliedSamplerStateValid = false;
 
     if (sHomeMenuBgCaptureRequested) {

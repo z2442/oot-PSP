@@ -1754,11 +1754,21 @@ void OotPsp_NormalizeRomFile(RomFile* file) {
 }
 
 const OotPspMessageEntry* OotPsp_FindMessageEntry(const OotPspMessageEntry* entries, size_t count, u16 textId) {
-    size_t i;
+    size_t left = 0;
+    size_t right = count;
 
-    for (i = 0; i < count; i++) {
-        if (entries[i].textId == textId) {
-            return &entries[i];
+    /* Generated message tables are ordered by text ID. They contain roughly
+     * two thousand entries, so binary search avoids a noticeable scan when a
+     * textbox or font asset is opened. */
+    while (left < right) {
+        size_t mid = left + ((right - left) / 2);
+
+        if (entries[mid].textId < textId) {
+            left = mid + 1;
+        } else if (entries[mid].textId > textId) {
+            right = mid;
+        } else {
+            return &entries[mid];
         }
     }
 

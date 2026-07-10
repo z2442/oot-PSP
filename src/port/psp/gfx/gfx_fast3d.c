@@ -782,7 +782,7 @@ static inline size_t gfx_gu_texture_bytes_per_pixel(unsigned int type) {
         return 1;
     }
 
-    if (type == GU_PSM_5551) {
+    if ((type == GU_PSM_5551) || (type == GU_PSM_4444)) {
         return 2;
     }
 
@@ -1470,12 +1470,16 @@ static uint32_t gfx_texture_import_height(int tile);
 
 #if defined(TARGET_PSP)
 static unsigned int gfx_texture_cache_upload_type(uint32_t fmt, uint32_t siz) {
-    if (fmt == G_IM_FMT_RGBA && siz == G_IM_SIZ_16b) {
+    if (((fmt == G_IM_FMT_RGBA) && (siz == G_IM_SIZ_16b)) || (fmt == G_IM_FMT_CI)) {
         return GU_PSM_5551;
     }
 
     if (fmt == G_IM_FMT_I && siz == G_IM_SIZ_8b) {
         return GU_PSM_T8;
+    }
+    if (((fmt == G_IM_FMT_IA) && (siz == G_IM_SIZ_8b)) ||
+        ((fmt == G_IM_FMT_I) && (siz == G_IM_SIZ_4b))) {
+        return GU_PSM_4444;
     }
 
     return GU_PSM_8888;
@@ -1561,10 +1565,15 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
             && (*node)->palette_key == palette_key && (*node)->mirror_s == mirror_s && (*node)->mirror_t == mirror_t
 #endif
         ) {
-            gfx_rapi->select_texture(tile, (*node)->texture_id);
+            *n = *node;
             gfx_rapi->set_sampler_parameters(tile, (*node)->linear_filter, (*node)->cms, (*node)->cmt,
                                              (*node)->masks, (*node)->maskt);
-            *n = *node;
+            /* Dynamic sources are uploaded into the existing cache slot, so
+             * select it before texman_upload. Static hits are selected once by
+             * pipeline setup below instead of binding twice. */
+            if (dynamic_source) {
+                gfx_rapi->select_texture(tile, (*node)->texture_id);
+            }
             return !dynamic_source;
         }
         node = &(*node)->next;
@@ -1833,6 +1842,11 @@ static const uint8_t* gfx_texture_row(int tile, uint32_t y, uint32_t fallbackRow
     return rdp.loaded_texture[tile].addr + (size_t)y * stride;
 }
 
+static inline uint16_t gfx_rgba16_to_gu5551(uint16_t color) {
+    return ((color & 0x0001U) << 15) | ((color & 0x003EU) << 9) |
+           ((color & 0x07C0U) >> 1) | ((color & 0xF800U) >> 11);
+}
+
 static void import_texture_rgba16(int tile) {
     uint16_t rgba16_buf[4096] __attribute__ ((aligned(4)));    
     uint32_t width = gfx_texture_import_width(tile);
@@ -1847,11 +1861,7 @@ static void import_texture_rgba16(int tile) {
         for (uint32_t x = 0; x < width; x++) {
             uint32_t i = y * width + x;
             uint16_t col16 = gfx_read_texture_source_be16(row, 2 * x, &swapState);
-            const uint8_t a = col16 & 1;
-            const uint8_t r = (col16 >> 11) & 0x1f;
-            const uint8_t g = (col16 >> 6) & 0x1f;
-            const uint8_t b = (col16 >> 1) & 0x1f;
-            rgba16_buf[i] = (a << 15) | (b << 10) | (g << 5) | (r);
+            rgba16_buf[i] = gfx_rgba16_to_gu5551(col16);
         }
     }
 
@@ -1921,7 +1931,7 @@ static void import_texture_ia4(int tile) {
 }
 
 static void import_texture_ia8(int tile) {
-    uint8_t rgba32_buf[16384]__attribute__ ((aligned(4)));
+    uint16_t rgba16_buf[4096] __attribute__((aligned(4)));
     uint32_t width = gfx_texture_import_width(tile);
     uint32_t height = gfx_texture_import_height(tile);
     uint32_t rowBytes = gfx_texture_row_bytes(width, G_IM_SIZ_8b);
@@ -1934,19 +1944,14 @@ static void import_texture_ia8(int tile) {
         for (uint32_t x = 0; x < width; x++) {
             uint32_t i = y * width + x;
             uint8_t texel = gfx_read_texture_source_u8(row, x, &swapState);
-            uint8_t intensity = texel >> 4;
-            uint8_t alpha = texel & 0xf;
-            uint8_t r = intensity;
-            uint8_t g = intensity;
-            uint8_t b = intensity;
-            rgba32_buf[4*i + 0] = SCALE_4_8(r);
-            rgba32_buf[4*i + 1] = SCALE_4_8(g);
-            rgba32_buf[4*i + 2] = SCALE_4_8(b);
-            rgba32_buf[4*i + 3] = SCALE_4_8(alpha);
+            uint16_t intensity = texel >> 4;
+            uint16_t alpha = texel & 0xF;
+
+            rgba16_buf[i] = (alpha << 12) | (intensity << 8) | (intensity << 4) | intensity;
         }
     }
 
-    gfx_upload_texture(tile, rgba32_buf, width, height, GU_PSM_8888);
+    gfx_upload_texture(tile, (const uint8_t*)rgba16_buf, width, height, GU_PSM_4444);
 }
 
 static void import_texture_ia16(int tile) {
@@ -1978,7 +1983,7 @@ static void import_texture_ia16(int tile) {
 }
 
 static void import_texture_i4(int tile) {
-    uint8_t rgba32_buf[32768];
+    uint16_t rgba16_buf[8192] __attribute__((aligned(4)));
     uint32_t width = gfx_texture_import_width(tile);
     uint32_t height = gfx_texture_import_height(tile);
     uint32_t rowBytes = gfx_texture_row_bytes(width + rdp.loaded_texture[tile].source_nibble_offset, G_IM_SIZ_4b);
@@ -1990,18 +1995,13 @@ static void import_texture_i4(int tile) {
 
         for (uint32_t x = 0; x < width; x++) {
             uint32_t i = y * width + x;
-            uint8_t intensity = gfx_texture_read_4b(tile, x, row, &swapState);
-            uint8_t r = intensity;
-            uint8_t g = intensity;
-            uint8_t b = intensity;
-            rgba32_buf[4*i + 0] = SCALE_4_8(r);
-            rgba32_buf[4*i + 1] = SCALE_4_8(g);
-            rgba32_buf[4*i + 2] = SCALE_4_8(b);
-            rgba32_buf[4*i + 3] = SCALE_4_8(intensity);
+            uint16_t intensity = gfx_texture_read_4b(tile, x, row, &swapState);
+
+            rgba16_buf[i] = (intensity << 12) | (intensity << 8) | (intensity << 4) | intensity;
         }
     }
 
-    gfx_upload_texture(tile, rgba32_buf, width, height, GU_PSM_8888);
+    gfx_upload_texture(tile, (const uint8_t*)rgba16_buf, width, height, GU_PSM_4444);
 }
 
 static void import_texture_i8(int tile) {
@@ -2055,7 +2055,7 @@ static void import_texture_i8(int tile) {
 
 
 static void import_texture_ci4(int tile) {
-    uint8_t rgba32_buf[32768];
+    uint16_t rgba16_buf[8192] __attribute__((aligned(4)));
     uint32_t width = gfx_texture_import_width(tile);
     uint32_t height = gfx_texture_import_height(tile);
     uint32_t rowBytes = gfx_texture_row_bytes(width + rdp.loaded_texture[tile].source_nibble_offset, G_IM_SIZ_4b);
@@ -2074,22 +2074,15 @@ static void import_texture_ci4(int tile) {
             uint32_t i = y * width + x;
             uint8_t idx = gfx_texture_read_4b(tile, x, row, &swapState);
             uint16_t col16 = gfx_read_texture_source_be16(rdp.palette, idx * 2, &paletteSwapState);
-            uint8_t a = col16 & 1;
-            uint8_t r = col16 >> 11;
-            uint8_t g = (col16 >> 6) & 0x1f;
-            uint8_t b = (col16 >> 1) & 0x1f;
-            rgba32_buf[4*i + 0] = SCALE_5_8(r);
-            rgba32_buf[4*i + 1] = SCALE_5_8(g);
-            rgba32_buf[4*i + 2] = SCALE_5_8(b);
-            rgba32_buf[4*i + 3] = a ? 255 : 0;
+            rgba16_buf[i] = gfx_rgba16_to_gu5551(col16);
         }
     }
 
-    gfx_upload_texture(tile, rgba32_buf, width, height, GU_PSM_8888);
+    gfx_upload_texture(tile, (const uint8_t*)rgba16_buf, width, height, GU_PSM_5551);
 }
 
 static void import_texture_ci8(int tile) {
-    uint8_t rgba32_buf[16384];
+    uint16_t rgba16_buf[4096] __attribute__((aligned(4)));
     uint32_t width = gfx_texture_import_width(tile);
     uint32_t height = gfx_texture_import_height(tile);
     uint32_t rowBytes = gfx_texture_row_bytes(width, G_IM_SIZ_8b);
@@ -2108,18 +2101,11 @@ static void import_texture_ci8(int tile) {
             uint32_t i = y * width + x;
             uint8_t idx = gfx_read_texture_source_u8(row, x, &swapState);
             uint16_t col16 = gfx_read_texture_source_be16(rdp.palette, idx * 2, &paletteSwapState);
-            uint8_t a = col16 & 1;
-            uint8_t r = col16 >> 11;
-            uint8_t g = (col16 >> 6) & 0x1f;
-            uint8_t b = (col16 >> 1) & 0x1f;
-            rgba32_buf[4*i + 0] = SCALE_5_8(r);
-            rgba32_buf[4*i + 1] = SCALE_5_8(g);
-            rgba32_buf[4*i + 2] = SCALE_5_8(b);
-            rgba32_buf[4*i + 3] = a ? 255 : 0;
+            rgba16_buf[i] = gfx_rgba16_to_gu5551(col16);
         }
     }
 
-    gfx_upload_texture(tile, rgba32_buf, width, height, GU_PSM_8888);
+    gfx_upload_texture(tile, (const uint8_t*)rgba16_buf, width, height, GU_PSM_5551);
 }
 
 static void import_texture(int tile) {
@@ -3156,8 +3142,12 @@ static void gfx_sp_tri1_2d(uint8_t vtx1_idx, uint8_t vtx2_idx, UNUSED uint8_t vt
 }
 
 static void gfx_sp_geometry_mode(uint32_t clear, uint32_t set) {
-    rsp.geometry_mode &= ~clear;
-    rsp.geometry_mode |= set;
+    uint32_t geometryMode = (rsp.geometry_mode & ~clear) | set;
+
+    if (geometryMode == rsp.geometry_mode) {
+        return;
+    }
+    rsp.geometry_mode = geometryMode;
     gfx_mark_tri_pipeline_dirty();
 }
 
@@ -3307,10 +3297,12 @@ static void gfx_dp_set_scissor(uint32_t mode, uint32_t ulx, uint32_t uly, uint32
     float width = (lrx - ulx) / 4.0f * RATIO_X;
     float height = (lry - uly) / 4.0f * RATIO_Y;
     
-    rdp.scissor.x = x;
-    rdp.scissor.y = y;
-    rdp.scissor.width = width;
-    rdp.scissor.height = height;
+    struct XYWidthHeight scissor = { x, y, width, height };
+
+    if (memcmp(&rdp.scissor, &scissor, sizeof(scissor)) == 0) {
+        return;
+    }
+    rdp.scissor = scissor;
     
     rdp.viewport_or_scissor_changed = true;
     gfx_mark_tri_pipeline_dirty();
@@ -3333,6 +3325,11 @@ static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t t
 
     if (gfx_get_render_tile_slot(tile, &renderSlot)) {
         TextureTileState* tileState = gfx_get_texture_tile(renderSlot);
+        const uint32_t lineSizeBytes = line * 8;
+        bool changed = (tileState->fmt != fmt) || (tileState->siz != siz) ||
+                       (tileState->cms != cms) || (tileState->cmt != cmt) ||
+                       (tileState->masks != masks) || (tileState->maskt != maskt) ||
+                       (tileState->line_size_bytes != lineSizeBytes);
 
         if (tile == G_TX_RENDERTILE) {
             SUPPORT_CHECK(palette == 0); // palette should set upper 4 bits of color index in 4b mode
@@ -3343,10 +3340,15 @@ static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t t
         tileState->cmt = cmt;
         tileState->masks = masks;
         tileState->maskt = maskt;
-        tileState->line_size_bytes = line * 8;
-        rdp.textures_changed[renderSlot] = true;
+        tileState->line_size_bytes = lineSizeBytes;
 #if defined(TARGET_PSP)
         if (renderSlot == 1 && tmem == 0 && rdp.loaded_texture[0].addr != NULL) {
+            changed = changed || rdp.textures_changed[0] ||
+                      (rdp.loaded_texture[1].addr != rdp.loaded_texture[0].addr) ||
+                      (rdp.loaded_texture[1].size_bytes != rdp.loaded_texture[0].size_bytes) ||
+                      (rdp.loaded_texture[1].source_size_bytes != rdp.loaded_texture[0].source_size_bytes) ||
+                      (rdp.loaded_texture[1].row_stride_bytes != rdp.loaded_texture[0].row_stride_bytes) ||
+                      (rdp.loaded_texture[1].source_nibble_offset != rdp.loaded_texture[0].source_nibble_offset);
             /*
              * Many scrolling-surface display lists load one image into TMEM 0,
              * then define tile 1 as another view of that same TMEM data. The
@@ -3356,7 +3358,10 @@ static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t t
             rdp.loaded_texture[1] = rdp.loaded_texture[0];
         }
 #endif
-        gfx_mark_tri_pipeline_dirty();
+        if (changed) {
+            rdp.textures_changed[renderSlot] = true;
+            gfx_mark_tri_pipeline_dirty();
+        }
     }
     
     if (tile == G_TX_LOADTILE) {
@@ -3374,6 +3379,11 @@ static void gfx_dp_set_tile_size(uint8_t tile, uint16_t uls, uint16_t ult, uint1
 
     if (gfx_get_render_tile_slot(tile, &renderSlot)) {
         TextureTileState* tileState = gfx_get_texture_tile(renderSlot);
+
+        if ((tileState->uls == uls) && (tileState->ult == ult) &&
+            (tileState->lrs == lrs) && (tileState->lrt == lrt)) {
+            return;
+        }
 
         tileState->uls = uls;
         tileState->ult = ult;
@@ -3619,14 +3629,21 @@ static bool gfx_cc_is_combined_mul_primitive(uint32_t a, uint32_t b, uint32_t c,
 
 static void gfx_dp_set_combine_mode(uint32_t rgb, uint32_t alpha, bool color_mul_env, bool color_mul_prim,
                                     bool texture_blend, bool texture_blend_shade, bool two_texture_blend) {
+    uint32_t combineMode = rgb | (alpha << 12);
+
+    if (texture_blend) {
+        combineMode |= texture_blend_shade ? SHADER_OPT_TEXTURE_BLEND_SHADE : SHADER_OPT_TEXTURE_BLEND;
+    }
+    if ((rdp.combine_mode == combineMode) && (rdp.combine_color_mul_env == color_mul_env) &&
+        (rdp.combine_color_mul_prim == color_mul_prim) &&
+        (rdp.combine_two_texture_blend == two_texture_blend)) {
+        return;
+    }
     if (rdp.combine_two_texture_blend != two_texture_blend) {
         /* Do not let vertices from the one-pass and two-pass paths share a batch. */
         gfx_flush();
     }
-    rdp.combine_mode = rgb | (alpha << 12);
-    if (texture_blend) {
-        rdp.combine_mode |= texture_blend_shade ? SHADER_OPT_TEXTURE_BLEND_SHADE : SHADER_OPT_TEXTURE_BLEND;
-    }
+    rdp.combine_mode = combineMode;
     rdp.combine_color_mul_env = color_mul_env;
     rdp.combine_color_mul_prim = color_mul_prim;
     rdp.combine_two_texture_blend = two_texture_blend;
@@ -3877,12 +3894,18 @@ static void gfx_sp_set_other_mode(uint32_t shift, uint32_t num_bits, uint64_t mo
     uint64_t mask = (((uint64_t)1 << num_bits) - 1) << shift;
     uint64_t om = rdp.other_mode_l | ((uint64_t)rdp.other_mode_h << 32);
     om = (om & ~mask) | mode;
+    if ((rdp.other_mode_l == (uint32_t)om) && (rdp.other_mode_h == (uint32_t)(om >> 32))) {
+        return;
+    }
     rdp.other_mode_l = (uint32_t)om;
     rdp.other_mode_h = (uint32_t)(om >> 32);
     gfx_mark_tri_pipeline_dirty();
 }
 
 static void gfx_dp_set_other_mode(uint32_t mode_h, uint32_t mode_l) {
+    if ((rdp.other_mode_h == mode_h) && (rdp.other_mode_l == mode_l)) {
+        return;
+    }
     rdp.other_mode_h = mode_h;
     rdp.other_mode_l = mode_l;
     gfx_mark_tri_pipeline_dirty();
