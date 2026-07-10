@@ -245,19 +245,64 @@ static void OotPspMixer_DecodeAdpcmHalf(s16** outPtr, const s16 table[2][8], con
     s16* out = *outPtr;
     s16 prev1 = out[-1];
     s16 prev2 = out[-2];
-    s32 j;
-    s32 k;
+    const s16* table0 = table[0];
+    const s16* table1 = table[1];
+    s32 acc;
 
-    for (j = 0; j < 8; j++) {
-        s32 acc = (table[0][j] * prev2) + (table[1][j] * prev1) + (ins[j] << 11);
+    /* This triangular convolution is the hottest scalar part of ADPCM
+     * synthesis. Keep it explicit: GCC otherwise emits a branch ladder for
+     * the eight fixed iterations, along with repeated index calculations. */
+    acc = (table0[0] * prev2) + (table1[0] * prev1) + (ins[0] << 11);
+    *out++ = OotPspMixer_Clamp16(acc >> 11);
 
-        for (k = 0; k < j; k++) {
-            acc += table[1][(j - k) - 1] * ins[k];
-        }
+    acc = (table0[1] * prev2) + (table1[1] * prev1) + (ins[1] << 11);
+    acc += table1[0] * ins[0];
+    *out++ = OotPspMixer_Clamp16(acc >> 11);
 
-        acc >>= 11;
-        *out++ = OotPspMixer_Clamp16(acc);
-    }
+    acc = (table0[2] * prev2) + (table1[2] * prev1) + (ins[2] << 11);
+    acc += table1[1] * ins[0];
+    acc += table1[0] * ins[1];
+    *out++ = OotPspMixer_Clamp16(acc >> 11);
+
+    acc = (table0[3] * prev2) + (table1[3] * prev1) + (ins[3] << 11);
+    acc += table1[2] * ins[0];
+    acc += table1[1] * ins[1];
+    acc += table1[0] * ins[2];
+    *out++ = OotPspMixer_Clamp16(acc >> 11);
+
+    acc = (table0[4] * prev2) + (table1[4] * prev1) + (ins[4] << 11);
+    acc += table1[3] * ins[0];
+    acc += table1[2] * ins[1];
+    acc += table1[1] * ins[2];
+    acc += table1[0] * ins[3];
+    *out++ = OotPspMixer_Clamp16(acc >> 11);
+
+    acc = (table0[5] * prev2) + (table1[5] * prev1) + (ins[5] << 11);
+    acc += table1[4] * ins[0];
+    acc += table1[3] * ins[1];
+    acc += table1[2] * ins[2];
+    acc += table1[1] * ins[3];
+    acc += table1[0] * ins[4];
+    *out++ = OotPspMixer_Clamp16(acc >> 11);
+
+    acc = (table0[6] * prev2) + (table1[6] * prev1) + (ins[6] << 11);
+    acc += table1[5] * ins[0];
+    acc += table1[4] * ins[1];
+    acc += table1[3] * ins[2];
+    acc += table1[2] * ins[3];
+    acc += table1[1] * ins[4];
+    acc += table1[0] * ins[5];
+    *out++ = OotPspMixer_Clamp16(acc >> 11);
+
+    acc = (table0[7] * prev2) + (table1[7] * prev1) + (ins[7] << 11);
+    acc += table1[6] * ins[0];
+    acc += table1[5] * ins[1];
+    acc += table1[4] * ins[2];
+    acc += table1[3] * ins[3];
+    acc += table1[2] * ins[4];
+    acc += table1[1] * ins[5];
+    acc += table1[0] * ins[6];
+    *out++ = OotPspMixer_Clamp16(acc >> 11);
 
     *outPtr = out;
 }
