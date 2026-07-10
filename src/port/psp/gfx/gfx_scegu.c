@@ -224,7 +224,7 @@ static void *sDepthBuffer;
 static bool sPauseBgActive;
 static bool sPauseBgCaptureRequested;
 static bool sPauseBgCaptured;
-static void *sPauseBgBuffer;
+static uint16_t sPauseBgBuffer[BUF_WIDTH * SCR_HEIGHT] __attribute__((aligned(64)));
 static bool sHomeMenuBgActive;
 static bool sHomeMenuBgCaptureRequested;
 static bool sHomeMenuBgCaptured;
@@ -277,14 +277,6 @@ bool gfx_scegu_depth_test(int32_t x, int32_t y, float projectedZ) {
     /* The PSP depth range is reversed: 0 is the far plane and 0xFFFF is the near plane. */
     projectedDepth = (uint32_t)((1.0f - projectedZ) * 65535.0f);
     return projectedDepth >= depth;
-}
-
-static void gfx_scegu_copy_framebuffer_cpu(void *dst, const void *src) {
-    void *dstAddr = gfx_scegu_vram_cpu_addr(dst);
-    const void *srcAddr = gfx_scegu_vram_cpu_addr(src);
-
-    OotPsp_MemcpyVfpu(dstAddr, srcAddr, FRAMEBUFFER_SIZE);
-    sceKernelDcacheWritebackRange(dstAddr, FRAMEBUFFER_SIZE);
 }
 
 static void gfx_scegu_copy_framebuffer_from_vram(uint16_t *dst, const void *src) {
@@ -1171,7 +1163,6 @@ static void gfx_scegu_init(void) {
     sDrawBuffer = fbp0;
     sDisplayBuffer = fbp1;
     sDepthBuffer = zbp;
-    sPauseBgBuffer = getStaticVramBuffer(BUF_WIDTH, SCR_HEIGHT, GU_PSM_5650);
 
     sceGuStart(GU_DIRECT, list);
     sceGuDrawBuffer(GU_PSM_5650, fbp0, BUF_WIDTH);
@@ -1241,7 +1232,7 @@ static void gfx_scegu_start_frame(void) {
     }
 
     if (sPauseBgCaptureRequested) {
-        gfx_scegu_copy_framebuffer_cpu(sPauseBgBuffer, sDisplayBuffer);
+        gfx_scegu_copy_framebuffer_from_vram(sPauseBgBuffer, sDisplayBuffer);
         sPauseBgCaptureRequested = false;
         sPauseBgCaptured = true;
     }
@@ -1253,7 +1244,7 @@ static void gfx_scegu_start_frame(void) {
     if (hasHomeMenuBackground) {
         gfx_scegu_copy_framebuffer_to_vram(sDrawBuffer, sHomeMenuBgBuffer);
     } else if (hasPauseBackground) {
-        gfx_scegu_copy_framebuffer_cpu(sDrawBuffer, sPauseBgBuffer);
+        gfx_scegu_copy_framebuffer_to_vram(sDrawBuffer, sPauseBgBuffer);
     }
 
     sceGuStart(GU_DIRECT, list);

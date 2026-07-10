@@ -21,6 +21,7 @@
 #define OOT_PSP_HOT_READ_PROMOTE_COUNT      4
 #define OOT_PSP_HOT_READ_MAX_SIZE           OOT_PSP_ASSET_CACHE_SIZE
 #define OOT_PSP_PACKED_CACHE_BLOCK_SIZE     0x10000
+#define OOT_PSP_PACKED_DIRECT_READ_MIN_SIZE (4 * OOT_PSP_PACKED_CACHE_BLOCK_SIZE)
 #define OOT_PSP_PACKED_CACHE_TARGET_SIZE    (8 * 1024 * 1024)
 #define OOT_PSP_PACKED_CACHE_MIN_SIZE       (2 * 1024 * 1024)
 #define OOT_PSP_PACKED_CACHE_ALLOC_STEP     (1024 * 1024)
@@ -857,6 +858,7 @@ static s32 OotPsp_ReadPackedAssetFileRange(const OotPspExternalAsset* asset, siz
     const char* path;
     SceUID fd;
     size_t packedOffset;
+    size_t maxReadChunk;
 
     if ((asset == NULL) || (asset->fileOffset > (UINTPTR_MAX - offset))) {
         return false;
@@ -873,10 +875,11 @@ static s32 OotPsp_ReadPackedAssetFileRange(const OotPspExternalAsset* asset, siz
         return true;
     }
 
-    return OotPsp_ReadPackedOpenFileRange(fd, path, packedOffset, out, size,
-                                          allowAudioYield ? OOT_PSP_ASSET_READ_CHUNK_SIZE
-                                                          : OOT_PSP_PACKED_CACHE_BLOCK_SIZE,
-                                          allowAudioYield);
+    maxReadChunk = (size >= OOT_PSP_PACKED_DIRECT_READ_MIN_SIZE)
+                       ? OOT_PSP_PACKED_CACHE_BLOCK_SIZE
+                       : (allowAudioYield ? OOT_PSP_ASSET_READ_CHUNK_SIZE
+                                          : OOT_PSP_PACKED_CACHE_BLOCK_SIZE);
+    return OotPsp_ReadPackedOpenFileRange(fd, path, packedOffset, out, size, maxReadChunk, allowAudioYield);
 }
 
 static size_t OotPsp_GetAssetCacheSizeLimit(const OotPspExternalAsset* asset) {
@@ -2160,7 +2163,10 @@ static s32 OotPsp_AssetReadLocked(void* ram, uintptr_t vrom, size_t size, s32 us
         chunkOut = out;
         chunkSerial = OotPsp_NextLoadedAssetSerial();
 
-        if (!OotPsp_ReadPackedAssetFileRange(asset, offset, out, chunkSize, true, useVfpuCopy, allowAudioYield)) {
+        const s32 useBlockCache = chunkSize < OOT_PSP_PACKED_DIRECT_READ_MIN_SIZE;
+
+        if (!OotPsp_ReadPackedAssetFileRange(asset, offset, out, chunkSize, useBlockCache, useVfpuCopy,
+                                             allowAudioYield)) {
             return OOT_PSP_ASSET_READ_FAILED;
         }
 
