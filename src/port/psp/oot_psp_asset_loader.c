@@ -1,4 +1,5 @@
 #include "oot_psp_asset_loader.h"
+#include "oot_psp_asset_builder.h"
 #include "oot_psp_audio_backend.h"
 #include "oot_psp_memory.h"
 #include "segment_symbols.h"
@@ -246,7 +247,7 @@ static void OotPsp_RememberAssetRangeSerial(uintptr_t ramStart, uintptr_t ramEnd
         (way + 1) & (OOT_PSP_ASSET_RANGE_SERIAL_CACHE_WAYS - 1);
 }
 
-void OotPsp_AssetInit(const char* executablePath) {
+s32 OotPsp_AssetInit(const char* executablePath) {
     const char* slash;
     const char* backslash;
     size_t length;
@@ -258,7 +259,7 @@ void OotPsp_AssetInit(const char* executablePath) {
 
     if ((executablePath == NULL) || (executablePath[0] == '\0')) {
         printf("oot-psp asset root missing argv0\n");
-        return;
+        return false;
     }
 
     slash = strrchr(executablePath, '/');
@@ -269,7 +270,7 @@ void OotPsp_AssetInit(const char* executablePath) {
 
     if (slash == NULL) {
         printf("oot-psp asset root no directory argv0=%s\n", executablePath);
-        return;
+        return false;
     }
 
     length = (size_t)(slash - executablePath) + 1;
@@ -280,8 +281,13 @@ void OotPsp_AssetInit(const char* executablePath) {
     memcpy(sOotPspAssetRoot, executablePath, length);
     sOotPspAssetRoot[length] = '\0';
     printf("oot-psp asset root=%s\n", sOotPspAssetRoot);
+    if (!OotPspAssetBuilder_Ensure()) {
+        sOotPspPackedAssetUnavailable = true;
+        return false;
+    }
     OotPsp_InitAssetSema();
     OotPsp_PreloadPersistentAssets();
+    return true;
 }
 
 static s32 OotPsp_IsAbsolutePath(const char* path) {

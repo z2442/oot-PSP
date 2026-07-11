@@ -18,5 +18,6 @@ void OotPspRenderer_RequestHomeMenuBackground(void);
 void OotPspRenderer_SetHomeMenuBackgroundActive(bool active);
 void OotPspRenderer_RenderHomeMenu(int selectedIndex, int screen, int controlSelectedIndex,
                                    const char* statusMessage);
+void OotPspRenderer_RenderFirstBootProgress(uint32_t progressPermille, const char* statusMessage, bool error);
 
 #endif

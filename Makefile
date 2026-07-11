@@ -1226,6 +1226,7 @@ PSP_PORT_RUNTIME_ASM_SOURCES := \
 	src/code/kanread.s \
 	src/port/psp/gfx/gfx_clip_vfpu.s \
 	src/port/psp/gfx/gfx_transform_vfpu.s \
+	src/port/psp/oot_psp_asset_transform.s \
 	src/port/psp/oot_psp_ucode_assets.s
 PSP_PORT_ROOT_ASSET_SOURCES := $(sort $(filter-out %.inc.c,$(wildcard assets/objects/*/*.c)))
 PSP_PORT_ROOT_TEXTURE_SOURCES := \
@@ -1401,6 +1402,7 @@ PSP_PORT_RUNTIME_SOURCES := \
 	src/port/psp/gfx/gfx_scegu.c \
 	src/port/psp/gfx/gfx_window_psp.c \
 	src/port/psp/gfx/psp_texture_manager.c \
+	src/port/psp/oot_psp_asset_builder.c \
 	src/port/psp/oot_psp_asset_loader.c \
 	src/port/psp/oot_psp_audio_backend.c \
 	src/port/psp/oot_psp_audiomgr.c \
@@ -1410,6 +1412,7 @@ PSP_PORT_RUNTIME_SOURCES := \
 	src/port/psp/oot_psp_memory.c \
 	src/port/psp/oot_psp_mixer.c \
 	src/port/psp/oot_psp_renderer.c \
+	src/port/psp/oot_psp_runtime_patch.c \
 	src/port/psp/sys_ucode_psp.c \
 	src/port/psp/libultra_psp.c \
 	src/port/psp/sched_psp.c
@@ -1429,7 +1432,9 @@ PSP_PORT_LINKED_ASSET_SOURCES := \
 PSP_PORT_PROBE_SOURCE := src/port/psp/oot_psp_probe.c
 
 PSP_PORT_SETUP_STAMP := $(PSP_PORT_BUILD_DIR)/setup.stamp
-PSP_PORT_BASEROM := $(BASEROM_DIR)/baserom-decompressed.z64
+PSP_PORT_ASSET_SNAPSHOT := assets/psp/ntsc-1.0/generated.zip
+PSP_PORT_ASSET_TRANSFORM := assets/psp/ntsc-1.0/asset_transform.z
+PSP_PORT_RUNTIME_PATCH_MANIFEST := assets/psp/ntsc-1.0/runtime_patches.z
 PSP_PORT_ROMINFO_SOURCE := $(PSP_PORT_BUILD_DIR)/oot_psp_rominfo.c
 PSP_PORT_ROMINFO_OBJECT := $(PSP_PORT_BUILD_DIR)/oot_psp_rominfo.o
 PSP_PORT_ASSET_TABLE_SOURCE := $(PSP_PORT_BUILD_DIR)/oot_psp_asset_tables.c
@@ -1450,6 +1455,10 @@ PSP_PORT_NATIVE_SEGMENT_OBJECTS := $(patsubst %.c,$(PSP_PORT_BUILD_DIR)/%.o,$(PS
 PSP_PORT_PROBE_OBJECT := $(PSP_PORT_BUILD_DIR)/$(PSP_PORT_PROBE_SOURCE:.c=.o)
 PSP_PORT_LIBRARY := $(PSP_PORT_BUILD_DIR)/liboot_psp_platform.a
 PSP_PORT_ELF := $(PSP_PORT_BUILD_DIR)/oot-psp-port.elf
+PSP_PORT_BASE_ELF := $(PSP_PORT_BUILD_DIR)/oot-psp-port.base.elf
+PSP_PORT_RUNTIME_PATCH_BLOB := $(PSP_PORT_BUILD_DIR)/oot_psp_runtime_patches.bin
+PSP_PORT_RUNTIME_PATCH_ASM := $(PSP_PORT_BUILD_DIR)/oot_psp_runtime_patches.S
+PSP_PORT_RUNTIME_PATCH_OBJECT := $(PSP_PORT_BUILD_DIR)/oot_psp_runtime_patches.o
 PSP_PORT_PRX_ELF := $(PSP_PORT_BUILD_DIR)/oot-psp-port.prx.elf
 PSP_PORT_STRIPPED_ELF := $(PSP_PORT_BUILD_DIR)/oot-psp-port.stripped.elf
 PSP_PORT_PRX := $(PSP_PORT_BUILD_DIR)/oot-psp-port.prx
@@ -1562,7 +1571,7 @@ PSP_PORT_INCLUDES := \
 	-Iinclude \
 	-Iinclude/libc \
 	-Isrc \
-	-I$(BUILD_DIR) \
+	-isystem $(BUILD_DIR) \
 	-I. \
 	-I$(EXTRACTED_DIR) \
 	-Isrc/port/psp \
@@ -1583,7 +1592,7 @@ PSP_PORT_CFLAGS += -pg -g -fno-omit-frame-pointer -fno-optimize-sibling-calls
 endif
 PSP_PORT_AUDIO_ME_CFLAGS := $(filter-out -pg,$(PSP_PORT_CFLAGS)) $(PSP_AUDIO_ME_OPT_CFLAGS)
 
-PSP_PORT_LIBS := -L$(PSP_PORT_PSPSDK)/lib -L$(PSP_PORT_PREFIX)/lib -lme-core -lpspdmac -lpspgu -lpspgum -lpspjpeg \
+PSP_PORT_LIBS := -L$(PSP_PORT_PSPSDK)/lib -L$(PSP_PORT_PREFIX)/lib -lme-core -lpspdmac -lpspgu -lpspgum -lpspjpeg -lz \
 	-lpspdisplay -lpspge -lpspfpu -lpspctrl -lpsppower -lpspaudio -lpspdebug
 ifneq ($(PSP_PORT_INTRAFONT_LIB),)
 PSP_PORT_LIBS += -lintrafont
@@ -1603,7 +1612,7 @@ PSP_PORT_LDFLAGS := -specs=$(PSP_PORT_PSPSDK)/lib/prxspecs -Wl,-q,-T$(PSP_PORT_P
 	$(PSP_PORT_PSPSDK)/lib/prxexports.o $(PSP_PORT_LIBS)
 endif
 
-psp-port: $(PSP_PORT_PBP) $(PSP_PORT_ASSET_SEGMENT_DATA_STAMP)
+psp-port: $(PSP_PORT_PBP)
 	@echo "PSP port is up to date: $(PSP_PORT_PBP)"
 
 psp-port-eboot:
@@ -1619,69 +1628,37 @@ $(PSP_PORT_BUILD_DIR)/%.o: %.s
 
 $(PSP_PORT_RUNTIME_OBJECTS) $(PSP_PORT_NATIVE_SEGMENT_OBJECTS): include/command_macros_base.h include/cutscene_commands.h include/scene.h
 
-$(PSP_PORT_SETUP_STAMP): $(BASEROM_DIR)/baserom.z64
+$(PSP_PORT_SETUP_STAMP): $(PSP_PORT_ASSET_SNAPSHOT) tools/psp_port_asset_snapshot.py
 	@mkdir -p $(dir $@)
-	$(MAKE) -C tools
-	$(PYTHON) tools/decompress_baserom.py $(VERSION)
-	$(PYTHON) tools/extract_baserom.py $(PSP_PORT_BASEROM) $(EXTRACTED_DIR)/baserom -v $(VERSION)
-	$(PYTHON) -m tools.assets.extract $(EXTRACTED_DIR)/baserom $(EXTRACTED_DIR) -v $(VERSION) -j$(N_THREADS)
-	$(PYTHON) tools/extract_incbins.py $(EXTRACTED_DIR)/baserom $(EXTRACTED_DIR)/incbin -v $(VERSION)
-	$(PYTHON) tools/extract_text.py $(EXTRACTED_DIR)/baserom $(EXTRACTED_DIR)/text -v $(VERSION)
-	$(PYTHON) tools/extract_audio.py -b $(EXTRACTED_DIR)/baserom -o $(EXTRACTED_DIR) -v $(VERSION) --read-xml
+	$(PYTHON) tools/psp_port_asset_snapshot.py restore $(PSP_PORT_ASSET_SNAPSHOT) $(PSP_PORT_BUILD_DIR)
 	@touch $@
 
-$(PSP_PORT_BASEROM): $(PSP_PORT_SETUP_STAMP)
-	@:
-
-ifneq ($(PSP_PORT_NO_ASSET_REGEN),1)
-$(PSP_PORT_ROMINFO_SOURCE): $(PSP_PORT_BASEROM) tools/psp_port_rom_info.py
-	$(PYTHON) tools/psp_port_rom_info.py $< $@
-else
-$(PSP_PORT_ROMINFO_SOURCE) $(PSP_PORT_ASSET_TABLE_SOURCE) $(PSP_PORT_AUDIO_TABLE_SOURCE) \
-$(PSP_PORT_ASSET_SEGMENT_SOURCE) $(PSP_PORT_ASSET_SEGMENT_TABLE_SOURCE):
-	@test -f $@ || { \
-		echo "Missing $@; run 'make psp-port' with the ROM available to generate PSP asset metadata."; \
-		exit 1; \
-	}
-endif
+$(PSP_PORT_ROMINFO_SOURCE) $(PSP_PORT_ASSET_TABLE_SOURCE) $(PSP_PORT_AUDIO_TABLE_SOURCE): $(PSP_PORT_SETUP_STAMP)
+	@test -f $@
 
 $(PSP_PORT_ROMINFO_OBJECT): $(PSP_PORT_ROMINFO_SOURCE)
 	@mkdir -p $(dir $@)
 	$(PSP_PORT_CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $(PSP_PORT_CFLAGS) -o $@ $<
 
-ifneq ($(PSP_PORT_NO_ASSET_REGEN),1)
-$(PSP_PORT_ASSET_TABLE_SOURCE): $(PSP_PORT_SETUP_STAMP) tools/psp_port_asset_tables.py include/tables/object_table.h include/tables/scene_table.h include/segment_symbols.h
-	$(PYTHON) tools/psp_port_asset_tables.py $(VERSION) $@
-endif
-
 $(PSP_PORT_ASSET_TABLE_OBJECT): $(PSP_PORT_ASSET_TABLE_SOURCE)
 	@mkdir -p $(dir $@)
 	$(PSP_PORT_CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $(PSP_PORT_CFLAGS) -o $@ $<
-
-ifneq ($(PSP_PORT_NO_ASSET_REGEN),1)
-$(PSP_PORT_AUDIO_TABLE_SOURCE): $(PSP_PORT_SETUP_STAMP) tools/psp_port_audio_tables.py baseroms/$(VERSION)/config.yml $(EXTRACTED_DIR)/baserom/code
-	$(PYTHON) tools/psp_port_audio_tables.py $(VERSION) $@
-endif
 
 $(PSP_PORT_AUDIO_TABLE_OBJECT): $(PSP_PORT_AUDIO_TABLE_SOURCE)
 	@mkdir -p $(dir $@)
 	$(PSP_PORT_CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $(PSP_PORT_CFLAGS) -o $@ $<
 
-ifneq ($(PSP_PORT_NO_ASSET_REGEN),1)
-$(PSP_PORT_ASSET_SEGMENT_STAMP): $(PSP_PORT_SETUP_STAMP) tools/psp_port_asset_segments.py include/segment_symbols.h $(PSP_PORT_NATIVE_SEGMENT_OBJECTS)
-	$(PYTHON) tools/psp_port_asset_segments.py $(VERSION) $(PSP_PORT_ASSET_SEGMENT_SOURCE) $(PSP_PORT_ASSET_SEGMENT_TABLE_SOURCE) $(PSP_PORT_ASSET_SEGMENT_DATA_DIR) --build-root $(PSP_PORT_BUILD_DIR)
+$(PSP_PORT_ASSET_SEGMENT_STAMP): $(PSP_PORT_SETUP_STAMP)
 	@touch $@
 
 $(PSP_PORT_ASSET_SEGMENT_SOURCE) $(PSP_PORT_ASSET_SEGMENT_TABLE_SOURCE): $(PSP_PORT_ASSET_SEGMENT_STAMP)
 	@:
-endif
-
-$(PSP_PORT_ASSET_SEGMENT_DATA_STAMP): $(PSP_PORT_ASSET_SEGMENT_STAMP)
-	@touch $@
 
 $(PSP_PORT_ASSET_SEGMENT_OBJECT): $(PSP_PORT_ASSET_SEGMENT_SOURCE)
 	@mkdir -p $(dir $@)
 	$(PSP_PORT_CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -c -x assembler-with-cpp $(PSP_PORT_DEFINES) $(PSP_PORT_INCLUDES) -o $@ $<
+
+$(PSP_PORT_BUILD_DIR)/src/port/psp/oot_psp_asset_transform.o: $(PSP_PORT_ASSET_TRANSFORM)
 
 $(PSP_PORT_ASSET_SEGMENT_TABLE_OBJECT): $(PSP_PORT_ASSET_SEGMENT_TABLE_SOURCE)
 	@mkdir -p $(dir $@)
@@ -1692,16 +1669,6 @@ $(PSP_PORT_EXTRACTED_ASSET_FILES): $(PSP_PORT_SETUP_STAMP)
 
 $(PSP_PORT_RUNTIME_GENERATED_ASSET_STAMP): $(PSP_PORT_SETUP_STAMP)
 	@mkdir -p $(dir $@)
-	@{ for dir in $(PSP_PORT_RUNTIME_GENERATED_ASSET_DIRS); do \
-		if test -d "$$dir"; then \
-			find "$$dir" -type f \( -name '*.png' -o -name '*.bin' -o -name '*.jpg' \); \
-		fi; \
-	done; } | sed \
-		-e 's#^assets/#$(BUILD_DIR)/assets/#' \
-		-e 's#^$(EXTRACTED_DIR)/assets/#$(BUILD_DIR)/assets/#' \
-		-e 's#\.png$$#.inc.c#' \
-		-e 's#\.bin$$#.bin.inc.c#' \
-		-e 's#\.jpg$$#.jpg.inc.c#' | xargs -r $(MAKE)
 	@touch $@
 
 $(PSP_PORT_NATIVE_GENERATED_ASSET_STAMP): $(PSP_PORT_SETUP_STAMP)
@@ -1718,18 +1685,12 @@ $(PSP_PORT_NATIVE_GENERATED_ASSET_STAMP): $(PSP_PORT_SETUP_STAMP)
 		-e 's#\.jpg$$#.jpg.inc.c#' | xargs -r $(MAKE)
 	@touch $@
 
-ifneq ($(PSP_PORT_NO_ASSET_REGEN),1)
 $(PSP_PORT_RUNTIME_OBJECTS): $(PSP_PORT_SETUP_STAMP) $(PSP_PORT_RUNTIME_GENERATED_ASSET_STAMP)
-endif
 
-$(PSP_PORT_BUILD_DIR)/src/audio/game/session_init.o: $(BUILD_DIR)/assets/audio/sequence_sizes.h
 $(PSP_PORT_BUILD_DIR)/src/audio/internal/seqplayer.o: PSP_PORT_CFLAGS += -DMML_VERSION=MML_VERSION_OOT
 $(PSP_PORT_BUILD_DIR)/src/port/psp/oot_psp_audio_backend.o: PSP_PORT_CFLAGS := $(PSP_PORT_AUDIO_ME_CFLAGS)
 $(PSP_PORT_BUILD_DIR)/src/port/psp/oot_psp_mixer.o: PSP_PORT_CFLAGS := $(PSP_PORT_AUDIO_ME_CFLAGS)
 
-ifneq ($(PSP_PORT_NO_ASSET_REGEN),1)
-$(PSP_PORT_NATIVE_SEGMENT_OBJECTS): $(PSP_PORT_SETUP_STAMP) $(PSP_PORT_EXTRACTED_ASSET_FILES) $(PSP_PORT_NATIVE_GENERATED_ASSET_STAMP)
-endif
 
 $(PSP_PORT_BUILD_MODE_STAMP): FORCE
 	@mkdir -p $(dir $@)
@@ -1748,13 +1709,45 @@ $(PSP_PORT_GPROF_LINKER_SCRIPT): $(PSP_PORT_GPROF_LINKER_SOURCE)
 	@mkdir -p $(dir $@)
 	sed 's#^\([[:space:]]*\.rodata\.sceNid[[:space:]]*: {\)[[:space:]]*\*(\.rodata\.sceNid)[[:space:]]*}#\1 KEEP (*(.rodata.sceNid)) }#' $< > $@
 
-$(PSP_PORT_ELF): $(PSP_PORT_LIBRARY) $(PSP_PORT_PROBE_OBJECT) $(PSP_PORT_LINKER_DEPS) $(PSP_PORT_EXTRA_LINK_OBJECTS)
+$(PSP_PORT_BASE_ELF): $(PSP_PORT_LIBRARY) $(PSP_PORT_PROBE_OBJECT) $(PSP_PORT_LINKER_DEPS) $(PSP_PORT_EXTRA_LINK_OBJECTS)
 	@mkdir -p $(dir $@)
 ifneq ($(PSP_PORT_EXTRA_LINK_OBJECTS),)
 	$(file >$@.extra.rsp,$(PSP_PORT_EXTRA_LINK_OBJECTS))
 endif
 	$(PSP_PORT_CC) -o $@ $(PSP_PORT_PROBE_OBJECT) $(if $(PSP_PORT_EXTRA_LINK_OBJECTS),@$@.extra.rsp) \
 		-Wl,--start-group $(PSP_PORT_LIBRARY) -Wl,--end-group $(PSP_PORT_LDFLAGS)
+	psp-fixup-imports $@
+
+$(PSP_PORT_RUNTIME_PATCH_BLOB): $(PSP_PORT_BASE_ELF) $(PSP_PORT_RUNTIME_PATCH_MANIFEST) tools/psp_port_runtime_patches.py
+	$(PYTHON) tools/psp_port_runtime_patches.py resolve $< $(PSP_PORT_RUNTIME_PATCH_MANIFEST) $@ --base-elf $(PSP_PORT_BASE_ELF)
+
+$(PSP_PORT_RUNTIME_PATCH_ASM): $(PSP_PORT_RUNTIME_PATCH_BLOB)
+	@printf '%s\n' \
+		'.section .rodata' \
+		'.balign 16' \
+		'.global gOotPspRuntimePatchBlob' \
+		'gOotPspRuntimePatchBlob:' \
+		'.incbin "$(PSP_PORT_RUNTIME_PATCH_BLOB)"' \
+		'.global gOotPspRuntimePatchBlobEnd' \
+		'gOotPspRuntimePatchBlobEnd:' > $@
+
+$(PSP_PORT_RUNTIME_PATCH_OBJECT): $(PSP_PORT_RUNTIME_PATCH_ASM)
+	$(PSP_PORT_CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -c -x assembler-with-cpp $(PSP_PORT_ASM_DEFINES) $(PSP_PORT_INCLUDES) -o $@ $<
+
+$(PSP_PORT_ELF): $(PSP_PORT_LIBRARY) $(PSP_PORT_PROBE_OBJECT) $(PSP_PORT_RUNTIME_PATCH_OBJECT) $(PSP_PORT_LINKER_DEPS) $(PSP_PORT_EXTRA_LINK_OBJECTS)
+	@mkdir -p $(dir $@)
+ifneq ($(PSP_PORT_EXTRA_LINK_OBJECTS),)
+	$(file >$@.extra.rsp,$(PSP_PORT_EXTRA_LINK_OBJECTS))
+endif
+	$(PSP_PORT_CC) -o $@ $(PSP_PORT_PROBE_OBJECT) $(if $(PSP_PORT_EXTRA_LINK_OBJECTS),@$@.extra.rsp) \
+		-Wl,--start-group $(PSP_PORT_LIBRARY) -Wl,--end-group $(PSP_PORT_RUNTIME_PATCH_OBJECT) $(PSP_PORT_LDFLAGS)
+	psp-fixup-imports $@
+	$(PYTHON) tools/psp_port_runtime_patches.py resolve $@ $(PSP_PORT_RUNTIME_PATCH_MANIFEST) $(PSP_PORT_RUNTIME_PATCH_BLOB) --base-elf $(PSP_PORT_BASE_ELF)
+	$(PSP_PORT_CC) -MMD -MP -MF $(PSP_PORT_RUNTIME_PATCH_OBJECT:.o=.d) -MT $(PSP_PORT_RUNTIME_PATCH_OBJECT) \
+		-c -x assembler-with-cpp $(PSP_PORT_ASM_DEFINES) $(PSP_PORT_INCLUDES) -o $(PSP_PORT_RUNTIME_PATCH_OBJECT) \
+		$(PSP_PORT_RUNTIME_PATCH_ASM)
+	$(PSP_PORT_CC) -o $@ $(PSP_PORT_PROBE_OBJECT) $(if $(PSP_PORT_EXTRA_LINK_OBJECTS),@$@.extra.rsp) \
+		-Wl,--start-group $(PSP_PORT_LIBRARY) -Wl,--end-group $(PSP_PORT_RUNTIME_PATCH_OBJECT) $(PSP_PORT_LDFLAGS)
 	psp-fixup-imports $@
 
 $(PSP_PORT_PRX_ELF): $(PSP_PORT_ELF) $(PSP_PORT_ASSET_SEGMENT_SOURCE) tools/psp_port_strip_asset_relocs.py
@@ -1785,9 +1778,7 @@ psp-port-clean:
 
 FORCE:
 
-ifneq ($(PSP_PORT_NO_ASSET_REGEN),1)
 -include $(DEP_FILES) $(PSP_PORT_DEP_FILES)
-endif
 
 # Print target for debugging
 print-% : ; $(info $* is a $(flavor $*) variable set to [$($*)]) @true

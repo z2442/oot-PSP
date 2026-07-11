@@ -16,6 +16,7 @@ extern void gfx_scegu_request_home_menu_background(void);
 extern void gfx_scegu_set_home_menu_background_active(bool active);
 extern void gfx_scegu_render_home_menu(int selectedIndex, int screen, int controlSelectedIndex,
                                        const char* statusMessage);
+extern void gfx_scegu_render_first_boot_progress(uint32_t progressPermille, const char* statusMessage, bool error);
 extern bool gfx_scegu_depth_is_clear(int32_t x, int32_t y);
 extern bool gfx_scegu_depth_test(int32_t x, int32_t y, float projectedZ);
 
@@ -28,10 +29,22 @@ typedef struct OotPspHomeMenuRenderArgs {
     const char* statusMessage;
 } OotPspHomeMenuRenderArgs;
 
+typedef struct OotPspFirstBootProgressRenderArgs {
+    uint32_t progressPermille;
+    const char* statusMessage;
+    bool error;
+} OotPspFirstBootProgressRenderArgs;
+
 static void OotPspRenderer_DrawHomeMenu(void* arg) {
     const OotPspHomeMenuRenderArgs* menu = (const OotPspHomeMenuRenderArgs*)arg;
 
     gfx_scegu_render_home_menu(menu->selectedIndex, menu->screen, menu->controlSelectedIndex, menu->statusMessage);
+}
+
+static void OotPspRenderer_DrawFirstBootProgress(void* arg) {
+    const OotPspFirstBootProgressRenderArgs* progress = (const OotPspFirstBootProgressRenderArgs*)arg;
+
+    gfx_scegu_render_first_boot_progress(progress->progressPermille, progress->statusMessage, progress->error);
 }
 
 void OotPspRenderer_Init(void) {
@@ -110,4 +123,15 @@ void OotPspRenderer_RenderHomeMenu(int selectedIndex, int screen, int controlSel
     args.statusMessage = statusMessage;
 
     gfx_render_callback_frame(OotPspRenderer_DrawHomeMenu, &args);
+}
+
+void OotPspRenderer_RenderFirstBootProgress(uint32_t progressPermille, const char* statusMessage, bool error) {
+    OotPspFirstBootProgressRenderArgs args;
+
+    OotPspRenderer_Init();
+    args.progressPermille = progressPermille;
+    args.statusMessage = statusMessage;
+    args.error = error;
+
+    gfx_render_callback_frame(OotPspRenderer_DrawFirstBootProgress, &args);
 }

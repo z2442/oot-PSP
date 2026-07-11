@@ -13,6 +13,7 @@
 #include "oot_psp_asset_loader.h"
 #include "oot_psp_controls.h"
 #include "oot_psp_home_menu.h"
+#include "oot_psp_runtime_patch.h"
 #include "play_state.h"
 #include "setup_state.h"
 #include "title_setup_state.h"
@@ -127,7 +128,16 @@ int main(int argc, char** argv) {
     osInitialize();
     osSyncPrintf("oot-psp probe rom md5=%s size=%u header=%02X%02X%02X%02X\n", gOotPspRomMd5, gOotPspRomSize,
                  gOotPspRomHeader[0], gOotPspRomHeader[1], gOotPspRomHeader[2], gOotPspRomHeader[3]);
-    OotPsp_AssetInit(((argc > 0) && (argv != NULL)) ? argv[0] : NULL);
+    if (!OotPsp_AssetInit(((argc > 0) && (argv != NULL)) ? argv[0] : NULL)) {
+        osSyncPrintf("oot-psp asset initialization failed\n");
+        sceKernelExitGame();
+        return 1;
+    }
+    if (!OotPspRuntimePatch_Apply()) {
+        osSyncPrintf("oot-psp runtime asset patching failed\n");
+        sceKernelExitGame();
+        return 1;
+    }
     OotPspControls_Load();
     OotPspGame_Init();
     Graph_Init(&gfxCtx);

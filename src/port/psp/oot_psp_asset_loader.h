@@ -51,7 +51,7 @@ extern const size_t gOotPspFraMessageEntriesCount;
 extern const OotPspMessageEntry gOotPspStaffMessageEntries[];
 extern const size_t gOotPspStaffMessageEntriesCount;
 
-void OotPsp_AssetInit(const char* executablePath);
+s32 OotPsp_AssetInit(const char* executablePath);
 const char* OotPsp_ResolveRootPath(const char* path, char* buffer, size_t bufferSize);
 uintptr_t OotPsp_NormalizeVrom(uintptr_t vrom);
 void OotPsp_NormalizeRomFile(RomFile* file);

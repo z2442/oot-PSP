@@ -1,16 +1,16 @@
-.section .rodata
+.section .data
 .balign 16
 
 .globl njpgdspMainTextStart
 njpgdspMainTextStart:
-    .incbin "incbin/njpgdspMainText"
+    .space 0xAF0
 .balign 16
 .globl njpgdspMainTextEnd
 njpgdspMainTextEnd:
 
 .globl njpgdspMainDataStart
 njpgdspMainDataStart:
-    .incbin "incbin/njpgdspMainData"
+    .space 0x60
 .balign 16
 .globl njpgdspMainDataEnd
 njpgdspMainDataEnd:

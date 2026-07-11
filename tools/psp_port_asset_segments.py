@@ -56,8 +56,8 @@ COLLISION_AUX_SUFFIXES = ("BgCamList", "SurfaceTypes", "PolyList", "VtxList", "W
 SKIP_NAMES = {
     "makerom",
     "boot",
-    "code",
     "dmadata",
+    "code",
     "n64dd",
 }
 
@@ -82,6 +82,7 @@ class ElfSection:
     name: str
     type: int
     flags: int
+    addr: int
     offset: int
     size: int
     link: int
@@ -188,6 +189,7 @@ class ElfObject:
                     name=name,
                     type=raw[1],
                     flags=raw[2],
+                    addr=raw[3],
                     offset=raw[4],
                     size=raw[5],
                     link=raw[6],
@@ -877,8 +879,13 @@ def should_emit_raw_segment(name: str, baserom_dir: Path) -> bool:
 def read_original_vrom_ranges(version: str) -> dict[str, tuple[int, int]]:
     config = version_config.load_version_config(version)
     rom_path = ROOT / "baseroms" / version / "baserom-decompressed.z64"
-    rom_data = memoryview(rom_path.read_bytes())
-    entries = dmadata.read_dmadata(rom_data, config.dmadata_start)
+    if rom_path.is_file():
+        entries = dmadata.read_dmadata(memoryview(rom_path.read_bytes()), config.dmadata_start)
+    else:
+        # A maintainer can regenerate PSP metadata from an existing extraction
+        # without retaining a ROM in the source/build environment.
+        table_path = ROOT / "extracted" / version / "baserom" / "dmadata"
+        entries = dmadata.read_dmadata(memoryview(table_path.read_bytes()), 0)
     ranges: dict[str, tuple[int, int]] = {}
 
     for name, entry in zip(config.dmadata_segments.keys(), entries):
@@ -925,6 +932,26 @@ def build_entries(version: str) -> list[dict[str, object]]:
             {
                 "name": name,
                 "source": source,
+                "size": size,
+                "vrom_start": start,
+                "vrom_end": end,
+                "original_vrom_start": original_start,
+                "original_vrom_end": original_end,
+            }
+        )
+
+    # Keep code last so adding the first-boot-only JPEG microcode source does
+    # not renumber any existing external VROM addresses.
+    code_source = baserom_dir / "code"
+    if code_source.is_file():
+        size = code_source.stat().st_size
+        start = align(cursor, EXTERNAL_VROM_ALIGN)
+        end = start + size
+        original_start, original_end = original_ranges["code"]
+        entries.append(
+            {
+                "name": "code",
+                "source": code_source,
                 "size": size,
                 "vrom_start": start,
                 "vrom_end": end,
