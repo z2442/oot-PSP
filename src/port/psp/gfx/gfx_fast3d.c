@@ -4691,6 +4691,8 @@ static void gfx_run_dl(Gfx* cmd) {
                 bool colorMulPrim = colorMulTexelShade && gfx_cc_is_color_mul(rgbA1, rgbB1, rgbC1, rgbD1,
                                                                                G_CCMUX_COMBINED,
                                                                                G_CCMUX_PRIMITIVE);
+                bool colorMulShadePrim = gfx_cc_is_color_mul(rgbA0, rgbB0, rgbC0, rgbD0, G_CCMUX_SHADE,
+                                                              G_CCMUX_PRIMITIVE);
                 bool textureBlend = gfx_cc_is_texture_prim_env_blend(rgbA0, rgbB0, rgbC0, rgbD0);
                 bool textureBlendShade = false;
                 bool twoTextureBlend = false;
@@ -4698,6 +4700,16 @@ static void gfx_run_dl(Gfx* cmd) {
                 uint32_t alphaComb = color_comb(alphaA0, alphaB0, alphaC0, alphaD0);
 
 #if defined(TARGET_PSP)
+                if (colorMulShadePrim) {
+                    /*
+                     * The GU has only one vertex-color input. Keep SHADE as that input and apply the constant
+                     * PRIMITIVE tint on the CPU; selecting the last combiner input instead turns dark untextured
+                     * geometry (such as the Temple of Time ceiling and entrance recess) primitive white.
+                     */
+                    rgbComb = color_comb(G_CCMUX_0, G_CCMUX_0, G_CCMUX_0, G_CCMUX_SHADE);
+                    colorMulPrim = true;
+                }
+
                 if (((rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE) &&
                     gfx_cc_is_one(alphaA0, alphaB0, alphaC0, alphaD0) &&
                     gfx_cc_is_combined_mul_primitive(alphaA1, alphaB1, alphaC1, alphaD1)) {
