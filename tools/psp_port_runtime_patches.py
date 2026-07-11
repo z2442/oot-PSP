@@ -141,6 +141,7 @@ def linked_symbol_bytes(elf: ElfObject, symbol) -> bytes:
 def symbol_relocations(elf: ElfObject, symbol) -> list[tuple[int, int]]:
     result: dict[int, int] = {}
     section = elf.sections[symbol.shndx]
+    symbol_data = linked_symbol_bytes(elf, symbol)
 
     for relocation in elf.relocs_by_section.get(symbol.shndx, []):
         absolute_offset = relocation.offset if relocation.offset >= section.addr else section.addr + relocation.offset
@@ -150,7 +151,8 @@ def symbol_relocations(elf: ElfObject, symbol) -> list[tuple[int, int]]:
             continue
         target = elf.symtabs[relocation.symtab_index][relocation.sym_index]
         if (target.shndx not in (SHN_UNDEF, SHN_ABS)) and target.value < 0x20000000:
-            result[absolute_offset - symbol.value] = target.value
+            relative_offset = absolute_offset - symbol.value
+            result[relative_offset] = struct.unpack_from("<I", symbol_data, relative_offset)[0]
     return sorted(result.items())
 
 
@@ -376,10 +378,11 @@ def resolve_manifest(elf_path: Path, manifest_path: Path, output: Path, base_elf
         targets = relocation_targets(elf, symbol)
         if set(relocation_offsets_list) != set(targets):
             raise ValueError(f"clean ELF relocation mismatch for {source_file}:{symbol_name}")
+        clean_symbol_data = linked_symbol_bytes(elf, symbol)
         adjustments: list[int] = []
-        for offset, reference_target_value in reference_relocations:
-            target = targets[offset]
-            adjustment = target.value - reference_target_value
+        for offset, reference_pointer_value in reference_relocations:
+            clean_pointer_value = struct.unpack_from("<I", clean_symbol_data, offset)[0]
+            adjustment = clean_pointer_value - reference_pointer_value
             if not -(1 << 31) <= adjustment < (1 << 31):
                 raise ValueError(f"runtime relocation adjustment is too large for {source_file}:{symbol_name}")
             adjustments.append(adjustment)
