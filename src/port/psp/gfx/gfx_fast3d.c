@@ -2922,16 +2922,35 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
     }
     const uint32_t cull_mode = rsp.geometry_mode & G_CULL_BOTH;
 #if defined(TARGET_PSP)
-    /* Fully visible vertices have positive W, so the sign of this homogeneous
-     * cross product matches the perspective-divided screen-space triangle.
-     * Reject backfaces before color/UV generation without three divides. Keep
-     * partially clipped triangles on the conservative path below. */
-    if ((cull_mode != 0) && (clip_flags == 0)) {
-        const float dx1 = v1->_x * v2->_w - v2->_x * v1->_w;
-        const float dy1 = v1->_y * v2->_w - v2->_y * v1->_w;
-        const float dx2 = v3->_x * v2->_w - v2->_x * v3->_w;
-        const float dy2 = v3->_y * v2->_w - v2->_y * v3->_w;
-        const float cross = dx1 * dy2 - dy1 * dx2;
+    if (cull_mode != 0) {
+        float cross;
+
+        if (clip_flags == 0) {
+            /* Fully visible vertices have positive W, so the homogeneous
+             * winding test avoids three divides on the common path. */
+            const float dx1 = v1->_x * v2->_w - v2->_x * v1->_w;
+            const float dy1 = v1->_y * v2->_w - v2->_y * v1->_w;
+            const float dx2 = v3->_x * v2->_w - v2->_x * v3->_w;
+            const float dy2 = v3->_y * v2->_w - v2->_y * v3->_w;
+
+            cross = dx1 * dy2 - dy1 * dx2;
+        } else {
+            /* Scripted cameras can sit outside one-sided scene geometry. A
+             * large back face crossing the frustum must be rejected before it
+             * is clipped, or it covers the intended cutscene view. */
+            const float invW1 = 1.0f / v1->_w;
+            const float invW2 = 1.0f / v2->_w;
+            const float invW3 = 1.0f / v3->_w;
+            const float dx1 = v1->_x * invW1 - v2->_x * invW2;
+            const float dy1 = v1->_y * invW1 - v2->_y * invW2;
+            const float dx2 = v3->_x * invW3 - v2->_x * invW2;
+            const float dy2 = v3->_y * invW3 - v2->_y * invW2;
+
+            cross = dx1 * dy2 - dy1 * dx2;
+            if ((v1->_w < 0.0f) ^ (v2->_w < 0.0f) ^ (v3->_w < 0.0f)) {
+                cross = -cross;
+            }
+        }
 
         if (((cull_mode == G_CULL_FRONT) && (cross <= 0.0f)) ||
             ((cull_mode == G_CULL_BACK) && (cross >= 0.0f)) ||
