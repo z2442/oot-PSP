@@ -49,6 +49,7 @@ static void* sCounterDigitTextures[] = {
     gCounterDigit7Tex,
     gCounterDigit8Tex,
     gCounterDigit9Tex,
+    gCounterColonTex,
 };
 #define COUNTER_DIGIT_TEXTURE(digit) sCounterDigitTextures[(digit)]
 #else
@@ -1253,7 +1254,9 @@ typedef struct InterfacePspTexture {
     /* 0x04 */ s32 byteSwap;
 } InterfacePspTexture;
 
-static u8 sPspCounterDigitTextures[10][gCounterDigit0Tex_WIDTH * gCounterDigit0Tex_HEIGHT * 2] __attribute__((aligned(8)));
+static u8 sPspCounterDigitTextures[ARRAY_COUNT(sCounterDigitTextures)]
+                                    [gCounterDigit0Tex_WIDTH * gCounterDigit0Tex_HEIGHT * 2]
+    __attribute__((aligned(8)));
 static s32 sPspCounterDigitTexturesInitialized = false;
 
 static InterfacePspTexture Interface_GetPspTexture(void* texture) {
