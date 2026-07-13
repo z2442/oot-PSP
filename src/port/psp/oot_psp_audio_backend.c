@@ -65,6 +65,7 @@ static volatile s32 sOotPspAudioInitialized = false;
     ((OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES * 1000000U) / OOT_PSP_AUDIO_OUTPUT_FREQUENCY)
 #define OOT_PSP_AUDIO_RENDER_FLAG_UNDERRUN 1
 #define OOT_PSP_AUDIO_DMA_COPY_MIN_BYTES 1024
+#define OOT_PSP_AUDIO_MAX_ME_WRITE_RANGES 512
 
 typedef enum {
     OOT_PSP_AUDIO_ME_STATE_BOOTING,
@@ -135,6 +136,16 @@ static u32 sAudioResampleFrac;
 static u32 sAudioResampleStep;
 static s16 sAudioLastLeft;
 static s16 sAudioLastRight;
+
+typedef struct {
+    void* address;
+    u32 size;
+} OotPspAudioCacheRange;
+
+static OotPspAudioCacheRange sAudioMeWriteRanges[OOT_PSP_AUDIO_MAX_ME_WRITE_RANGES];
+static u32 sAudioMeWriteRangeCount;
+static s32 sAudioMeWriteRangeOverflow;
+
 static SceUID sAudioOutputThreadId = -1;
 static SceUID sAudioProducerThreadId = -1;
 static SceUID sAudioMeLockSema = -1;
@@ -330,10 +341,56 @@ static u32 OotPspAudioBackend_CommandDmaSize(u32 w0) {
     return ((w0 >> 16) & 0xFF) << 4;
 }
 
+static void OotPspAudioBackend_ResetMeWriteRanges(void) {
+    sAudioMeWriteRangeCount = 0;
+    sAudioMeWriteRangeOverflow = false;
+}
+
+static void OotPspAudioBackend_RecordMeWriteRange(void* address, u32 size) {
+    uintptr_t start;
+    uintptr_t end;
+
+    if ((address == NULL) || (size == 0) || sAudioMeWriteRangeOverflow) {
+        return;
+    }
+
+    start = (uintptr_t)address & ~(OOT_PSP_AUDIO_CACHE_LINE_SIZE - 1);
+    end = ((uintptr_t)address + size + OOT_PSP_AUDIO_CACHE_LINE_SIZE - 1) &
+          ~(OOT_PSP_AUDIO_CACHE_LINE_SIZE - 1);
+
+    if (sAudioMeWriteRangeCount != 0) {
+        OotPspAudioCacheRange* previous = &sAudioMeWriteRanges[sAudioMeWriteRangeCount - 1];
+        uintptr_t previousStart = (uintptr_t)previous->address;
+        uintptr_t previousEnd = previousStart + previous->size;
+
+        if ((start <= previousEnd) && (end >= previousStart)) {
+            if (start < previousStart) {
+                previousStart = start;
+            }
+            if (end < previousEnd) {
+                end = previousEnd;
+            }
+            previous->address = (void*)previousStart;
+            previous->size = end - previousStart;
+            return;
+        }
+    }
+
+    if (sAudioMeWriteRangeCount >= OOT_PSP_AUDIO_MAX_ME_WRITE_RANGES) {
+        sAudioMeWriteRangeOverflow = true;
+        return;
+    }
+
+    sAudioMeWriteRanges[sAudioMeWriteRangeCount].address = (void*)start;
+    sAudioMeWriteRanges[sAudioMeWriteRangeCount].size = end - start;
+    sAudioMeWriteRangeCount++;
+}
+
 static void OotPspAudioBackend_WritebackMeInputs(const Acmd* cmdList, s32 cmdCount) {
     void* filterLut = NULL;
     s32 i;
 
+    OotPspAudioBackend_ResetMeWriteRanges();
     OotPspAudioBackend_WritebackRange(cmdList, cmdCount * sizeof(Acmd));
 
     for (i = 0; i < cmdCount; i++) {
@@ -345,6 +402,7 @@ static void OotPspAudioBackend_WritebackMeInputs(const Acmd* cmdList, s32 cmdCou
             case A_RESAMPLE:
             case A_S8DEC:
                 OotPspAudioBackend_WritebackRange((void*)(uintptr_t)w1, sizeof(ADPCM_STATE));
+                OotPspAudioBackend_RecordMeWriteRange((void*)(uintptr_t)w1, sizeof(ADPCM_STATE));
                 break;
 
             case A_FILTER:
@@ -353,8 +411,10 @@ static void OotPspAudioBackend_WritebackMeInputs(const Acmd* cmdList, s32 cmdCou
                     OotPspAudioBackend_WritebackRange(filterLut, 8 * sizeof(s16));
                 } else {
                     OotPspAudioBackend_WritebackRange((void*)(uintptr_t)w1, sizeof(ADPCM_STATE));
+                    OotPspAudioBackend_RecordMeWriteRange((void*)(uintptr_t)w1, sizeof(ADPCM_STATE));
                     if (filterLut != NULL) {
                         OotPspAudioBackend_WritebackRange(filterLut, 8 * sizeof(s16));
+                        OotPspAudioBackend_RecordMeWriteRange(filterLut, 8 * sizeof(s16));
                     }
                 }
                 break;
@@ -371,6 +431,8 @@ static void OotPspAudioBackend_WritebackMeInputs(const Acmd* cmdList, s32 cmdCou
             case A_SAVEBUFF:
                 OotPspAudioBackend_WritebackBoundaryRange((void*)(uintptr_t)w1,
                                                           OotPspAudioBackend_CommandDmaSize(w0));
+                OotPspAudioBackend_RecordMeWriteRange((void*)(uintptr_t)w1,
+                                                      OotPspAudioBackend_CommandDmaSize(w0));
                 break;
 
             case A_SETLOOP:
@@ -485,7 +547,7 @@ static void OotPspAudioBackend_MeWritebackOutputs(const Acmd* cmdList, s32 cmdCo
     }
 }
 
-static void OotPspAudioBackend_InvalidateMeWrites(const Acmd* cmdList, s32 cmdCount) {
+static void OotPspAudioBackend_InvalidateMeWritesFromCommands(const Acmd* cmdList, s32 cmdCount) {
     void* filterLut = NULL;
     s32 i;
 
@@ -519,6 +581,20 @@ static void OotPspAudioBackend_InvalidateMeWrites(const Acmd* cmdList, s32 cmdCo
                 break;
         }
     }
+}
+
+static void OotPspAudioBackend_InvalidateMeWrites(const Acmd* cmdList, s32 cmdCount) {
+    u32 i;
+
+    if (sAudioMeWriteRangeOverflow) {
+        OotPspAudioBackend_InvalidateMeWritesFromCommands(cmdList, cmdCount);
+    } else {
+        for (i = 0; i < sAudioMeWriteRangeCount; i++) {
+            sceKernelDcacheInvalidateRange(sAudioMeWriteRanges[i].address, sAudioMeWriteRanges[i].size);
+        }
+    }
+
+    OotPspAudioBackend_ResetMeWriteRanges();
 }
 
 static void OotPspAudioBackend_FallbackFromMe(const Acmd* cmdList, s32 cmdCount) {
@@ -911,6 +987,9 @@ static u32 OotPspAudioBackend_RenderOutputChunkState(u32 buffered, u32* readPosP
     if ((resampleStep == OOT_PSP_AUDIO_RESAMPLE_STEP_2X) && (resampleFrac == 0)) {
         u32 maxPairs = OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES / 2;
         u32 renderedPairs;
+        const u32* packedRing = (const u32*)sAudioRing;
+        u32* packedOut = (u32*)out;
+        u32 current;
 
         if (buffered <= 1) {
             return 0;
@@ -921,23 +1000,29 @@ static u32 OotPspAudioBackend_RenderOutputChunkState(u32 buffered, u32* readPosP
             renderedPairs = maxPairs;
         }
 
+        current = packedRing[readPos];
         for (i = 0; i < renderedPairs; i++) {
-            u32 ringOffset = readPos * OOT_PSP_AUDIO_CHANNELS;
-            u32 nextRingOffset = ((readPos + 1) & OOT_PSP_AUDIO_RING_MASK) * OOT_PSP_AUDIO_CHANNELS;
-            s16 left = sAudioRing[ringOffset + 0];
-            s16 right = sAudioRing[ringOffset + 1];
-            s16 halfLeft = OotPspAudioBackend_LerpHalfSample(left, sAudioRing[nextRingOffset + 0]);
-            s16 halfRight = OotPspAudioBackend_LerpHalfSample(right, sAudioRing[nextRingOffset + 1]);
+            u32 next;
+            s16 left = (s16)(u16)current;
+            s16 right = (s16)(current >> 16);
+            s16 halfLeft;
+            s16 halfRight;
 
-            *out++ = left;
-            *out++ = right;
-            *out++ = halfLeft;
-            *out++ = halfRight;
+            readPos++;
+            if (readPos == OOT_PSP_AUDIO_RING_FRAMES) {
+                readPos = 0;
+            }
+            next = packedRing[readPos];
+            halfLeft = OotPspAudioBackend_LerpHalfSample(left, (s16)(u16)next);
+            halfRight = OotPspAudioBackend_LerpHalfSample(right, (s16)(next >> 16));
+
+            *packedOut++ = current;
+            *packedOut++ = (u16)halfLeft | ((u32)(u16)halfRight << 16);
             lastLeft = halfLeft;
             lastRight = halfRight;
-
-            readPos = (readPos + 1) & OOT_PSP_AUDIO_RING_MASK;
+            current = next;
         }
+        out = (s16*)packedOut;
 
         resampleFrac = 0;
 

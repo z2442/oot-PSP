@@ -138,6 +138,31 @@ u8 sNumSamplesPerWavePeriod[] = {
     WAVE_SAMPLE_COUNT / 8, // 8th harmonic
 };
 
+#if defined(TARGET_PSP)
+/* Audio chunks are multiples of eight samples. The normal 22.05 and 32 kHz
+ * configurations produce 21-24 envelope steps, so make those divisors
+ * compile-time constants and let Allegrex use multiply-high instead of its
+ * high-latency integer divider. Keep the fallback for unusual audio specs. */
+static __attribute__((noinline)) s32 OotPspAudioSynth_DivideEnvelopeRamp(s32 value, s32 steps) {
+    switch (steps) {
+        case 20:
+            return value / 20;
+        case 21:
+            return value / 21;
+        case 22:
+            return value / 22;
+        case 23:
+            return value / 23;
+        case 24:
+            return value / 24;
+        case 25:
+            return value / 25;
+        default:
+            return value / steps;
+    }
+}
+#endif
+
 /**
  * original name: Nas_CpuFX
  */
@@ -1463,6 +1488,9 @@ Acmd* AudioSynth_ProcessEnvelope(Acmd* cmd, NoteSubEu* noteSubEu, NoteSynthesisS
     s16 sourceReverbVol;
     u16 targetVolRight;
     s32 pad;
+#if defined(TARGET_PSP)
+    s32 rampSteps = aiBufLen >> 3;
+#endif
 
     curVolLeft = synthState->curVolLeft;
     targetVolLeft = noteSubEu->targetVolLeft;
@@ -1473,12 +1501,20 @@ Acmd* AudioSynth_ProcessEnvelope(Acmd* cmd, NoteSubEu* noteSubEu, NoteSynthesisS
     targetVolRight <<= 4;
 
     if (targetVolLeft != curVolLeft) {
+#if defined(TARGET_PSP)
+        rampLeft = OotPspAudioSynth_DivideEnvelopeRamp(targetVolLeft - curVolLeft, rampSteps);
+#else
         rampLeft = (targetVolLeft - curVolLeft) / (aiBufLen >> 3);
+#endif
     } else {
         rampLeft = 0;
     }
     if (targetVolRight != curVolRight) {
+#if defined(TARGET_PSP)
+        rampRight = OotPspAudioSynth_DivideEnvelopeRamp(targetVolRight - curVolRight, rampSteps);
+#else
         rampRight = (targetVolRight - curVolRight) / (aiBufLen >> 3);
+#endif
     } else {
         rampRight = 0;
     }
@@ -1487,14 +1523,23 @@ Acmd* AudioSynth_ProcessEnvelope(Acmd* cmd, NoteSubEu* noteSubEu, NoteSynthesisS
     phi_t1 = sourceReverbVol & 0x7F;
 
     if (sourceReverbVol != reverbVol) {
+#if defined(TARGET_PSP)
+        rampReverb = OotPspAudioSynth_DivideEnvelopeRamp(((reverbVol & 0x7F) - phi_t1) << 9, rampSteps);
+#else
         rampReverb = (((reverbVol & 0x7F) - phi_t1) << 9) / (aiBufLen >> 3);
+#endif
         synthState->reverbVol = reverbVol;
     } else {
         rampReverb = 0;
     }
 
+#if defined(TARGET_PSP)
+    synthState->curVolLeft = curVolLeft + (rampLeft * rampSteps);
+    synthState->curVolRight = curVolRight + (rampRight * rampSteps);
+#else
     synthState->curVolLeft = curVolLeft + (rampLeft * (aiBufLen >> 3));
     synthState->curVolRight = curVolRight + (rampRight * (aiBufLen >> 3));
+#endif
 
     if (noteSubEu->bitField1.useHaasEffect) {
         AudioSynth_ClearBuffer(cmd++, DMEM_HAAS_TEMP, DMEM_1CH_SIZE);
