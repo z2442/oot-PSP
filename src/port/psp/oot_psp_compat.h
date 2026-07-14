@@ -5,8 +5,30 @@
 #include <stdint.h>
 
 #include "assert.h"
+#include "math.h"
 
 #if defined(TARGET_PSP)
+#ifndef OOT_PSP_FAST_SQRT
+#define OOT_PSP_FAST_SQRT 1
+#endif
+
+#if OOT_PSP_FAST_SQRT
+/* newlib's sqrtf performs a full software IEEE-754 square root on Allegrex.
+ * The game does not consume errno from math calls, so use the PSP's native
+ * single-precision sqrt instruction instead.  Keep this inline to avoid a
+ * call and return in collision and actor-update hot paths. */
+static inline __attribute__((always_inline)) float OotPsp_Sqrtf(float value) {
+    float result;
+
+    __asm__("sqrt.s %0, %1" : "=f"(result) : "f"(value));
+    return result;
+}
+#define sqrtf OotPsp_Sqrtf
+/* The game's double sqrt call sites all operate on f32 geometry and consume
+ * an f32 result. Allegrex has no native double-precision square root. */
+#define sqrt(value) OotPsp_Sqrtf((float)(value))
+#endif
+
 int OotPsp_IsSystemHeapRange(const void* ptr, size_t size);
 
 extern unsigned char __bss_start[];

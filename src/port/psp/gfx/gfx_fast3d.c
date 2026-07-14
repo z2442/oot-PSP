@@ -44,6 +44,18 @@
 
 #define SUPPORT_CHECK(x) assert(x)
 
+#if defined(TARGET_PSP)
+/* Keep substantial display-list handlers out of gfx_run_dl().  That dispatch
+ * loop is hot and needs to fit in the PSP's small instruction cache. */
+#define GFX_DL_HANDLER __attribute__((noinline))
+#else
+#define GFX_DL_HANDLER
+#endif
+
+#ifndef OOT_PSP_GFX_DIAGNOSTICS
+#define OOT_PSP_GFX_DIAGNOSTICS 0
+#endif
+
 // SCALE_M_N: upscale/downscale M-bit integer to N-bit
 #define SCALE_5_8(VAL_) (((VAL_) * 0xFF) / 0x1F)
 #define SCALE_8_5(VAL_) ((((VAL_) + 4) * 0x1F) / 0xFF)
@@ -317,6 +329,11 @@ static bool sUploadedProjectionValid;
 static uint8_t sInvalidTextureBuf[256] __attribute__((aligned(16))) = { 0xff, 0xff, 0xff, 0xff };
 static uint8_t sInvalidPaletteBuf[512] __attribute__((aligned(16))) = { 0xff, 0xff };
 static struct GfxCmdSnapshot sCurrentCmd;
+#if OOT_PSP_GFX_DIAGNOSTICS
+#define GFX_CAPTURE_CMD(dst, src) ((dst) = (src))
+#else
+#define GFX_CAPTURE_CMD(dst, src) ((void)0)
+#endif
 extern u8 __bss_start[];
 
 static inline bool gfx_addr_is_native(uintptr_t addr) {
@@ -2424,7 +2441,7 @@ static uint8_t gfx_clamp_num_lights(uint32_t num_lights) {
 static void gfx_normalize_vector(float v[3]) {
     float dot = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
     if(dot > 0.00001f){
-        const float scale = 1.0f / pspFpuSqrt(dot);
+        const float scale = 1.0f / sqrtf(dot);
         v[0] *= scale;
         v[1] *= scale;
         v[2] *= scale;
@@ -2548,7 +2565,7 @@ static void gfx_apply_modelview_matrix(void) {
     rsp.lights_changed = true;
 }
 
-static void gfx_sp_matrix(uint8_t parameters, const int32_t *addr) {
+static GFX_DL_HANDLER void gfx_sp_matrix(uint8_t parameters, const int32_t *addr) {
     float matrix[4][4] __attribute__((aligned(16)));
 #if defined(TARGET_PSP)
     const void* normalizedSource;
@@ -2895,7 +2912,7 @@ static bool gfx_decode_vertex_cmd_f3dex2(uint32_t w0, uint32_t* n, uint32_t* des
     return true;
 }
 
-static bool gfx_sp_vertex_f3dex2(uint32_t w0, uintptr_t rawAddr) {
+static GFX_DL_HANDLER bool gfx_sp_vertex_f3dex2(uint32_t w0, uintptr_t rawAddr) {
     uint32_t n;
     uint32_t destIndex;
 
@@ -2906,6 +2923,39 @@ static bool gfx_sp_vertex_f3dex2(uint32_t w0, uintptr_t rawAddr) {
     }
 
     return gfx_sp_vertex(n, destIndex, seg_addr(rawAddr));
+}
+#endif
+
+#if defined(TARGET_PSP)
+static inline __attribute__((always_inline)) float gfx_triangle_cross_homogeneous_vfpu(
+    const struct LoadedVertex* v1, const struct LoadedVertex* v2, const struct LoadedVertex* v3) {
+    union {
+        uint32_t bits;
+        float value;
+    } cross;
+
+    /* Each source vector is (_x, _y, _z, _w).  Compute the 2D determinant
+     * after homogeneous projection without scalar divides. */
+    __asm__ volatile(
+        ".set push\n"
+        ".set noreorder\n"
+        "lv.q C000, 16(%[v1])\n"
+        "lv.q C010, 16(%[v2])\n"
+        "lv.q C020, 16(%[v3])\n"
+        "vscl.p C100, C000, S013\n"
+        "vscl.p C110, C010, S003\n"
+        "vsub.p C100, C100, C110\n"
+        "vscl.p C110, C020, S013\n"
+        "vscl.p C120, C010, S023\n"
+        "vsub.p C110, C110, C120\n"
+        "vdet.p S120, C100, C110\n"
+        "mfv %[cross], S120\n"
+        ".set pop\n"
+        : [cross] "=r"(cross.bits)
+        : [v1] "r"(v1), [v2] "r"(v2), [v3] "r"(v3)
+        : "memory");
+
+    return cross.value;
 }
 #endif
 
@@ -2927,13 +2977,9 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
 
         if (clip_flags == 0) {
             /* Fully visible vertices have positive W, so the homogeneous
-             * winding test avoids three divides on the common path. */
-            const float dx1 = v1->_x * v2->_w - v2->_x * v1->_w;
-            const float dy1 = v1->_y * v2->_w - v2->_y * v1->_w;
-            const float dx2 = v3->_x * v2->_w - v2->_x * v3->_w;
-            const float dy2 = v3->_y * v2->_w - v2->_y * v3->_w;
-
-            cross = dx1 * dy2 - dy1 * dx2;
+             * winding test avoids three divides on the common path.  The VFPU
+             * evaluates both projected edge vectors in parallel. */
+            cross = gfx_triangle_cross_homogeneous_vfpu(v1, v2, v3);
         } else {
             /* Scripted cameras can sit outside one-sided scene geometry. A
              * large back face crossing the frustum must be rejected before it
@@ -3324,7 +3370,7 @@ static void gfx_sp_moveword(uint8_t index, uint16_t offset, uint32_t data) {
                     base = normalized;
                 }
                 rsp.segments[segment] = (void*)base;
-                rsp.segment_cmd[segment] = sCurrentCmd;
+                GFX_CAPTURE_CMD(rsp.segment_cmd[segment], sCurrentCmd);
             }
             break;
         }
@@ -3365,7 +3411,7 @@ static void gfx_dp_set_texture_image(uint32_t format, uint32_t size, uint32_t wi
     rdp.texture_to_load.siz = size;
     rdp.texture_to_load.width = width;
 #if defined(TARGET_PSP)
-    rdp.texture_to_load.image_cmd = sCurrentCmd;
+    GFX_CAPTURE_CMD(rdp.texture_to_load.image_cmd, sCurrentCmd);
 #endif
 }
 
@@ -3462,8 +3508,8 @@ static void gfx_dp_load_tlut(UNUSED uint8_t tile, uint32_t high_index) {
 #endif
     rdp.palette = rdp.texture_to_load.addr;
 #if defined(TARGET_PSP)
-    rdp.loaded_texture[loadSlot].image_cmd = rdp.texture_to_load.image_cmd;
-    rdp.loaded_texture[loadSlot].load_cmd = sCurrentCmd;
+    GFX_CAPTURE_CMD(rdp.loaded_texture[loadSlot].image_cmd, rdp.texture_to_load.image_cmd);
+    GFX_CAPTURE_CMD(rdp.loaded_texture[loadSlot].load_cmd, sCurrentCmd);
 #endif
 }
 
@@ -3509,8 +3555,8 @@ static void gfx_dp_load_block(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t
     rdp.loaded_texture[loadSlot].row_stride_bytes = 0;
     rdp.loaded_texture[loadSlot].source_nibble_offset = 0;
 #if defined(TARGET_PSP)
-    rdp.loaded_texture[loadSlot].image_cmd = rdp.texture_to_load.image_cmd;
-    rdp.loaded_texture[loadSlot].load_cmd = sCurrentCmd;
+    GFX_CAPTURE_CMD(rdp.loaded_texture[loadSlot].image_cmd, rdp.texture_to_load.image_cmd);
+    GFX_CAPTURE_CMD(rdp.loaded_texture[loadSlot].load_cmd, sCurrentCmd);
     if (size_bytes > 4096U) {
         gfx_log_bad_texture_source(loadSlot, "load-block-size", rdp.texture_to_load.addr, size_bytes);
         gfx_set_invalid_loaded_texture(loadSlot);
@@ -3578,8 +3624,8 @@ static void gfx_dp_load_tile(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t 
     rdp.loaded_texture[loadSlot].source_nibble_offset =
         rdp.texture_to_load.siz == G_IM_SIZ_4b ? (source_uls & 1) : 0;
 #if defined(TARGET_PSP)
-    rdp.loaded_texture[loadSlot].image_cmd = rdp.texture_to_load.image_cmd;
-    rdp.loaded_texture[loadSlot].load_cmd = sCurrentCmd;
+    GFX_CAPTURE_CMD(rdp.loaded_texture[loadSlot].image_cmd, rdp.texture_to_load.image_cmd);
+    GFX_CAPTURE_CMD(rdp.loaded_texture[loadSlot].load_cmd, sCurrentCmd);
 #endif
 
 #if defined(TARGET_PSP)
@@ -3699,6 +3745,87 @@ static void gfx_dp_set_combine_mode(uint32_t rgb, uint32_t alpha, bool color_mul
     rdp.combine_color_mul_prim = color_mul_prim;
     rdp.combine_two_texture_blend = two_texture_blend;
     gfx_mark_tri_pipeline_dirty();
+}
+
+static GFX_DL_HANDLER void gfx_dp_set_combine(uint32_t w0, uint32_t w1) {
+#define COMB_FIELD(word, pos, width) (((word) >> (pos)) & ((1U << (width)) - 1))
+    uint32_t rgbA0 = COMB_FIELD(w0, 20, 4);
+    uint32_t rgbB0 = COMB_FIELD(w1, 28, 4);
+    uint32_t rgbC0 = COMB_FIELD(w0, 15, 5);
+    uint32_t rgbD0 = COMB_FIELD(w1, 15, 3);
+    uint32_t alphaA0 = COMB_FIELD(w0, 12, 3);
+    uint32_t alphaB0 = COMB_FIELD(w1, 12, 3);
+    uint32_t alphaC0 = COMB_FIELD(w0, 9, 3);
+    uint32_t alphaD0 = COMB_FIELD(w1, 9, 3);
+    uint32_t rgbA1 = COMB_FIELD(w0, 5, 4);
+    uint32_t rgbB1 = COMB_FIELD(w1, 24, 4);
+    uint32_t rgbC1 = COMB_FIELD(w0, 0, 5);
+    uint32_t rgbD1 = COMB_FIELD(w1, 6, 3);
+    uint32_t alphaA1 = COMB_FIELD(w1, 21, 3);
+    uint32_t alphaB1 = COMB_FIELD(w1, 3, 3);
+    uint32_t alphaC1 = COMB_FIELD(w1, 18, 3);
+    uint32_t alphaD1 = COMB_FIELD(w1, 0, 3);
+    bool colorMulTexelShade =
+        gfx_cc_is_color_mul(rgbA0, rgbB0, rgbC0, rgbD0, G_CCMUX_TEXEL0, G_CCMUX_SHADE);
+    bool colorMulEnv = colorMulTexelShade &&
+                       gfx_cc_is_color_mul(rgbA1, rgbB1, rgbC1, rgbD1, G_CCMUX_ENVIRONMENT,
+                                           G_CCMUX_COMBINED);
+    bool colorMulPrim = colorMulTexelShade &&
+                        gfx_cc_is_color_mul(rgbA1, rgbB1, rgbC1, rgbD1, G_CCMUX_COMBINED,
+                                            G_CCMUX_PRIMITIVE);
+    bool colorMulShadePrim =
+        gfx_cc_is_color_mul(rgbA0, rgbB0, rgbC0, rgbD0, G_CCMUX_SHADE, G_CCMUX_PRIMITIVE);
+    bool textureBlend = gfx_cc_is_texture_prim_env_blend(rgbA0, rgbB0, rgbC0, rgbD0);
+    bool textureBlendShade = false;
+    bool twoTextureBlend = false;
+    uint32_t rgbComb = color_comb(rgbA0, rgbB0, rgbC0, rgbD0);
+    uint32_t alphaComb = color_comb(alphaA0, alphaB0, alphaC0, alphaD0);
+
+#if defined(TARGET_PSP)
+    if (colorMulShadePrim) {
+        /* The GU has one vertex-color input. Keep SHADE as that input and
+         * apply the constant PRIMITIVE tint on the CPU. */
+        rgbComb = color_comb(G_CCMUX_0, G_CCMUX_0, G_CCMUX_0, G_CCMUX_SHADE);
+        colorMulPrim = true;
+    }
+
+    if (((rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE) &&
+        gfx_cc_is_one(alphaA0, alphaB0, alphaC0, alphaD0) &&
+        gfx_cc_is_combined_mul_primitive(alphaA1, alphaB1, alphaC1, alphaD1)) {
+        alphaComb = color_comb(G_ACMUX_0, G_ACMUX_0, G_ACMUX_0, G_ACMUX_PRIMITIVE);
+    }
+
+    if (gfx_cc_is_two_cycle_texture_blend_mul_shade(rgbA0, rgbB0, rgbC0, rgbD0, rgbA1, rgbB1, rgbC1,
+                                                    rgbD1)) {
+        twoTextureBlend = true;
+        rgbComb = color_comb(G_CCMUX_TEXEL0, G_CCMUX_0, G_CCMUX_SHADE, G_CCMUX_0);
+        if (gfx_cc_is_combined_mul_primitive(alphaA1, alphaB1, alphaC1, alphaD1)) {
+            alphaComb = color_comb(G_ACMUX_0, G_ACMUX_0, G_ACMUX_0, G_ACMUX_PRIMITIVE);
+        }
+    }
+
+    if (gfx_cc_is_two_cycle_texture_tint(rgbA0, rgbB0, rgbC0, rgbD0, rgbA1, rgbB1, rgbC1, rgbD1)) {
+        rgbComb = color_comb(G_CCMUX_TEXEL0, G_CCMUX_0, G_CCMUX_PRIMITIVE, G_CCMUX_0);
+        if (gfx_cc_is_combined_mul_primitive(alphaA1, alphaB1, alphaC1, alphaD1) &&
+            !gfx_cc_is_one(alphaA0, alphaB0, alphaC0, alphaD0)) {
+            alphaComb = color_comb(G_ACMUX_TEXEL0, G_ACMUX_0, G_ACMUX_PRIMITIVE, G_ACMUX_0);
+        } else if (gfx_cc_is_one(alphaA1, alphaB1, alphaC1, alphaD1)) {
+            alphaComb = color_comb(G_ACMUX_0, G_ACMUX_0, G_ACMUX_0, G_ACMUX_1);
+        }
+        textureBlend = true;
+    }
+
+    if (gfx_cc_is_two_cycle_texture_shade_prim_tint(rgbA0, rgbB0, rgbC0, rgbD0, rgbA1, rgbB1, rgbC1,
+                                                     rgbD1)) {
+        rgbComb = color_comb(G_CCMUX_TEXEL0, G_CCMUX_0, G_CCMUX_SHADE, G_CCMUX_0);
+        textureBlend = true;
+        textureBlendShade = true;
+    }
+#endif
+
+    gfx_dp_set_combine_mode(rgbComb, alphaComb, colorMulEnv, colorMulPrim, textureBlend, textureBlendShade,
+                            twoTextureBlend);
+#undef COMB_FIELD
 }
 
 static void gfx_dp_set_env_color(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
@@ -4047,6 +4174,7 @@ static void gfx_log_unmapped_segment(uintptr_t addr) {
 }
 
 static void gfx_log_segment_translation(uintptr_t addr, void* base, void* translated) {
+#if OOT_PSP_GFX_DIAGNOSTICS
     static s32 sSegmentTranslateLogCount = 0;
     uint8_t segment = addr >> 24;
 
@@ -4063,6 +4191,11 @@ static void gfx_log_segment_translation(uintptr_t addr, void* base, void* transl
     }
 
     sSegmentTranslateLogCount++;
+#else
+    _UNUSED(addr);
+    _UNUSED(base);
+    _UNUSED(translated);
+#endif
 }
 
 static void gfx_log_bad_dl_cursor(const char* reason, uintptr_t raw, uintptr_t translated) {
@@ -4319,15 +4452,15 @@ static bool gfx_s2dex_bg_prepare_texture(const uint8_t* source, uint32_t width, 
     rdp.texture_to_load.siz = siz;
     rdp.texture_to_load.width = width;
     rdp.texture_to_load.tile_number = tile;
-    rdp.texture_to_load.image_cmd = sCurrentCmd;
+    GFX_CAPTURE_CMD(rdp.texture_to_load.image_cmd, sCurrentCmd);
 
     rdp.loaded_texture[tile].addr = source;
     rdp.loaded_texture[tile].size_bytes = sourceSpan;
     rdp.loaded_texture[tile].source_size_bytes = sourceSpan;
     rdp.loaded_texture[tile].row_stride_bytes = rowBytes;
     rdp.loaded_texture[tile].source_nibble_offset = 0;
-    rdp.loaded_texture[tile].image_cmd = sCurrentCmd;
-    rdp.loaded_texture[tile].load_cmd = sCurrentCmd;
+    GFX_CAPTURE_CMD(rdp.loaded_texture[tile].image_cmd, sCurrentCmd);
+    GFX_CAPTURE_CMD(rdp.loaded_texture[tile].load_cmd, sCurrentCmd);
 
     TextureTileState* tileState = gfx_get_texture_tile(tile);
 
@@ -4370,7 +4503,7 @@ static uint32_t gfx_s2dex_bg_texcoord_span(uint32_t frameSpan, uint16_t scale, b
     return frameSpan * 8;
 }
 
-static void gfx_sp_s2dex_bg_rect(uint32_t opcode, const void* bgAddr) {
+static GFX_DL_HANDLER void gfx_sp_s2dex_bg_rect(uint32_t opcode, const void* bgAddr) {
     const void* normalizedBg;
     const uObjBg* bg;
     const uint8_t* source;
@@ -4488,7 +4621,7 @@ static void gfx_run_dl(Gfx* cmd) {
 
     for (;;) {
         uint32_t opcode = cmd->words.w0 >> 24;
-#if defined(TARGET_PSP)
+#if defined(TARGET_PSP) && OOT_PSP_GFX_DIAGNOSTICS
         sCurrentCmd.addr = (uintptr_t)cmd;
         sCurrentCmd.w0 = cmd->words.w0;
         sCurrentCmd.w1 = cmd->words.w1;
@@ -4685,108 +4818,8 @@ static void gfx_run_dl(Gfx* cmd) {
                 gfx_dp_set_fill_color(cmd->words.w1);
                 break;
             case G_SETCOMBINE:
-            {
-                uint32_t rgbA0 = C0(20, 4);
-                uint32_t rgbB0 = C1(28, 4);
-                uint32_t rgbC0 = C0(15, 5);
-                uint32_t rgbD0 = C1(15, 3);
-                uint32_t alphaA0 = C0(12, 3);
-                uint32_t alphaB0 = C1(12, 3);
-                uint32_t alphaC0 = C0(9, 3);
-                uint32_t alphaD0 = C1(9, 3);
-                uint32_t rgbA1 = C0(5, 4);
-                uint32_t rgbB1 = C1(24, 4);
-                uint32_t rgbC1 = C0(0, 5);
-                uint32_t rgbD1 = C1(6, 3);
-                uint32_t alphaA1 = C1(21, 3);
-                uint32_t alphaB1 = C1(3, 3);
-                uint32_t alphaC1 = C1(18, 3);
-                uint32_t alphaD1 = C1(0, 3);
-                bool colorMulTexelShade = gfx_cc_is_color_mul(rgbA0, rgbB0, rgbC0, rgbD0, G_CCMUX_TEXEL0,
-                                                              G_CCMUX_SHADE);
-                bool colorMulEnv = colorMulTexelShade && gfx_cc_is_color_mul(rgbA1, rgbB1, rgbC1, rgbD1,
-                                                                              G_CCMUX_ENVIRONMENT,
-                                                                              G_CCMUX_COMBINED);
-                bool colorMulPrim = colorMulTexelShade && gfx_cc_is_color_mul(rgbA1, rgbB1, rgbC1, rgbD1,
-                                                                               G_CCMUX_COMBINED,
-                                                                               G_CCMUX_PRIMITIVE);
-                bool colorMulShadePrim = gfx_cc_is_color_mul(rgbA0, rgbB0, rgbC0, rgbD0, G_CCMUX_SHADE,
-                                                              G_CCMUX_PRIMITIVE);
-                bool textureBlend = gfx_cc_is_texture_prim_env_blend(rgbA0, rgbB0, rgbC0, rgbD0);
-                bool textureBlendShade = false;
-                bool twoTextureBlend = false;
-                uint32_t rgbComb = color_comb(rgbA0, rgbB0, rgbC0, rgbD0);
-                uint32_t alphaComb = color_comb(alphaA0, alphaB0, alphaC0, alphaD0);
-
-#if defined(TARGET_PSP)
-                if (colorMulShadePrim) {
-                    /*
-                     * The GU has only one vertex-color input. Keep SHADE as that input and apply the constant
-                     * PRIMITIVE tint on the CPU; selecting the last combiner input instead turns dark untextured
-                     * geometry (such as the Temple of Time ceiling and entrance recess) primitive white.
-                     */
-                    rgbComb = color_comb(G_CCMUX_0, G_CCMUX_0, G_CCMUX_0, G_CCMUX_SHADE);
-                    colorMulPrim = true;
-                }
-
-                if (((rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE) &&
-                    gfx_cc_is_one(alphaA0, alphaB0, alphaC0, alphaD0) &&
-                    gfx_cc_is_combined_mul_primitive(alphaA1, alphaB1, alphaC1, alphaD1)) {
-                    alphaComb = color_comb(G_ACMUX_0, G_ACMUX_0, G_ACMUX_0, G_ACMUX_PRIMITIVE);
-                }
-
-                if (gfx_cc_is_two_cycle_texture_blend_mul_shade(rgbA0, rgbB0, rgbC0, rgbD0, rgbA1, rgbB1, rgbC1,
-                                                               rgbD1)) {
-                    // Draw this as two passes on the single-texture GU backend.
-                    twoTextureBlend = true;
-                    rgbComb = color_comb(G_CCMUX_TEXEL0, G_CCMUX_0, G_CCMUX_SHADE, G_CCMUX_0);
-                    if (gfx_cc_is_combined_mul_primitive(alphaA1, alphaB1, alphaC1, alphaD1)) {
-                        alphaComb = color_comb(G_ACMUX_0, G_ACMUX_0, G_ACMUX_0, G_ACMUX_PRIMITIVE);
-                    }
-                }
-
-                if (gfx_cc_is_two_cycle_texture_tint(rgbA0, rgbB0, rgbC0, rgbD0, rgbA1, rgbB1, rgbC1, rgbD1)) {
-                    /*
-                     * The second RDP cycle tints the first cycle between ENVIRONMENT and PRIMITIVE:
-                     *
-                     *   (PRIMITIVE - ENVIRONMENT) * COMBINED + ENVIRONMENT
-                     *
-                     * The GU cannot execute both cycles, so use TEXEL0 as the approximation for COMBINED and
-                     * let GU_TFX_BLEND preserve both tint endpoints.  Modulating TEXEL0 by PRIMITIVE (the old
-                     * fallback) discarded ENVIRONMENT completely, which made spiritual stones and other gems
-                    * too dark and gave them the wrong hue.
-                     */
-                    rgbComb = color_comb(G_CCMUX_TEXEL0, G_CCMUX_0, G_CCMUX_PRIMITIVE, G_CCMUX_0);
-                    if (gfx_cc_is_combined_mul_primitive(alphaA1, alphaB1, alphaC1, alphaD1) &&
-                        !gfx_cc_is_one(alphaA0, alphaB0, alphaC0, alphaD0)) {
-                        /* Translucent gems use the first-cycle texture result as their coverage. */
-                        alphaComb = color_comb(G_ACMUX_TEXEL0, G_ACMUX_0, G_ACMUX_PRIMITIVE, G_ACMUX_0);
-                    } else if (gfx_cc_is_one(alphaA1, alphaB1, alphaC1, alphaD1)) {
-                        alphaComb = color_comb(G_ACMUX_0, G_ACMUX_0, G_ACMUX_0, G_ACMUX_1);
-                    }
-                    textureBlend = true;
-                }
-
-                if (gfx_cc_is_two_cycle_texture_shade_prim_tint(rgbA0, rgbB0, rgbC0, rgbD0, rgbA1, rgbB1,
-                                                                rgbC1, rgbD1)) {
-                    /*
-                     * Recovery hearts tint their texture between PRIMITIVE and per-vertex SHADE in cycle two.
-                     * Preserve both colored endpoints with the GU blend unit instead of displaying cycle one's
-                     * grayscale texture.  The GU blend direction is reversed, but both endpoints are heart colors.
-                     */
-                    rgbComb = color_comb(G_CCMUX_TEXEL0, G_CCMUX_0, G_CCMUX_SHADE, G_CCMUX_0);
-                    textureBlend = true;
-                    textureBlendShade = true;
-                }
-#endif
-
-                gfx_dp_set_combine_mode(rgbComb, alphaComb, colorMulEnv, colorMulPrim, textureBlend,
-                                        textureBlendShade,
-                                        twoTextureBlend);
-                    /*color_comb(C0(5, 4), C1(24, 4), C0(0, 5), C1(6, 3)),
-                    color_comb(C1(21, 3), C1(3, 3), C1(18, 3), C1(0, 3)));*/
+                gfx_dp_set_combine(cmd->words.w0, cmd->words.w1);
                 break;
-            }
             // G_SETPRIMCOLOR, G_CCMUX_PRIMITIVE, G_ACMUX_PRIMITIVE, is used by Goddard
             // G_CCMUX_TEXEL1, LOD_FRACTION is used in Bowser room 1
             case G_TEXRECT:
@@ -4861,8 +4894,10 @@ static void gfx_sp_reset() {
     gfx_update_screen_metrics();
     memset(rsp.segments, 0, sizeof(rsp.segments));
 #if defined(TARGET_PSP)
+#if OOT_PSP_GFX_DIAGNOSTICS
     memset(rsp.segment_cmd, 0, sizeof(rsp.segment_cmd));
     memset(&sCurrentCmd, 0, sizeof(sCurrentCmd));
+#endif
 #endif
 }
 
