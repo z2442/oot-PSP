@@ -82,6 +82,7 @@ AudioTask* AudioThread_UpdateImpl(void) {
     index = (gAudioCtx.curAiBufIndex - 2 + 3) % 3;
     samplesRemainingInAi = osAiGetLength() / 4;
 
+#if !defined(TARGET_PSP)
     if (gAudioCtx.resetTimer < 16) {
         if (gAudioCtx.aiBufLengths[index] != 0) {
             osAiSetNextBuffer(gAudioCtx.aiBuffers[index], gAudioCtx.aiBufLengths[index] * 4);
@@ -89,6 +90,7 @@ AudioTask* AudioThread_UpdateImpl(void) {
             if (gAudioCtx.aiBufLengths[index]) {}
         }
     }
+#endif
 
     if (gAudioCustomUpdateFunction != NULL) {
         gAudioCustomUpdateFunction();
@@ -172,14 +174,16 @@ AudioTask* AudioThread_UpdateImpl(void) {
     gAudioCtx.curAbiCmdBuf =
         AudioSynth_Update(gAudioCtx.curAbiCmdBuf, &abiCmdCnt, curAiBuffer, gAudioCtx.aiBufLengths[index]);
 #if defined(TARGET_PSP)
-    OotPspAudioBackend_SubmitCommands(gAudioCtx.abiCmdBufs[gAudioCtx.rspTaskIndex], abiCmdCnt);
+    OotPspAudioBackend_SubmitCommandsAndQueue(gAudioCtx.abiCmdBufs[gAudioCtx.rspTaskIndex], abiCmdCnt,
+                                              curAiBuffer, gAudioCtx.aiBufLengths[index] * 4);
 #endif
 
     // Update audioRandom to the next random number
     gAudioCtx.audioRandom = (gAudioCtx.audioRandom + gAudioCtx.totalTaskCount) * osGetCount();
 #if defined(TARGET_PSP)
-    gAudioCtx.audioRandom =
-        gAudioCtx.audioRandom + gAudioCtx.aiBuffers[(gAudioCtx.curAiBufIndex + 2) % 3][gAudioCtx.totalTaskCount & 0xFF];
+    /* The ME queues completed PCM directly from its cache. Keep the AI
+     * buffers private instead of synchronizing one back just for entropy. */
+    gAudioCtx.audioRandom += ((u32)abiCmdCnt << 16) ^ (u16)gAudioCtx.aiBufLengths[index];
 #else
     gAudioCtx.audioRandom = gAudioCtx.audioRandom + gAudioCtx.aiBuffers[index][gAudioCtx.totalTaskCount & 0xFF];
 #endif

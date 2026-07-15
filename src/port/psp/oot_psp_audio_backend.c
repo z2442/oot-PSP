@@ -19,6 +19,9 @@
 #ifndef OOT_PSP_AUDIO_SOURCE_FREQUENCY
 #define OOT_PSP_AUDIO_SOURCE_FREQUENCY 22050
 #endif
+#ifndef OOT_PSP_AUDIO_HARDWARE_SRC
+#define OOT_PSP_AUDIO_HARDWARE_SRC 1
+#endif
 #define OOT_PSP_AUDIO_DEFAULT_SOURCE_FREQUENCY OOT_PSP_AUDIO_SOURCE_FREQUENCY
 #define OOT_PSP_AUDIO_OUTPUT_FREQUENCY 44100
 #define OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES 768
@@ -50,12 +53,9 @@ static volatile s32 sOotPspAudioInitialized = false;
 
 #define OOT_PSP_AUDIO_MAX_UPDATES_NORMAL 8
 #define OOT_PSP_AUDIO_MAX_UPDATES_CATCHUP 3
-/*
- * AudioThread_Update submits a buffer synthesized two updates earlier. The
- * first two submissions are only the 160-frame initialization buffers, so
- * prime those plus enough real buffers to reach the playback high-water mark.
- */
-#define OOT_PSP_AUDIO_MAX_UPDATES_PRIME (OOT_PSP_AUDIO_TARGET_CHUNKS + 2)
+/* Initial and dynamically sized AI buffers can be shorter than one nominal
+ * source chunk, so allow one extra update while priming the high-water mark. */
+#define OOT_PSP_AUDIO_MAX_UPDATES_PRIME (OOT_PSP_AUDIO_TARGET_CHUNKS + 1)
 #define OOT_PSP_AUDIO_UPDATE_USEC (1000000U / 60U)
 #define OOT_PSP_AUDIO_EXTERNAL_POOL_SIZE (2 * 1024 * 1024)
 #define OOT_PSP_AUDIO_ME_TIMEOUT_US 250000
@@ -128,10 +128,14 @@ static volatile s32 sAudioPlaybackPrimed;
 static volatile s32 sAudioMeInitialized;
 static volatile s32 sAudioMeCommandPending;
 static volatile u32 sAudioSourceFrequency = OOT_PSP_AUDIO_DEFAULT_SOURCE_FREQUENCY;
+static volatile u32 sAudioSourceChunkFrames;
 
 static const Acmd* sAudioMePendingCmdList;
 static s32 sAudioMePendingCmdCount;
 static u32 sAudioMePendingStartTime;
+static const s16* sAudioMePendingQueueSrc;
+static u32 sAudioMePendingQueueFrames;
+static u32 sAudioMePendingQueueWritePos;
 static u32 sAudioResampleFrac;
 static u32 sAudioResampleStep;
 static s16 sAudioLastLeft;
@@ -152,13 +156,18 @@ static SceUID sAudioMeLockSema = -1;
 static SceUID sAudioMeCompletionSema = -1;
 static s32 sAudioMeCompletionInterruptReady;
 static s32 sAudioOutputChannel = -1;
+static s32 sAudioHardwareSrc;
 
 void AudioThread_InitExternalPool(void* ramAddr, u32 size);
 static s32 OotPspAudioBackend_EnsureMeLockSema(void);
 static s32 OotPspAudioBackend_EnsureMeCompletionInterrupt(void);
-static void OotPspAudioBackend_MeInvalidateInputs(const Acmd* cmdList, s32 cmdCount);
-static void OotPspAudioBackend_MeWritebackOutputs(const Acmd* cmdList, s32 cmdCount);
-static void OotPspAudioBackend_MeQueueBuffer(void);
+static void OotPspAudioBackend_MeInvalidateInputs(const Acmd* cmdList, s32 cmdCount,
+                                                  const void* privateOutput, u32 privateOutputBytes);
+static void OotPspAudioBackend_MeWritebackOutputs(const Acmd* cmdList, s32 cmdCount,
+                                                  const void* privateOutput, u32 privateOutputBytes);
+static void OotPspAudioBackend_MeQueueBuffer(s32 invalidateSource);
+static void OotPspAudioBackend_QueueCpuCopy(const s16* samples, u32 frames, u32 writePos);
+static u32 OotPspAudioBackend_FreeFrames(void);
 
 __attribute__((noinline, aligned(4))) void meLibOnException(void) {
     sAudioMeState = OOT_PSP_AUDIO_ME_STATE_FAULT;
@@ -191,13 +200,22 @@ __attribute__((noinline, aligned(4))) void meLibOnProcess(void) {
         if (sAudioMeState == OOT_PSP_AUDIO_ME_STATE_RUN) {
             const Acmd* cmdList = (const Acmd*)(uintptr_t)sAudioMeCmdList;
             s32 cmdCount = (s32)sAudioMeCmdCount;
+            const void* privateOutput = (const void*)(uintptr_t)sAudioMeQueueSrc;
+            u32 privateOutputBytes = sAudioMeQueueFrames * OOT_PSP_AUDIO_CHANNELS * sizeof(s16);
 
             sAudioMeProgress = 1;
-            OotPspAudioBackend_MeInvalidateInputs(cmdList, cmdCount);
+            OotPspAudioBackend_MeInvalidateInputs(cmdList, cmdCount, privateOutput, privateOutputBytes);
             sAudioMeProgress = 2;
             OotPspMixer_ExecuteCommandListMe(cmdList, cmdCount);
-            sAudioMeProgress = 3;
-            OotPspAudioBackend_MeWritebackOutputs(cmdList, cmdCount);
+            if (sAudioMeQueueFrames != 0) {
+                sAudioMeProgress = 3;
+                /* A_SAVEBUFF just produced this PCM in the ME cache. Copy it
+                 * into the ring before writeback instead of flushing and
+                 * immediately reloading the same samples. */
+                OotPspAudioBackend_MeQueueBuffer(false);
+            }
+            sAudioMeProgress = 4;
+            OotPspAudioBackend_MeWritebackOutputs(cmdList, cmdCount, privateOutput, privateOutputBytes);
             meLibSync();
             sAudioMeState = OOT_PSP_AUDIO_ME_STATE_IDLE;
             meLibSync();
@@ -206,7 +224,7 @@ __attribute__((noinline, aligned(4))) void meLibOnProcess(void) {
             }
         } else if (sAudioMeState == OOT_PSP_AUDIO_ME_STATE_QUEUE_BUFFER) {
             sAudioMeProgress = 1;
-            OotPspAudioBackend_MeQueueBuffer();
+            OotPspAudioBackend_MeQueueBuffer(true);
             sAudioMeProgress = 2;
             meLibSync();
             sAudioMeState = OOT_PSP_AUDIO_ME_STATE_IDLE;
@@ -231,6 +249,10 @@ static s32 OotPspAudioBackend_InitMe(void) {
     sAudioMeCmdList = 0;
     sAudioMeCmdCount = 0;
     sAudioMeProgress = 0;
+    sAudioMeQueueSrc = 0;
+    sAudioMeQueueFrames = 0;
+    sAudioMeQueueWritePos = 0;
+    sAudioMeQueueResultWritePos = 0;
     sAudioMeCompletionInterruptEnabled = false;
     ret = OotPspAudioBackend_EnsureMeLockSema();
     if (ret < 0) {
@@ -341,6 +363,19 @@ static u32 OotPspAudioBackend_CommandDmaSize(u32 w0) {
     return ((w0 >> 16) & 0xFF) << 4;
 }
 
+static s32 OotPspAudioBackend_RangeIsWithin(const void* address, u32 size, const void* container,
+                                            u32 containerSize) {
+    uintptr_t start = (uintptr_t)address;
+    uintptr_t containerStart = (uintptr_t)container;
+
+    if ((address == NULL) || (size == 0) || (container == NULL) || (containerSize == 0) ||
+        (start < containerStart)) {
+        return false;
+    }
+
+    return (start - containerStart <= containerSize) && (size <= containerSize - (start - containerStart));
+}
+
 static void OotPspAudioBackend_ResetMeWriteRanges(void) {
     sAudioMeWriteRangeCount = 0;
     sAudioMeWriteRangeOverflow = false;
@@ -386,12 +421,16 @@ static void OotPspAudioBackend_RecordMeWriteRange(void* address, u32 size) {
     sAudioMeWriteRangeCount++;
 }
 
-static void OotPspAudioBackend_WritebackMeInputs(const Acmd* cmdList, s32 cmdCount) {
+static void OotPspAudioBackend_WritebackMeInputs(const Acmd* cmdList, s32 cmdCount, const void* privateOutput,
+                                                 u32 privateOutputBytes) {
     void* filterLut = NULL;
     s32 i;
 
     OotPspAudioBackend_ResetMeWriteRanges();
     OotPspAudioBackend_WritebackRange(cmdList, cmdCount * sizeof(Acmd));
+    /* The ME overwrites this entire range. Preserve only its neighboring
+     * bytes; the completed PCM is copied straight into the playback ring. */
+    OotPspAudioBackend_WritebackBoundaryRange(privateOutput, privateOutputBytes);
 
     for (i = 0; i < cmdCount; i++) {
         u32 w0 = cmdList[i].words.w0;
@@ -429,10 +468,14 @@ static void OotPspAudioBackend_WritebackMeInputs(const Acmd* cmdList, s32 cmdCou
                 break;
 
             case A_SAVEBUFF:
-                OotPspAudioBackend_WritebackBoundaryRange((void*)(uintptr_t)w1,
+                if (!OotPspAudioBackend_RangeIsWithin((void*)(uintptr_t)w1,
+                                                      OotPspAudioBackend_CommandDmaSize(w0), privateOutput,
+                                                      privateOutputBytes)) {
+                    OotPspAudioBackend_WritebackBoundaryRange((void*)(uintptr_t)w1,
+                                                              OotPspAudioBackend_CommandDmaSize(w0));
+                    OotPspAudioBackend_RecordMeWriteRange((void*)(uintptr_t)w1,
                                                           OotPspAudioBackend_CommandDmaSize(w0));
-                OotPspAudioBackend_RecordMeWriteRange((void*)(uintptr_t)w1,
-                                                      OotPspAudioBackend_CommandDmaSize(w0));
+                }
                 break;
 
             case A_SETLOOP:
@@ -452,11 +495,13 @@ static void OotPspAudioBackend_WritebackMeInputs(const Acmd* cmdList, s32 cmdCou
     }
 }
 
-static void OotPspAudioBackend_MeInvalidateInputs(const Acmd* cmdList, s32 cmdCount) {
+static void OotPspAudioBackend_MeInvalidateInputs(const Acmd* cmdList, s32 cmdCount, const void* privateOutput,
+                                                  u32 privateOutputBytes) {
     void* filterLut = NULL;
     s32 i;
 
     OotPspAudioBackend_MeInvalidateRange(cmdList, cmdCount * sizeof(Acmd));
+    OotPspAudioBackend_MeInvalidateRange(privateOutput, privateOutputBytes);
 
     for (i = 0; i < cmdCount; i++) {
         u32 w0 = cmdList[i].words.w0;
@@ -491,7 +536,12 @@ static void OotPspAudioBackend_MeInvalidateInputs(const Acmd* cmdList, s32 cmdCo
                 break;
 
             case A_SAVEBUFF:
-                OotPspAudioBackend_MeInvalidateRange((void*)(uintptr_t)w1, OotPspAudioBackend_CommandDmaSize(w0));
+                if (!OotPspAudioBackend_RangeIsWithin((void*)(uintptr_t)w1,
+                                                      OotPspAudioBackend_CommandDmaSize(w0), privateOutput,
+                                                      privateOutputBytes)) {
+                    OotPspAudioBackend_MeInvalidateRange((void*)(uintptr_t)w1,
+                                                         OotPspAudioBackend_CommandDmaSize(w0));
+                }
                 break;
 
             case A_SETLOOP:
@@ -511,7 +561,8 @@ static void OotPspAudioBackend_MeInvalidateInputs(const Acmd* cmdList, s32 cmdCo
     }
 }
 
-static void OotPspAudioBackend_MeWritebackOutputs(const Acmd* cmdList, s32 cmdCount) {
+static void OotPspAudioBackend_MeWritebackOutputs(const Acmd* cmdList, s32 cmdCount, const void* privateOutput,
+                                                  u32 privateOutputBytes) {
     void* filterLut = NULL;
     s32 i;
 
@@ -538,7 +589,12 @@ static void OotPspAudioBackend_MeWritebackOutputs(const Acmd* cmdList, s32 cmdCo
                 break;
 
             case A_SAVEBUFF:
-                OotPspAudioBackend_MeWritebackRange((void*)(uintptr_t)w1, OotPspAudioBackend_CommandDmaSize(w0));
+                if (!OotPspAudioBackend_RangeIsWithin((void*)(uintptr_t)w1,
+                                                      OotPspAudioBackend_CommandDmaSize(w0), privateOutput,
+                                                      privateOutputBytes)) {
+                    OotPspAudioBackend_MeWritebackRange((void*)(uintptr_t)w1,
+                                                        OotPspAudioBackend_CommandDmaSize(w0));
+                }
                 break;
 
             default:
@@ -547,7 +603,9 @@ static void OotPspAudioBackend_MeWritebackOutputs(const Acmd* cmdList, s32 cmdCo
     }
 }
 
-static void OotPspAudioBackend_InvalidateMeWritesFromCommands(const Acmd* cmdList, s32 cmdCount) {
+static void OotPspAudioBackend_InvalidateMeWritesFromCommands(const Acmd* cmdList, s32 cmdCount,
+                                                              const void* privateOutput,
+                                                              u32 privateOutputBytes) {
     void* filterLut = NULL;
     s32 i;
 
@@ -574,7 +632,12 @@ static void OotPspAudioBackend_InvalidateMeWritesFromCommands(const Acmd* cmdLis
                 break;
 
             case A_SAVEBUFF:
-                OotPspAudioBackend_InvalidateRange((void*)(uintptr_t)w1, OotPspAudioBackend_CommandDmaSize(w0));
+                if (!OotPspAudioBackend_RangeIsWithin((void*)(uintptr_t)w1,
+                                                      OotPspAudioBackend_CommandDmaSize(w0), privateOutput,
+                                                      privateOutputBytes)) {
+                    OotPspAudioBackend_InvalidateRange((void*)(uintptr_t)w1,
+                                                       OotPspAudioBackend_CommandDmaSize(w0));
+                }
                 break;
 
             default:
@@ -583,11 +646,12 @@ static void OotPspAudioBackend_InvalidateMeWritesFromCommands(const Acmd* cmdLis
     }
 }
 
-static void OotPspAudioBackend_InvalidateMeWrites(const Acmd* cmdList, s32 cmdCount) {
+static void OotPspAudioBackend_InvalidateMeWrites(const Acmd* cmdList, s32 cmdCount, const void* privateOutput,
+                                                  u32 privateOutputBytes) {
     u32 i;
 
     if (sAudioMeWriteRangeOverflow) {
-        OotPspAudioBackend_InvalidateMeWritesFromCommands(cmdList, cmdCount);
+        OotPspAudioBackend_InvalidateMeWritesFromCommands(cmdList, cmdCount, privateOutput, privateOutputBytes);
     } else {
         for (i = 0; i < sAudioMeWriteRangeCount; i++) {
             sceKernelDcacheInvalidateRange(sAudioMeWriteRanges[i].address, sAudioMeWriteRanges[i].size);
@@ -597,10 +661,53 @@ static void OotPspAudioBackend_InvalidateMeWrites(const Acmd* cmdList, s32 cmdCo
     OotPspAudioBackend_ResetMeWriteRanges();
 }
 
-static void OotPspAudioBackend_FallbackFromMe(const Acmd* cmdList, s32 cmdCount) {
+static void OotPspAudioBackend_InvalidateQueuedRingFrames(u32 writePos, u32 frames) {
+    while (frames != 0) {
+        u32 todo = frames;
+        u32 untilWrap = OOT_PSP_AUDIO_RING_FRAMES - writePos;
+
+        if (todo > untilWrap) {
+            todo = untilWrap;
+        }
+
+        OotPspAudioBackend_InvalidateRange(&sAudioRing[writePos * OOT_PSP_AUDIO_CHANNELS],
+                                           todo * OOT_PSP_AUDIO_CHANNELS * sizeof(s16));
+        frames -= todo;
+        writePos = (writePos + todo) & OOT_PSP_AUDIO_RING_MASK;
+    }
+}
+
+static void OotPspAudioBackend_PublishPendingMeQueue(void) {
+    u32 expectedWritePos;
+    u32 resultWritePos;
+
+    if ((sAudioMePendingQueueSrc == NULL) || (sAudioMePendingQueueFrames == 0)) {
+        return;
+    }
+
+    resultWritePos = sAudioMeQueueResultWritePos & OOT_PSP_AUDIO_RING_MASK;
+    expectedWritePos = (sAudioMePendingQueueWritePos + sAudioMePendingQueueFrames) & OOT_PSP_AUDIO_RING_MASK;
+    if (resultWritePos != expectedWritePos) {
+        OotPspAudioBackend_QueueCpuCopy(sAudioMePendingQueueSrc, sAudioMePendingQueueFrames,
+                                       sAudioMePendingQueueWritePos);
+        return;
+    }
+
+    OotPspAudioBackend_InvalidateQueuedRingFrames(sAudioMePendingQueueWritePos,
+                                                  sAudioMePendingQueueFrames);
+    /* Publish only after Allegrex can see every ring line written by the ME. */
+    sAudioWritePos = resultWritePos;
+}
+
+static void OotPspAudioBackend_FallbackFromMe(const Acmd* cmdList, s32 cmdCount, const s16* queueSrc,
+                                              u32 queueFrames, u32 queueWritePos) {
     sAudioMeInitialized = false;
+    OotPspAudioBackend_ResetMeWriteRanges();
     OotPspMixer_InvalidateStateCache();
     OotPspMixer_ExecuteCommandList(cmdList, cmdCount);
+    if ((queueSrc != NULL) && (queueFrames != 0)) {
+        OotPspAudioBackend_QueueCpuCopy(queueSrc, queueFrames, queueWritePos);
+    }
 }
 
 static void OotPspAudioBackend_ClearPendingMeCommand(void) {
@@ -608,6 +715,9 @@ static void OotPspAudioBackend_ClearPendingMeCommand(void) {
     sAudioMePendingCmdList = NULL;
     sAudioMePendingCmdCount = 0;
     sAudioMePendingStartTime = 0;
+    sAudioMePendingQueueSrc = NULL;
+    sAudioMePendingQueueFrames = 0;
+    sAudioMePendingQueueWritePos = 0;
 }
 
 static s32 OotPspAudioBackend_IsValidUid(SceUID uid) {
@@ -739,19 +849,26 @@ static void OotPspAudioBackend_WaitForCommandsLocked(void) {
         }
 
         if (sAudioMeState == OOT_PSP_AUDIO_ME_STATE_RUN) {
-            OotPspAudioBackend_FallbackFromMe(sAudioMePendingCmdList, sAudioMePendingCmdCount);
+            OotPspAudioBackend_FallbackFromMe(sAudioMePendingCmdList, sAudioMePendingCmdCount,
+                                              sAudioMePendingQueueSrc, sAudioMePendingQueueFrames,
+                                              sAudioMePendingQueueWritePos);
             OotPspAudioBackend_ClearPendingMeCommand();
             return;
         }
     }
 
     if (sAudioMeState != OOT_PSP_AUDIO_ME_STATE_IDLE) {
-        OotPspAudioBackend_FallbackFromMe(sAudioMePendingCmdList, sAudioMePendingCmdCount);
+        OotPspAudioBackend_FallbackFromMe(sAudioMePendingCmdList, sAudioMePendingCmdCount,
+                                          sAudioMePendingQueueSrc, sAudioMePendingQueueFrames,
+                                          sAudioMePendingQueueWritePos);
         OotPspAudioBackend_ClearPendingMeCommand();
         return;
     }
 
-    OotPspAudioBackend_InvalidateMeWrites(sAudioMePendingCmdList, sAudioMePendingCmdCount);
+    OotPspAudioBackend_InvalidateMeWrites(
+        sAudioMePendingCmdList, sAudioMePendingCmdCount, sAudioMePendingQueueSrc,
+        sAudioMePendingQueueFrames * OOT_PSP_AUDIO_CHANNELS * sizeof(s16));
+    OotPspAudioBackend_PublishPendingMeQueue();
     OotPspAudioBackend_ClearPendingMeCommand();
 }
 
@@ -761,43 +878,80 @@ void OotPspAudioBackend_WaitForCommands(void) {
     OotPspAudioBackend_UnlockMe();
 }
 
-void OotPspAudioBackend_SubmitCommands(const Acmd* cmdList, s32 cmdCount) {
+static void OotPspAudioBackend_SubmitCommandsInternal(const Acmd* cmdList, s32 cmdCount, const s16* queueSrc,
+                                                      u32 queueFrames) {
+    u32 queueWritePos = sAudioWritePos;
+
     if ((cmdList == NULL) || (cmdCount <= 0)) {
         return;
     }
 
+    if ((queueSrc == NULL) || (queueFrames == 0)) {
+        queueSrc = NULL;
+        queueFrames = 0;
+    }
+
     OotPspAudioBackend_LockMe();
     OotPspAudioBackend_WaitForCommandsLocked();
+    queueWritePos = sAudioWritePos;
+    if (queueFrames > OotPspAudioBackend_FreeFrames()) {
+        /* The producer reserves maxAiBufferLength before synthesis, so this
+         * can only be reached by an out-of-band caller. Preserve mixer state
+         * even though that caller supplied more PCM than the ring can hold. */
+        queueSrc = NULL;
+        queueFrames = 0;
+    }
 
     if (!sAudioMeInitialized) {
         OotPspMixer_ExecuteCommandList(cmdList, cmdCount);
+        if (queueFrames != 0) {
+            OotPspAudioBackend_QueueCpuCopy(queueSrc, queueFrames, queueWritePos);
+        }
         OotPspAudioBackend_UnlockMe();
         return;
     }
 
     if (sAudioMeState != OOT_PSP_AUDIO_ME_STATE_IDLE) {
-        OotPspAudioBackend_FallbackFromMe(cmdList, cmdCount);
+        OotPspAudioBackend_FallbackFromMe(cmdList, cmdCount, queueSrc, queueFrames, queueWritePos);
         OotPspAudioBackend_UnlockMe();
         return;
     }
 
     /*
      * The CPU only writes back command-owned memory. The ME invalidates its
-     * cache before consuming commands, then writes all mixer state and PCM back
-     * before publishing IDLE.
+     * cache before consuming commands, then publishes persistent mixer state
+     * and queues the private PCM output before publishing IDLE.
      */
-    OotPspAudioBackend_WritebackMeInputs(cmdList, cmdCount);
+    OotPspAudioBackend_WritebackMeInputs(cmdList, cmdCount, queueSrc,
+                                         queueFrames * OOT_PSP_AUDIO_CHANNELS * sizeof(s16));
     OotPspAudioBackend_DrainMeCompletion();
     sAudioMeCmdList = (u32)(uintptr_t)cmdList;
     sAudioMeCmdCount = (u32)cmdCount;
+    sAudioMeQueueSrc = (u32)(uintptr_t)queueSrc;
+    sAudioMeQueueFrames = queueFrames;
+    sAudioMeQueueWritePos = queueWritePos;
+    sAudioMeQueueResultWritePos = queueWritePos;
     sAudioMeProgress = 0;
     sAudioMePendingCmdList = cmdList;
     sAudioMePendingCmdCount = cmdCount;
     sAudioMePendingStartTime = sceKernelGetSystemTimeLow();
+    sAudioMePendingQueueSrc = queueSrc;
+    sAudioMePendingQueueFrames = queueFrames;
+    sAudioMePendingQueueWritePos = queueWritePos;
     sAudioMeCommandPending = true;
     meLibSync();
     sAudioMeState = OOT_PSP_AUDIO_ME_STATE_RUN;
     OotPspAudioBackend_UnlockMe();
+}
+
+void OotPspAudioBackend_SubmitCommands(const Acmd* cmdList, s32 cmdCount) {
+    OotPspAudioBackend_SubmitCommandsInternal(cmdList, cmdCount, NULL, 0);
+}
+
+void OotPspAudioBackend_SubmitCommandsAndQueue(const Acmd* cmdList, s32 cmdCount, const void* buf, u32 size) {
+    const u32 frameBytes = sizeof(s16) * OOT_PSP_AUDIO_CHANNELS;
+
+    OotPspAudioBackend_SubmitCommandsInternal(cmdList, cmdCount, buf, size / frameBytes);
 }
 
 void OotPspAudioBackend_ExecuteCommands(const Acmd* cmdList, s32 cmdCount) {
@@ -805,11 +959,13 @@ void OotPspAudioBackend_ExecuteCommands(const Acmd* cmdList, s32 cmdCount) {
     OotPspAudioBackend_WaitForCommands();
 }
 
-static u32 OotPspAudioBackend_SourceChunkFrames(void) {
-    u32 frequency = sAudioSourceFrequency;
-
+static u32 OotPspAudioBackend_CalculateSourceChunkFrames(u32 frequency) {
     return (((OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES * frequency) + OOT_PSP_AUDIO_OUTPUT_FREQUENCY - 1) /
             OOT_PSP_AUDIO_OUTPUT_FREQUENCY);
+}
+
+static u32 OotPspAudioBackend_SourceChunkFrames(void) {
+    return sAudioSourceChunkFrames;
 }
 
 static u32 OotPspAudioBackend_TargetBufferFrames(void) {
@@ -846,14 +1002,21 @@ static u32 OotPspAudioBackend_BufferedFrames(void) {
     return (sAudioWritePos - sAudioReadPos) & OOT_PSP_AUDIO_RING_MASK;
 }
 
+static u32 OotPspAudioBackend_PendingMeQueueFrames(void) {
+    return sAudioMeCommandPending ? sAudioMePendingQueueFrames : 0;
+}
+
 static u32 OotPspAudioBackend_FreeFrames(void) {
-    return (OOT_PSP_AUDIO_RING_FRAMES - 1) - OotPspAudioBackend_BufferedFrames();
+    u32 freeFrames = (OOT_PSP_AUDIO_RING_FRAMES - 1) - OotPspAudioBackend_BufferedFrames();
+    u32 pendingFrames = OotPspAudioBackend_PendingMeQueueFrames();
+
+    return pendingFrames < freeFrames ? freeFrames - pendingFrames : 0;
 }
 
 static u32 OotPspAudioBackend_RestFrames(void) {
     s32 rest;
 
-    if (sAudioOutputChannel < 0) {
+    if ((sAudioOutputChannel < 0) && !sAudioHardwareSrc) {
         return 0;
     }
 
@@ -862,7 +1025,8 @@ static u32 OotPspAudioBackend_RestFrames(void) {
 }
 
 static u32 OotPspAudioBackend_TotalBufferedFrames(void) {
-    return OotPspAudioBackend_BufferedFrames() + OotPspAudioBackend_RestFrames() + sAudioPendingOutputFrames;
+    return OotPspAudioBackend_BufferedFrames() + OotPspAudioBackend_PendingMeQueueFrames() +
+           OotPspAudioBackend_RestFrames() + sAudioPendingOutputFrames;
 }
 
 static u32 OotPspAudioBackend_ReportableFrames(void) {
@@ -879,12 +1043,9 @@ static u32 OotPspAudioBackend_ReportableFrames(void) {
 static s16 OotPspAudioBackend_LerpSample(s16 current, s16 next, u32 frac) {
     s32 scaledFrac = frac >> (OOT_PSP_AUDIO_RESAMPLE_FRAC_BITS - OOT_PSP_AUDIO_LERP_FRAC_BITS);
     s32 delta = ((s32)next - current) * scaledFrac;
+    s32 sign = delta >> 31;
 
-    if (delta >= 0) {
-        delta += 1 << (OOT_PSP_AUDIO_LERP_FRAC_BITS - 1);
-    } else {
-        delta -= 1 << (OOT_PSP_AUDIO_LERP_FRAC_BITS - 1);
-    }
+    delta += ((1 << (OOT_PSP_AUDIO_LERP_FRAC_BITS - 1)) ^ sign) - sign;
 
     return current + (delta >> OOT_PSP_AUDIO_LERP_FRAC_BITS);
 }
@@ -892,11 +1053,7 @@ static s16 OotPspAudioBackend_LerpSample(s16 current, s16 next, u32 frac) {
 static s16 OotPspAudioBackend_LerpHalfSample(s16 current, s16 next) {
     s32 delta = (s32)next - current;
 
-    if (delta >= 0) {
-        delta++;
-    } else {
-        delta--;
-    }
+    delta += 1 | (delta >> 31);
 
     return current + (delta >> 1);
 }
@@ -906,11 +1063,23 @@ static s32 OotPspAudioBackend_OutputMix(s16* mix) {
     return sceAudioOutputBlocking(sAudioOutputChannel, PSP_AUDIO_VOLUME_MAX, mix);
 }
 
-static void OotPspAudioBackend_PrepareSilence(s16* mix) {
-    memset(mix, 0, sizeof(sAudioMix[0]));
+static s32 OotPspAudioBackend_OutputHardwareSrc(const s16* samples, u32 frames, s32 writeback) {
+    if (writeback) {
+        OotPspAudioBackend_WritebackRange(samples, frames * OOT_PSP_AUDIO_CHANNELS * sizeof(s16));
+    }
+
+    return sceAudioSRCOutputBlocking(PSP_AUDIO_VOLUME_MAX, (void*)samples);
+}
+
+static void OotPspAudioBackend_PrepareSilenceFrames(s16* mix, u32 frames) {
+    memset(mix, 0, frames * OOT_PSP_AUDIO_CHANNELS * sizeof(s16));
     sAudioLastLeft = 0;
     sAudioLastRight = 0;
     sAudioResampleFrac = 0;
+}
+
+static void OotPspAudioBackend_PrepareSilence(s16* mix) {
+    OotPspAudioBackend_PrepareSilenceFrames(mix, OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES);
 }
 
 static void OotPspAudioBackend_FadeChunkToSilenceState(s16** outPtr, u32 frames, s16 left, s16 right,
@@ -1120,12 +1289,14 @@ static u32 OotPspAudioBackend_RenderOutputChunkCpu(u32 buffered, s16* mix) {
     return sourceFrames;
 }
 
-static void OotPspAudioBackend_MeQueueBuffer(void) {
+static void OotPspAudioBackend_MeQueueBuffer(s32 invalidateSource) {
     const s16* samples = (const s16*)(uintptr_t)sAudioMeQueueSrc;
     u32 frames = sAudioMeQueueFrames;
     u32 writePos = sAudioMeQueueWritePos & OOT_PSP_AUDIO_RING_MASK;
 
-    OotPspAudioBackend_MeInvalidateRange(samples, frames * OOT_PSP_AUDIO_CHANNELS * sizeof(s16));
+    if (invalidateSource) {
+        OotPspAudioBackend_MeInvalidateRange(samples, frames * OOT_PSP_AUDIO_CHANNELS * sizeof(s16));
+    }
 
     while (frames != 0) {
         u32 todo = frames;
@@ -1159,8 +1330,92 @@ static u32 OotPspAudioBackend_RenderOutputChunk(s16* mix) {
     return OotPspAudioBackend_RenderOutputChunkCpu(buffered, mix);
 }
 
+static void OotPspAudioBackend_CopyHardwareSrcChunk(u32 readPos, s16* mix) {
+    u32 frames = OotPspAudioBackend_SourceChunkFrames();
+    u32 firstFrames = OOT_PSP_AUDIO_RING_FRAMES - readPos;
+
+    if (firstFrames > frames) {
+        firstFrames = frames;
+    }
+
+    memcpy(mix, &sAudioRing[readPos * OOT_PSP_AUDIO_CHANNELS],
+           firstFrames * OOT_PSP_AUDIO_CHANNELS * sizeof(s16));
+    if (firstFrames < frames) {
+        memcpy(mix + (firstFrames * OOT_PSP_AUDIO_CHANNELS), sAudioRing,
+               (frames - firstFrames) * OOT_PSP_AUDIO_CHANNELS * sizeof(s16));
+    }
+}
+
+static void OotPspAudioBackend_RunHardwareSrcOutput(void) {
+    u32 heldFrames = 0;
+    u32 mixIndex = 0;
+
+    /*
+     * A direct ring buffer remains owned by the audio driver until the next
+     * blocking submission returns. Keeping heldFrames behind sAudioReadPos
+     * prevents the producer from recycling those samples in the meantime.
+     */
+    while (sAudioOutputThreadRunning) {
+        u32 readPos = sAudioReadPos;
+        u32 buffered = OotPspAudioBackend_BufferedFrames();
+        u32 available = (heldFrames < buffered) ? buffered - heldFrames : 0;
+        u32 sourceFrames = 0;
+        u32 sourceReadPos = (readPos + heldFrames) & OOT_PSP_AUDIO_RING_MASK;
+        s16* mix = sAudioMix[mixIndex];
+        const s16* output = mix;
+        s32 directRing = false;
+        s32 usedMix = true;
+        s32 ret;
+
+        if (!sAudioPlaybackPrimed && (available >= OotPspAudioBackend_TargetBufferFrames())) {
+            sAudioPlaybackPrimed = true;
+        }
+
+        if (!sAudioPlaybackPrimed || (available < OotPspAudioBackend_SourceChunkFrames())) {
+            sAudioPlaybackPrimed = false;
+            OotPspAudioBackend_PrepareSilenceFrames(mix, OotPspAudioBackend_SourceChunkFrames());
+        } else {
+            sourceFrames = OotPspAudioBackend_SourceChunkFrames();
+            if (((sourceReadPos & ((OOT_PSP_AUDIO_CACHE_LINE_SIZE /
+                                   (OOT_PSP_AUDIO_CHANNELS * sizeof(s16))) - 1)) == 0) &&
+                (sourceReadPos + sourceFrames <= OOT_PSP_AUDIO_RING_FRAMES)) {
+                /* Ring data was already written back by its producer. */
+                output = &sAudioRing[sourceReadPos * OOT_PSP_AUDIO_CHANNELS];
+                directRing = true;
+                usedMix = false;
+            } else {
+                OotPspAudioBackend_CopyHardwareSrcChunk(sourceReadPos, mix);
+            }
+        }
+
+        ret = OotPspAudioBackend_OutputHardwareSrc(output, OotPspAudioBackend_SourceChunkFrames(), usedMix);
+        if (ret >= 0) {
+            readPos = (readPos + heldFrames) & OOT_PSP_AUDIO_RING_MASK;
+            if (directRing) {
+                heldFrames = sourceFrames;
+                sAudioOutputFrames = 0;
+            } else {
+                readPos = (readPos + sourceFrames) & OOT_PSP_AUDIO_RING_MASK;
+                heldFrames = 0;
+                sAudioOutputFrames = sourceFrames;
+                mixIndex ^= 1;
+            }
+            sAudioReadPos = readPos;
+        } else {
+            sAudioOutputFrames = 0;
+            sAudioPlaybackPrimed = false;
+            sceKernelDelayThread(OOT_PSP_AUDIO_OUTPUT_ERROR_RETRY_USEC);
+        }
+    }
+}
+
 static int OotPspAudioBackend_OutputThread(UNUSED SceSize args, UNUSED void* argp) {
     u32 mixIndex = 0;
+
+    if (sAudioHardwareSrc) {
+        OotPspAudioBackend_RunHardwareSrcOutput();
+        goto exit;
+    }
 
     while (sAudioOutputThreadRunning) {
         u32 buffered;
@@ -1202,6 +1457,7 @@ static int OotPspAudioBackend_OutputThread(UNUSED SceSize args, UNUSED void* arg
         }
     }
 
+exit:
     sAudioOutputThreadRunning = false;
     sAudioOutputThreadId = -1;
 
@@ -1247,8 +1503,48 @@ static int OotPspAudioBackend_ProducerThread(UNUSED SceSize args, UNUSED void* a
     return 0;
 }
 
+static s32 OotPspAudioBackend_IsOutputInitialized(void) {
+    return sAudioHardwareSrc || (sAudioOutputChannel >= 0);
+}
+
+#if OOT_PSP_AUDIO_HARDWARE_SRC
+static s32 OotPspAudioBackend_IsHardwareSrcFrequency(u32 frequency) {
+    switch (frequency) {
+        case 8000:
+        case 11050:
+        case 12000:
+        case 16000:
+        case 22050:
+        case 24000:
+        case 32000:
+        case 44100:
+        case 48000:
+            return true;
+
+        default:
+            return false;
+    }
+}
+#endif
+
+static s32 OotPspAudioBackend_TryReserveHardwareSrc(u32 frequency, u32 frames) {
+#if OOT_PSP_AUDIO_HARDWARE_SRC
+    if (OotPspAudioBackend_IsHardwareSrcFrequency(frequency) &&
+        (sceAudioSRCChReserve(frames, frequency, OOT_PSP_AUDIO_CHANNELS) >= 0)) {
+        sAudioHardwareSrc = true;
+        return true;
+    }
+#else
+    (void)frequency;
+    (void)frames;
+#endif
+
+    sAudioHardwareSrc = false;
+    return false;
+}
+
 s32 OotPspAudioBackend_Init(void) {
-    if (sAudioOutputChannel >= 0) {
+    if (OotPspAudioBackend_IsOutputInitialized()) {
         return 0;
     }
 
@@ -1263,14 +1559,18 @@ s32 OotPspAudioBackend_Init(void) {
     sAudioLastRight = 0;
     sAudioResampleFrac = 0;
     sAudioSourceFrequency = OOT_PSP_AUDIO_DEFAULT_SOURCE_FREQUENCY;
+    sAudioSourceChunkFrames = OotPspAudioBackend_CalculateSourceChunkFrames(sAudioSourceFrequency);
     sAudioResampleStep = OotPspAudioBackend_CalculateResampleStep(sAudioSourceFrequency);
 
     sceAudioOutput2Release();
     sceAudioSRCChRelease();
-    sAudioOutputChannel =
-        sceAudioChReserve(PSP_AUDIO_NEXT_CHANNEL, OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES, PSP_AUDIO_FORMAT_STEREO);
-    if (sAudioOutputChannel < 0) {
-        return -1;
+    sAudioHardwareSrc = false;
+    if (!OotPspAudioBackend_TryReserveHardwareSrc(sAudioSourceFrequency, sAudioSourceChunkFrames)) {
+        sAudioOutputChannel =
+            sceAudioChReserve(PSP_AUDIO_NEXT_CHANNEL, OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES, PSP_AUDIO_FORMAT_STEREO);
+        if (sAudioOutputChannel < 0) {
+            return -1;
+        }
     }
 
     return 0;
@@ -1280,7 +1580,7 @@ static s32 OotPspAudioBackend_StartThreads(void) {
     SceUID threadId;
     s32 ret;
 
-    if (sAudioOutputChannel < 0) {
+    if (!OotPspAudioBackend_IsOutputInitialized()) {
         return -1;
     }
 
@@ -1394,12 +1694,19 @@ s32 OotPspAudioBackend_Queue(const void* buf, u32 size) {
 }
 
 s32 OotPspAudioBackend_SetFrequency(u32 frequency) {
-    if ((sAudioOutputChannel < 0) || (frequency == 0)) {
+    if (!OotPspAudioBackend_IsOutputInitialized() || (frequency == 0)) {
         return -1;
     }
 
     if (sAudioSourceFrequency != frequency) {
+        /* The default PSP cap makes every OOT spec exactly 22.05 kHz. If a
+         * custom build changes rates while running, retain the software path's
+         * dynamic-rate behavior rather than feeding the SRC the wrong rate. */
+        if (sAudioHardwareSrc) {
+            return -1;
+        }
         sAudioSourceFrequency = frequency;
+        sAudioSourceChunkFrames = OotPspAudioBackend_CalculateSourceChunkFrames(frequency);
         sAudioResampleStep = OotPspAudioBackend_CalculateResampleStep(frequency);
         sAudioResampleFrac = 0;
     }

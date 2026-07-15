@@ -10,6 +10,7 @@ u32 OotPspAudioBackend_GetLength(void);
 s32 OotPspAudioBackend_NeedsRefillUrgently(void);
 s32 OotPspAudioBackend_NeedsRefillDuringIo(void);
 void OotPspAudioBackend_SubmitCommands(const Acmd* cmdList, s32 cmdCount);
+void OotPspAudioBackend_SubmitCommandsAndQueue(const Acmd* cmdList, s32 cmdCount, const void* buf, u32 size);
 void OotPspAudioBackend_WaitForCommands(void);
 void OotPspAudioBackend_ExecuteCommands(const Acmd* cmdList, s32 cmdCount);
 
