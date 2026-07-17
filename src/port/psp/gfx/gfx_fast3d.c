@@ -179,12 +179,14 @@ struct ColorCombiner {
     bool texture_blend;
 } __attribute__((packed, aligned(4)));
 
-#define COLOR_COMBINER_CACHE_COUNT 64
+#define COLOR_COMBINER_CACHE_SET_COUNT 32
+#define COLOR_COMBINER_CACHE_WAYS 4
 typedef struct ColorCombinerCacheEntry {
     struct ColorCombiner combiner;
     bool valid;
 } ColorCombinerCacheEntry;
-static ColorCombinerCacheEntry color_combiner_cache[COLOR_COMBINER_CACHE_COUNT];
+static ColorCombinerCacheEntry color_combiner_cache[COLOR_COMBINER_CACHE_SET_COUNT][COLOR_COMBINER_CACHE_WAYS];
+static uint8_t color_combiner_cache_next_way[COLOR_COMBINER_CACHE_SET_COUNT];
 
 struct TriPipelineState {
     struct ColorCombiner *comb;
@@ -1474,17 +1476,33 @@ static inline struct RGBA gfx_get_vertex_rgba(const struct ColorCombiner *comb, 
 }
 
 static struct ColorCombiner *gfx_lookup_or_create_color_combiner(uint32_t cc_id) {
-    size_t cacheIndex = (cc_id ^ (cc_id >> 12) ^ (cc_id >> 24)) & (COLOR_COMBINER_CACHE_COUNT - 1);
-    ColorCombinerCacheEntry* entry = &color_combiner_cache[cacheIndex];
+    const size_t cacheIndex =
+        (cc_id ^ (cc_id >> 12) ^ (cc_id >> 24)) & (COLOR_COMBINER_CACHE_SET_COUNT - 1);
+    ColorCombinerCacheEntry* cacheSet = color_combiner_cache[cacheIndex];
+    ColorCombinerCacheEntry* entry = NULL;
 
-    if (entry->valid && entry->combiner.cc_id == cc_id) {
-        return &entry->combiner;
+    for (size_t way = 0; way < COLOR_COMBINER_CACHE_WAYS; way++) {
+        if (cacheSet[way].valid) {
+            if (cacheSet[way].combiner.cc_id == cc_id) {
+                return &cacheSet[way].combiner;
+            }
+        } else if (entry == NULL) {
+            entry = &cacheSet[way];
+        }
+    }
+
+    if (entry == NULL) {
+        const uint8_t replacementWay = color_combiner_cache_next_way[cacheIndex];
+
+        entry = &cacheSet[replacementWay];
+        color_combiner_cache_next_way[cacheIndex] = (replacementWay + 1) & (COLOR_COMBINER_CACHE_WAYS - 1);
     }
 
     /* Buffered vertices can still reference this cache slot. Flush before a
-     * collision replaces it; unlike the old linear pool this cache cannot
-     * overflow when a scene uses more than 64 distinct combine modes. */
-    gfx_flush();
+     * valid collision replaces it. Empty ways do not need a flush. */
+    if (entry->valid) {
+        gfx_flush();
+    }
     gfx_generate_cc(&entry->combiner, cc_id);
     entry->valid = true;
     return &entry->combiner;

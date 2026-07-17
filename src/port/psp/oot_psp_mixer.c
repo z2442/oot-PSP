@@ -1110,6 +1110,16 @@ static s32 OotPspMixer_EnvMixerVme(u16 dmemSrc, s32 aiBufLen, s32 swapLR, s32 x0
         return 0;
     }
 
+    /* VME writes products to the base buffers and never modifies its top
+     * inputs. Clear each lane's prologue tail once per envelope command;
+     * only the first eight inputs change between blocks and between the dry
+     * and wet passes. Clearing all four tails before every pass previously
+     * issued 128 redundant ME stores per 16 mixed samples. */
+    OotPspMixer_VmeClearTail(top0, OOT_PSP_ENVMIXER_VME_HALF_SAMPLES, vmeCount);
+    OotPspMixer_VmeClearTail(top1, OOT_PSP_ENVMIXER_VME_HALF_SAMPLES, vmeCount);
+    OotPspMixer_VmeClearTail(top2, OOT_PSP_ENVMIXER_VME_HALF_SAMPLES, vmeCount);
+    OotPspMixer_VmeClearTail(top3, OOT_PSP_ENVMIXER_VME_HALF_SAMPLES, vmeCount);
+
     while (remaining > 0) {
         for (i = 0; i < OOT_PSP_ENVMIXER_VME_HALF_SAMPLES; i++) {
             samples[i] = in[i];
@@ -1120,10 +1130,6 @@ static s32 OotPspMixer_EnvMixerVme(u16 dmemSrc, s32 aiBufLen, s32 swapLR, s32 x0
             top2[i] = samples[i + OOT_PSP_ENVMIXER_VME_HALF_SAMPLES];
             top3[i] = samples[i + OOT_PSP_ENVMIXER_VME_HALF_SAMPLES];
         }
-        OotPspMixer_VmeClearTail(top0, OOT_PSP_ENVMIXER_VME_HALF_SAMPLES, vmeCount);
-        OotPspMixer_VmeClearTail(top1, OOT_PSP_ENVMIXER_VME_HALF_SAMPLES, vmeCount);
-        OotPspMixer_VmeClearTail(top2, OOT_PSP_ENVMIXER_VME_HALF_SAMPLES, vmeCount);
-        OotPspMixer_VmeClearTail(top3, OOT_PSP_ENVMIXER_VME_HALF_SAMPLES, vmeCount);
 
         OotPspMixer_VmeMul4(OOT_PSP_ENVMIXER_VME_HALF_SAMPLES, volLeft0, volRight0, volLeft1, volRight1);
 
@@ -1143,10 +1149,6 @@ static s32 OotPspMixer_EnvMixerVme(u16 dmemSrc, s32 aiBufLen, s32 swapLR, s32 x0
             top2[i] = left[i + OOT_PSP_ENVMIXER_VME_HALF_SAMPLES];
             top3[i] = right[i + OOT_PSP_ENVMIXER_VME_HALF_SAMPLES];
         }
-        OotPspMixer_VmeClearTail(top0, OOT_PSP_ENVMIXER_VME_HALF_SAMPLES, vmeCount);
-        OotPspMixer_VmeClearTail(top1, OOT_PSP_ENVMIXER_VME_HALF_SAMPLES, vmeCount);
-        OotPspMixer_VmeClearTail(top2, OOT_PSP_ENVMIXER_VME_HALF_SAMPLES, vmeCount);
-        OotPspMixer_VmeClearTail(top3, OOT_PSP_ENVMIXER_VME_HALF_SAMPLES, vmeCount);
 
         OotPspMixer_VmeMul4(OOT_PSP_ENVMIXER_VME_HALF_SAMPLES, reverb0, reverb0, reverb1, reverb1);
 
