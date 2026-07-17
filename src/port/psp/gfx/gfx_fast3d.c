@@ -3903,6 +3903,18 @@ static GFX_DL_HANDLER void gfx_dp_set_combine(uint32_t w0, uint32_t w1) {
     uint32_t alphaComb = color_comb(alphaA0, alphaB0, alphaC0, alphaD0);
 
 #if defined(TARGET_PSP)
+    /*
+     * The compact PSP combiner has no representation for the constant-one input. Canonicalize
+     * (1 - 0) * source + 0 to source before that input is discarded. UI masks such as the ocarina
+     * treble clef use this form to take their RGB directly from PRIMITIVE.
+     */
+    if ((rgbA0 == G_CCMUX_1) && (rgbB0 == (G_CCMUX_0 & 0xF)) && (rgbD0 == (G_CCMUX_0 & 0x7))) {
+        rgbComb = color_comb(G_CCMUX_0, G_CCMUX_0, G_CCMUX_0, rgbC0);
+    }
+    if ((alphaA0 == G_ACMUX_1) && (alphaB0 == G_ACMUX_0) && (alphaD0 == G_ACMUX_0)) {
+        alphaComb = color_comb(G_ACMUX_0, G_ACMUX_0, G_ACMUX_0, alphaC0);
+    }
+
     if (colorMulShadePrim) {
         /* The GU has one vertex-color input. Keep SHADE as that input and
          * apply the constant PRIMITIVE tint on the CPU. */
