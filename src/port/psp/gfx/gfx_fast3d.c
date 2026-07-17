@@ -3262,13 +3262,6 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
             gfx_color_mul_prim(&out->color);
         }
 
-        /*@Note: Blue Star color */
-        if (shader_program_id == 0x01200200) {
-            out->color = clipped_vertices[0]->color;
-            if (rdp.env_color.a != 255) {
-                out->color.a = rdp.env_color.a;
-            }
-        }
         if (state->two_texture_blend) {
             uint8_t baseAlpha;
             uint8_t overlayAlpha;
