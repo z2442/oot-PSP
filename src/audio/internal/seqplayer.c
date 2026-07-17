@@ -40,6 +40,7 @@ typedef struct {
     AudioTable* table;
     SequencePlayer* seqPlayer;
     u32 seqId;
+    u8 sourceSeqId;
     u8* seqData;
     u8* base;
     u32 len;
@@ -258,17 +259,34 @@ static u32 OotPspAudio_GetRealSequenceId(u32 seqId) {
     return seqId;
 }
 
+static inline __attribute__((always_inline)) s32 OotPspAudio_GetCachedSequenceSpan(
+    SequencePlayer* seqPlayer, AudioTable* table, u8** baseOut, u32* lenOut) {
+    OotPspAudioSeqSpanCacheEntry* last = sOotPspAudioSeqSpanCacheLast;
+
+    if ((last == NULL) || (last->table != table) || (last->seqPlayer != seqPlayer) ||
+        (last->sourceSeqId != seqPlayer->seqId) || (last->seqData != seqPlayer->seqData)) {
+        return false;
+    }
+
+    *baseOut = last->base;
+    *lenOut = last->len;
+    return true;
+}
+
 static s32 OotPspAudio_GetSequenceSpan(SequencePlayer* seqPlayer, u8** baseOut, u32* lenOut) {
     AudioTable* table = gAudioCtx.sequenceTable;
     void* cachedSeq;
     u32 seqId;
     u32 len;
     s32 i;
-    OotPspAudioSeqSpanCacheEntry* last;
 
     if (!OotPspAudio_IsAlignedNativePtr(seqPlayer) || !OotPspAudio_IsAlignedNativePtr(table) ||
         (seqPlayer->seqData == NULL)) {
         return false;
+    }
+
+    if (OotPspAudio_GetCachedSequenceSpan(seqPlayer, table, baseOut, lenOut)) {
+        return true;
     }
 
     seqId = OotPspAudio_GetRealSequenceId(seqPlayer->seqId);
@@ -276,19 +294,12 @@ static s32 OotPspAudio_GetSequenceSpan(SequencePlayer* seqPlayer, u8** baseOut, 
         return false;
     }
 
-    last = sOotPspAudioSeqSpanCacheLast;
-    if ((last != NULL) && (last->table == table) && (last->seqPlayer == seqPlayer) && (last->seqId == seqId) &&
-        (last->seqData == seqPlayer->seqData)) {
-        *baseOut = last->base;
-        *lenOut = last->len;
-        return true;
-    }
-
     for (i = 0; i < OOT_PSP_AUDIO_SEQ_SPAN_CACHE_COUNT; i++) {
         OotPspAudioSeqSpanCacheEntry* entry = &sOotPspAudioSeqSpanCache[i];
 
         if ((entry->table == table) && (entry->seqPlayer == seqPlayer) && (entry->seqId == seqId) &&
             (entry->seqData == seqPlayer->seqData)) {
+            entry->sourceSeqId = seqPlayer->seqId;
             sOotPspAudioSeqSpanCacheLast = entry;
             *baseOut = entry->base;
             *lenOut = entry->len;
@@ -315,6 +326,7 @@ static s32 OotPspAudio_GetSequenceSpan(SequencePlayer* seqPlayer, u8** baseOut, 
         entry->table = table;
         entry->seqPlayer = seqPlayer;
         entry->seqId = seqId;
+        entry->sourceSeqId = seqPlayer->seqId;
         entry->seqData = seqPlayer->seqData;
         entry->base = seqPlayer->seqData;
         entry->len = len;
@@ -344,12 +356,21 @@ static void OotPspAudio_LogBadSeqPtr(const char* op, SequencePlayer* seqPlayer, 
 }
 
 static s32 OotPspAudio_IsSeqRange(SequencePlayer* seqPlayer, const void* ptr, u32 size) {
+    AudioTable* table = gAudioCtx.sequenceTable;
     u8* base;
     u32 len;
     u32 addr;
     u32 baseAddr;
 
-    if ((ptr == NULL) || !OotPspAudio_GetSequenceSpan(seqPlayer, &base, &len) || (size > len)) {
+    if (ptr == NULL) {
+        return false;
+    }
+
+    if (!OotPspAudio_IsAlignedNativePtr(seqPlayer) || !OotPspAudio_IsAlignedNativePtr(table) ||
+        (seqPlayer->seqData == NULL) ||
+        (!OotPspAudio_GetCachedSequenceSpan(seqPlayer, table, &base, &len) &&
+         !OotPspAudio_GetSequenceSpan(seqPlayer, &base, &len)) ||
+        (size > len)) {
         return false;
     }
 

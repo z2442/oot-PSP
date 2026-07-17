@@ -306,9 +306,56 @@ f32 CollisionPoly_GetPointDistanceFromPlane(CollisionPoly* poly, Vec3f* point) {
  * Get Poly Vertices
  */
 void CollisionPoly_GetVertices(CollisionPoly* poly, Vec3s* vtxList, Vec3f* dest) {
+#if defined(TARGET_PSP)
+    const Vec3s* v0 = &vtxList[COLPOLY_VTX_INDEX(poly->flags_vIA)];
+    const Vec3s* v1 = &vtxList[COLPOLY_VTX_INDEX(poly->flags_vIB)];
+    const Vec3s* v2 = &vtxList[poly->vIC];
+    const s32 v0x = v0->x;
+    const s32 v0y = v0->y;
+    const s32 v0z = v0->z;
+    const s32 v1x = v1->x;
+    const s32 v1y = v1->y;
+    const s32 v1z = v1->z;
+    const s32 v2x = v2->x;
+    const s32 v2y = v2->y;
+    const s32 v2z = v2->z;
+
+    /* Convert each complete vertex in one VFPU instruction. Allegrex scalar
+     * conversion otherwise inserts a pipeline bubble for every coordinate. */
+    __asm__ volatile(
+        ".set push\n"
+        ".set noreorder\n"
+        "mtv %[v0x], S000\n"
+        "mtv %[v0y], S001\n"
+        "mtv %[v0z], S002\n"
+        "mtv %[v1x], S010\n"
+        "mtv %[v1y], S011\n"
+        "mtv %[v1z], S012\n"
+        "mtv %[v2x], S020\n"
+        "mtv %[v2y], S021\n"
+        "mtv %[v2z], S022\n"
+        "vi2f.t C000, C000, 0\n"
+        "vi2f.t C010, C010, 0\n"
+        "vi2f.t C020, C020, 0\n"
+        "sv.s S000, 0(%[dest])\n"
+        "sv.s S001, 4(%[dest])\n"
+        "sv.s S002, 8(%[dest])\n"
+        "sv.s S010, 12(%[dest])\n"
+        "sv.s S011, 16(%[dest])\n"
+        "sv.s S012, 20(%[dest])\n"
+        "sv.s S020, 24(%[dest])\n"
+        "sv.s S021, 28(%[dest])\n"
+        "sv.s S022, 32(%[dest])\n"
+        ".set pop\n"
+        :
+        : [v0x] "r"(v0x), [v0y] "r"(v0y), [v0z] "r"(v0z), [v1x] "r"(v1x), [v1y] "r"(v1y),
+          [v1z] "r"(v1z), [v2x] "r"(v2x), [v2y] "r"(v2y), [v2z] "r"(v2z), [dest] "r"(dest)
+        : "memory");
+#else
     BgCheck_Vec3sToVec3f(&vtxList[COLPOLY_VTX_INDEX(poly->flags_vIA)], &dest[0]);
     BgCheck_Vec3sToVec3f(&vtxList[COLPOLY_VTX_INDEX(poly->flags_vIB)], &dest[1]);
     BgCheck_Vec3sToVec3f(&vtxList[poly->vIC], &dest[2]);
+#endif
 }
 
 /**
@@ -378,9 +425,24 @@ s32 CollisionPoly_CheckYIntersect(CollisionPoly* poly, Vec3s* vtxList, f32 x, f3
     f32 nx;
     f32 ny;
     f32 nz;
+#if defined(TARGET_PSP)
+    s32 nyRaw = poly->normal.y;
+
+    /* Most candidates in a downward raycast are walls. Reject normals that
+     * the intersection routine considers zero before converting 3 vertices.
+     * IS_ZERO(COLPOLY_GET_NORMAL(nyRaw)) is true exactly for [-262, 262]. */
+    if ((u32)(nyRaw + 262) <= 524) {
+        return false;
+    }
 
     CollisionPoly_GetVertices(poly, vtxList, polyVerts);
+    nx = COLPOLY_GET_NORMAL(poly->normal.x);
+    ny = COLPOLY_GET_NORMAL(nyRaw);
+    nz = COLPOLY_GET_NORMAL(poly->normal.z);
+#else
+    CollisionPoly_GetVertices(poly, vtxList, polyVerts);
     CollisionPoly_GetNormalF(poly, &nx, &ny, &nz);
+#endif
     return Math3D_TriChkPointParaYIntersectInsideTri(&polyVerts[0], &polyVerts[1], &polyVerts[2], nx, ny, nz,
                                                      poly->dist, z, x, yIntersect, chkDist);
 }

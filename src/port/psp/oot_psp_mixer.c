@@ -489,19 +489,17 @@ static void OotPspMixer_ReverbSave(u16 dmemLeft, const OotPspAudioReverbDownsamp
     s16* leftRing = (cacheEntry != NULL) ? cacheEntry->left : desc->leftRingBuf;
     s16* rightRing = (cacheEntry != NULL) ? cacheEntry->right : desc->rightRingBuf;
     s32 startPos = desc->startPos;
-    s32 lengthASamples = desc->lengthA / (s32)sizeof(s16);
-    s32 lengthBSamples = desc->lengthB / (s32)sizeof(s16);
-    s32 i;
-    s32 j;
+    s32 lengthA = desc->lengthA;
+    s32 lengthB = desc->lengthB;
 
-    for (j = 0, i = 0; i < lengthASamples; i++, j++) {
-        leftRing[startPos + i] = left[j];
-        rightRing[startPos + i] = right[j];
-    }
+    memcpy(&leftRing[startPos], left, lengthA);
+    memcpy(&rightRing[startPos], right, lengthA);
 
-    for (i = 0; i < lengthBSamples; i++, j++) {
-        leftRing[i] = left[j];
-        rightRing[i] = right[j];
+    if (lengthB != 0) {
+        left += lengthA / (s32)sizeof(s16);
+        right += lengthA / (s32)sizeof(s16);
+        memcpy(leftRing, left, lengthB);
+        memcpy(rightRing, right, lengthB);
     }
 }
 
@@ -513,19 +511,17 @@ static void OotPspMixer_ReverbLoad(u16 dmemLeft, const OotPspAudioReverbDownsamp
     const s16* leftRing = (cacheEntry != NULL) ? cacheEntry->left : desc->leftRingBuf;
     const s16* rightRing = (cacheEntry != NULL) ? cacheEntry->right : desc->rightRingBuf;
     s32 startPos = desc->startPos;
-    s32 lengthASamples = desc->lengthA / (s32)sizeof(s16);
-    s32 lengthBSamples = desc->lengthB / (s32)sizeof(s16);
-    s32 i;
-    s32 j;
+    s32 lengthA = desc->lengthA;
+    s32 lengthB = desc->lengthB;
 
-    for (j = 0, i = 0; i < lengthASamples; i++, j++) {
-        left[j] = leftRing[startPos + i];
-        right[j] = rightRing[startPos + i];
-    }
+    memcpy(left, &leftRing[startPos], lengthA);
+    memcpy(right, &rightRing[startPos], lengthA);
 
-    for (i = 0; i < lengthBSamples; i++, j++) {
-        left[j] = leftRing[i];
-        right[j] = rightRing[i];
+    if (lengthB != 0) {
+        left += lengthA / (s32)sizeof(s16);
+        right += lengthA / (s32)sizeof(s16);
+        memcpy(left, leftRing, lengthB);
+        memcpy(right, rightRing, lengthB);
     }
 }
 

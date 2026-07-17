@@ -198,7 +198,7 @@ struct TriPipelineState {
     float tex_u_bias[2], tex_v_bias[2];
     float tex_u_nominal_span[2], tex_v_nominal_span[2];
     bool tex_u_scale_to_primitive[2], tex_v_scale_to_primitive[2];
-} __attribute__((packed, aligned(4)));
+} __attribute__((aligned(4)));
 
 typedef struct TextureTileState {
     uint8_t fmt;
@@ -1498,6 +1498,7 @@ extern int texman_texture_slot_available(void);
 
 static uint32_t gfx_texture_import_width(int tile);
 static uint32_t gfx_texture_import_height(int tile);
+static void gfx_texture_import_dimensions(int tile, uint32_t* width, uint32_t* height);
 
 #if defined(TARGET_PSP)
 static unsigned int gfx_texture_cache_upload_type(uint32_t fmt, uint32_t siz) {
@@ -1557,9 +1558,12 @@ static void gfx_texture_cache_clear(void) {
     rendering_state.backend_state_dirty = true;
 }
 
-static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, const uint8_t *orig_addr, uint32_t fmt, uint32_t siz) {
+static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, const uint8_t *orig_addr,
+                                     uint32_t fmt, uint32_t siz, bool allocateOnMiss, bool* dynamicHit) {
     size_t hash = (uintptr_t)orig_addr;
     struct TextureHashmapNode **node;
+
+    *dynamicHit = false;
 #if defined(TARGET_PSP)
     const TextureTileState* tileState = gfx_get_texture_tile(tile);
     const uint32_t source_span_size = gfx_texture_source_span_size(tile);
@@ -1583,8 +1587,12 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
 #endif
     hash = (hash >> 5) & 0x3ff;
     node = &gfx_texture_cache.hashmap[hash];
-    const uint16_t width = gfx_texture_import_width(tile);
-    const uint16_t height = gfx_texture_import_height(tile);
+    uint32_t importWidth;
+    uint32_t importHeight;
+
+    gfx_texture_import_dimensions(tile, &importWidth, &importHeight);
+    const uint16_t width = importWidth;
+    const uint16_t height = importHeight;
 
     while (*node != NULL && *node - gfx_texture_cache.pool < (int)gfx_texture_cache.pool_pos) {
         if ((*node)->texture_addr == orig_addr && (*node)->fmt == fmt && (*node)->siz == siz
@@ -1604,11 +1612,17 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
              * pipeline setup below instead of binding twice. */
             if (dynamic_source) {
                 gfx_rapi->select_texture(tile, (*node)->texture_id);
+                *dynamicHit = true;
             }
             return !dynamic_source;
         }
         node = &(*node)->next;
     }
+
+    if (!allocateOnMiss) {
+        return false;
+    }
+
 #if defined(TARGET_PSP)
     if (!texman_vram_space_available(gfx_texture_cache_upload_size(width, height, fmt, siz, mirror_s, mirror_t)) ||
         !texman_texture_slot_available()) {
@@ -1836,8 +1850,10 @@ static uint32_t gfx_texture_import_height(int tile) {
 #if defined(TARGET_PSP)
 static void gfx_validate_texture_tile_dimensions(int tile, const char* context) {
     const TextureTileState* tileState = gfx_get_texture_tile(tile);
-    uint32_t width = gfx_texture_import_width(tile);
-    uint32_t height = gfx_texture_import_height(tile);
+    uint32_t width;
+    uint32_t height;
+
+    gfx_texture_import_dimensions(tile, &width, &height);
     uint32_t textureWidth = width + rdp.loaded_texture[tile].source_nibble_offset;
     bool widthOverflow = textureWidth < width;
     uint32_t rowBytes = widthOverflow ? UINT32_MAX : gfx_texture_row_bytes(textureWidth, tileState->siz);
@@ -2143,14 +2159,26 @@ static void import_texture(int tile) {
     const TextureTileState* tileState = gfx_get_texture_tile(tile);
     uint8_t fmt = tileState->fmt;
     uint8_t siz = tileState->siz;
+    bool dynamicHit;
+
+    /* A cache entry was fully validated when it was created. Probe before the
+     * more expensive source checks so repeated static display-list loads can
+     * reuse it immediately. Dynamic sources still fall through for upload. */
+    if (gfx_texture_cache_lookup(tile, &rendering_state.textures[tile], rdp.loaded_texture[tile].addr,
+                                 fmt, siz, false, &dynamicHit)) {
+        return;
+    }
 
 #if defined(TARGET_PSP)
     gfx_validate_texture_source(tile, "import_texture");
     gfx_validate_texture_tile_dimensions(tile, "import_texture-dimensions");
 #endif
-    
-    if (gfx_texture_cache_lookup(tile, &rendering_state.textures[tile], rdp.loaded_texture[tile].addr, fmt, siz)) {
-        return;
+
+    if (!dynamicHit) {
+        if (gfx_texture_cache_lookup(tile, &rendering_state.textures[tile], rdp.loaded_texture[tile].addr,
+                                     fmt, siz, true, &dynamicHit)) {
+            return;
+        }
     }
     
     //int t0 = get_time();
@@ -2438,30 +2466,91 @@ static uint8_t gfx_clamp_num_lights(uint32_t num_lights) {
     return (num_lights > max_lights_with_ambient) ? max_lights_with_ambient : num_lights;
 }
 
-static void gfx_normalize_vector(float v[3]) {
-    float dot = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
-    if(dot > 0.00001f){
-        const float scale = 1.0f / sqrtf(dot);
-        v[0] *= scale;
-        v[1] *= scale;
-        v[2] *= scale;
-    }
-}
-
-static void gfx_transposed_matrix_mul(float res[3], const float a[3], const float b[4][4]) {
-    res[0] = a[0] * b[0][0] + a[1] * b[0][1] + a[2] * b[0][2];
-    res[1] = a[0] * b[1][0] + a[1] * b[1][1] + a[2] * b[1][2];
-    res[2] = a[0] * b[2][0] + a[1] * b[2][1] + a[2] * b[2][2];
-}
-
 static void calculate_normal_dir(const Light_t *light, float coeffs[3]) {
+#if defined(TARGET_PSP)
+    const float (*matrix)[4] = rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1];
+    const int32_t dirX = light->dir[0];
+    const int32_t dirY = light->dir[1];
+    const int32_t dirZ = light->dir[2];
+    union {
+        float value;
+        uint32_t bits;
+    } invDirScale = { 1.0f / 127.0f }, dot;
+
+    /* Convert all three signed direction components and transform them in
+     * parallel. The scalar path emitted three divides before the matrix
+     * multiply; one vector scale produces the same normalized input. */
+    __asm__ volatile(
+        ".set push\n"
+        ".set noreorder\n"
+        "mtv %[dirX], S100\n"
+        "mtv %[dirY], S101\n"
+        "mtv %[dirZ], S102\n"
+        "vi2f.s S100, S100, 0\n"
+        "vi2f.s S101, S101, 0\n"
+        "vi2f.s S102, S102, 0\n"
+        "mtv %[invDirScale], S110\n"
+        "vscl.t C100, C100, S110\n"
+        "lv.q C000, 0(%[matrix])\n"
+        "lv.q C010, 16(%[matrix])\n"
+        "lv.q C020, 32(%[matrix])\n"
+        "vdot.t S200, C000, C100\n"
+        "vdot.t S201, C010, C100\n"
+        "vdot.t S202, C020, C100\n"
+        "vdot.t S210, C200, C200\n"
+        "sv.s S200, 0(%[coeffs])\n"
+        "sv.s S201, 4(%[coeffs])\n"
+        "sv.s S202, 8(%[coeffs])\n"
+        "mfv %[dot], S210\n"
+        ".set pop\n"
+        : [dot] "=r"(dot.bits)
+        : [dirX] "r"(dirX), [dirY] "r"(dirY), [dirZ] "r"(dirZ),
+          [invDirScale] "r"(invDirScale.bits), [matrix] "r"(matrix), [coeffs] "r"(coeffs)
+        : "memory");
+
+    if (dot.value > 0.00001f) {
+        union {
+            float value;
+            uint32_t bits;
+        } scale = { 1.0f / sqrtf(dot.value) };
+
+        __asm__ volatile(
+            ".set push\n"
+            ".set noreorder\n"
+            "lv.s S200, 0(%[coeffs])\n"
+            "lv.s S201, 4(%[coeffs])\n"
+            "lv.s S202, 8(%[coeffs])\n"
+            "mtv %[scale], S210\n"
+            "vscl.t C200, C200, S210\n"
+            "sv.s S200, 0(%[coeffs])\n"
+            "sv.s S201, 4(%[coeffs])\n"
+            "sv.s S202, 8(%[coeffs])\n"
+            ".set pop\n"
+            :
+            : [coeffs] "r"(coeffs), [scale] "r"(scale.bits)
+            : "memory");
+    }
+#else
     float light_dir[3] = {
         light->dir[0] / 127.0f,
         light->dir[1] / 127.0f,
         light->dir[2] / 127.0f
     };
-    gfx_transposed_matrix_mul(coeffs, light_dir, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1]);
-    gfx_normalize_vector(coeffs);
+    const float (*matrix)[4] = rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1];
+    float dot;
+
+    coeffs[0] = light_dir[0] * matrix[0][0] + light_dir[1] * matrix[0][1] + light_dir[2] * matrix[0][2];
+    coeffs[1] = light_dir[0] * matrix[1][0] + light_dir[1] * matrix[1][1] + light_dir[2] * matrix[1][2];
+    coeffs[2] = light_dir[0] * matrix[2][0] + light_dir[1] * matrix[2][1] + light_dir[2] * matrix[2][2];
+
+    dot = coeffs[0] * coeffs[0] + coeffs[1] * coeffs[1] + coeffs[2] * coeffs[2];
+    if (dot > 0.00001f) {
+        const float scale = 1.0f / sqrtf(dot);
+        coeffs[0] *= scale;
+        coeffs[1] *= scale;
+        coeffs[2] *= scale;
+    }
+#endif
 }
 
 static void gfx_matrix_mul(float res[4][4], const float a[4][4], const float b[4][4]) {
@@ -2838,14 +2927,16 @@ static bool gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
         d->u = U;
         d->v = V;
         
-        // trivial clip rejection
-        d->clip_rej = 0;
-        if (x < -w) d->clip_rej |= X_POS;
-        if (x > w) d->clip_rej |= X_NEG;
-        if (y < -w) d->clip_rej |= Y_POS;
-        if (y > w) d->clip_rej |= Y_NEG;
-        if (z < -w) d->clip_rej |= Z_POS;
-        if (z > w) d->clip_rej |= Z_NEG;
+        // Trivial clip rejection. Accumulate in a register so the PSP path
+        // writes the loaded vertex once instead of load/OR/store per plane.
+        uint32_t clipRej = 0;
+        if (x < -w) clipRej |= X_POS;
+        if (x > w) clipRej |= X_NEG;
+        if (y < -w) clipRej |= Y_POS;
+        if (y > w) clipRej |= Y_NEG;
+        if (z < -w) clipRej |= Z_POS;
+        if (z > w) clipRej |= Z_NEG;
+        d->clip_rej = clipRej;
 
 #if !defined(TARGET_PSP)
         d->x = model_vec[0];
@@ -3058,24 +3149,43 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
     struct ColorCombiner *comb = state->comb;
     const bool use_alpha = state->use_alpha;
     const bool use_texture = state->use_texture;
-    float tex_u_scale[2] = { state->tex_u_scale[0], state->tex_u_scale[1] };
-    float tex_v_scale[2] = { state->tex_v_scale[0], state->tex_v_scale[1] };
-    float tex_u_bias[2] = { state->tex_u_bias[0], state->tex_u_bias[1] };
-    float tex_v_bias[2] = { state->tex_v_bias[0], state->tex_v_bias[1] };
+    const float* tex_u_scale = state->tex_u_scale;
+    const float* tex_v_scale = state->tex_v_scale;
+    const float* tex_u_bias = state->tex_u_bias;
+    const float* tex_v_bias = state->tex_v_bias;
+    float adjusted_tex_u_scale[2];
+    float adjusted_tex_v_scale[2];
+    float adjusted_tex_u_bias[2];
+    float adjusted_tex_v_bias[2];
     const uint32_t shader_program_id = rendering_state.shader_program->shader_id;
 
     if (use_texture) {
         const struct LoadedVertex *uv_vertices[3] = {v1, v2, v3};
         const int coord_count = state->two_texture_blend ? 2 : 1;
+        const bool adjust_tex_coords =
+            state->tex_u_scale_to_primitive[0] || state->tex_v_scale_to_primitive[0] ||
+            (state->two_texture_blend &&
+             (state->tex_u_scale_to_primitive[1] || state->tex_v_scale_to_primitive[1]));
 
-        for (int coord = 0; coord < coord_count; coord++) {
-            if (state->tex_u_scale_to_primitive[coord]) {
-                gfx_apply_unmasked_texture_axis(uv_vertices, 3, true, state->tex_u_nominal_span[coord],
-                                                &tex_u_scale[coord], &tex_u_bias[coord]);
-            }
-            if (state->tex_v_scale_to_primitive[coord]) {
-                gfx_apply_unmasked_texture_axis(uv_vertices, 3, false, state->tex_v_nominal_span[coord],
-                                                &tex_v_scale[coord], &tex_v_bias[coord]);
+        if (adjust_tex_coords) {
+            memcpy(adjusted_tex_u_scale, state->tex_u_scale, sizeof(adjusted_tex_u_scale));
+            memcpy(adjusted_tex_v_scale, state->tex_v_scale, sizeof(adjusted_tex_v_scale));
+            memcpy(adjusted_tex_u_bias, state->tex_u_bias, sizeof(adjusted_tex_u_bias));
+            memcpy(adjusted_tex_v_bias, state->tex_v_bias, sizeof(adjusted_tex_v_bias));
+            tex_u_scale = adjusted_tex_u_scale;
+            tex_v_scale = adjusted_tex_v_scale;
+            tex_u_bias = adjusted_tex_u_bias;
+            tex_v_bias = adjusted_tex_v_bias;
+
+            for (int coord = 0; coord < coord_count; coord++) {
+                if (state->tex_u_scale_to_primitive[coord]) {
+                    gfx_apply_unmasked_texture_axis(uv_vertices, 3, true, state->tex_u_nominal_span[coord],
+                                                    &adjusted_tex_u_scale[coord], &adjusted_tex_u_bias[coord]);
+                }
+                if (state->tex_v_scale_to_primitive[coord]) {
+                    gfx_apply_unmasked_texture_axis(uv_vertices, 3, false, state->tex_v_nominal_span[coord],
+                                                    &adjusted_tex_v_scale[coord], &adjusted_tex_v_bias[coord]);
+                }
             }
         }
     }
@@ -4405,6 +4515,7 @@ static bool gfx_s2dex_bg_upload_rgba16_texture(const uint8_t* source, uint32_t w
 static bool gfx_s2dex_bg_prepare_texture(const uint8_t* source, uint32_t width, uint32_t height, uint8_t fmt,
                                          uint8_t siz, uint32_t* contentWidth, uint32_t* contentHeight) {
     const int tile = 0;
+    bool dynamicHit;
     uint32_t rowBytes;
     uint32_t sourceSpan;
     uint32_t uploadWidth;
@@ -4476,7 +4587,7 @@ static bool gfx_s2dex_bg_prepare_texture(const uint8_t* source, uint32_t width, 
     tileState->lrs = (width - 1) << G_TEXTURE_IMAGE_FRAC;
     tileState->lrt = (height - 1) << G_TEXTURE_IMAGE_FRAC;
 
-    if (!gfx_texture_cache_lookup(tile, &rendering_state.textures[tile], source, fmt, siz)) {
+    if (!gfx_texture_cache_lookup(tile, &rendering_state.textures[tile], source, fmt, siz, true, &dynamicHit)) {
         if (!gfx_s2dex_bg_upload_rgba16_texture(source, width, height, rowBytes, sourceSpan, *contentWidth,
                                                 *contentHeight, uploadWidth, uploadHeight,
                                                 rendering_state.textures[tile])) {

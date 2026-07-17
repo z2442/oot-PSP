@@ -1611,7 +1611,7 @@ endif
 ifneq ($(PSP_PORT_GPROF_ENABLED),)
 PSP_PORT_LINKER_DEPS := $(PSP_PORT_GPROF_LINKER_SCRIPT)
 PSP_PORT_EXTRA_LINK_OBJECTS := $(PSP_PORT_ASSET_SEGMENT_OBJECT)
-PSP_PORT_LDFLAGS := -pg -g -Wl,-T$(PSP_PORT_GPROF_LINKER_SCRIPT) -Wl,-zmax-page-size=128 -Wl,--gc-sections \
+PSP_PORT_LDFLAGS := -pg -g -Wl,-T$(PSP_PORT_GPROF_LINKER_SCRIPT) -Wl,-q -Wl,-zmax-page-size=128 -Wl,--gc-sections \
 	-Wl,-u,module_info -Wl,-u,sceKernelChangeThreadPriority \
 	$(PSP_PORT_LIBS)
 else

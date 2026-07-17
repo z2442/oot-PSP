@@ -319,6 +319,18 @@ def linked_objects_by_file(elf: ElfObject) -> dict[tuple[str, str], object]:
     return result
 
 
+def linked_image_base(elf: ElfObject) -> int:
+    values = {
+        symbol.value
+        for symbols in elf.symtabs.values()
+        for symbol in symbols
+        if (symbol.name == "_ftext") and (symbol.shndx != SHN_UNDEF)
+    }
+    if len(values) != 1:
+        raise ValueError(f"{elf.path} does not define a unique _ftext symbol")
+    return next(iter(values))
+
+
 def relocation_targets(elf: ElfObject, symbol) -> dict[int, object]:
     result: dict[int, object] = {}
     section = elf.sections[symbol.shndx]
@@ -335,6 +347,10 @@ def relocation_targets(elf: ElfObject, symbol) -> dict[int, object]:
 
 def resolve_manifest(elf_path: Path, manifest_path: Path, output: Path, base_elf_path: Path | None = None) -> None:
     elf = ElfObject(elf_path)
+    # The runtime adds its loaded _ftext address to every encoded destination
+    # and relocated pointer. PRX links are already zero-based, but gprof links
+    # are fixed-address executables and must be normalized here.
+    image_base = linked_image_base(elf)
     objects = linked_objects_by_file(elf)
     objects_by_name: dict[str, list[object]] = {}
     for (_source_file, name), candidate in objects.items():
@@ -382,15 +398,19 @@ def resolve_manifest(elf_path: Path, manifest_path: Path, output: Path, base_elf
         adjustments: list[int] = []
         for offset, reference_pointer_value in reference_relocations:
             clean_pointer_value = struct.unpack_from("<I", clean_symbol_data, offset)[0]
-            adjustment = clean_pointer_value - reference_pointer_value
+            adjustment = (clean_pointer_value - image_base) - reference_pointer_value
             if not -(1 << 31) <= adjustment < (1 << 31):
                 raise ValueError(f"runtime relocation adjustment is too large for {source_file}:{symbol_name}")
             adjustments.append(adjustment)
 
+        destination_offset = symbol.value - image_base
+        if not 0 <= destination_offset < (1 << 32):
+            raise ValueError(f"runtime patch destination is outside the linked image for {source_file}:{symbol_name}")
+
         records.append(
             struct.pack(
                 "<IIIIII",
-                symbol.value,
+                destination_offset,
                 source_vrom,
                 size,
                 payload_size,
