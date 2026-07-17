@@ -28,6 +28,7 @@ unsigned int psp_tex_bound = 0;
 static unsigned int sPspTexGuBound = 0;
 static unsigned int sIntensityClut[256] __attribute__((aligned(16)));
 static int sIntensityClutInited = 0;
+static int sIntensityClutApplied = 0;
 
 #define PSP_NATIVE_ADDR_START 0x08800000U
 #define PSP_NATIVE_ADDR_END 0x0C000000U
@@ -163,6 +164,7 @@ void texman_reset(void *buf, unsigned int size) {
     psp_tex_number = 0;
     psp_tex_bound = 0;
     sPspTexGuBound = 0;
+    sIntensityClutApplied = 0;
     psp_tex_buffer = psp_tex_buffer_start = buf;
     psp_tex_buffer_max = buf + size;
 #ifdef DEBUG
@@ -370,8 +372,11 @@ void texman_bind_tex(unsigned int num) {
 #endif
     if (current->type == GU_PSM_T8) {
         texman_ensure_intensity_clut();
-        sceGuClutMode(GU_PSM_8888, 0, 0xFF, 0);
-        sceGuClutLoad(32, sIntensityClut);
+        if (!sIntensityClutApplied) {
+            sceGuClutMode(GU_PSM_8888, 0, 0xFF, 0);
+            sceGuClutLoad(32, sIntensityClut);
+            sIntensityClutApplied = 1;
+        }
     }
 
     sceGuTexMode(current->type, 0, 0, current->swizzled);
@@ -382,6 +387,7 @@ void texman_bind_tex(unsigned int num) {
 
 void texman_invalidate_binding(void) {
     sPspTexGuBound = 0;
+    sIntensityClutApplied = 0;
 }
 
 unsigned int texman_get_bound(void) {

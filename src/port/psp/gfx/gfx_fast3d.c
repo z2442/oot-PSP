@@ -194,6 +194,7 @@ struct TriPipelineState {
     bool used_textures[2];
     bool use_texture;
     bool two_texture_blend;
+    bool flame_texture_atlas;
     bool color_mul_env;
     bool color_mul_prim;
     float tex_u_scale[2], tex_v_scale[2];
@@ -272,8 +273,10 @@ static struct RDP {
     bool combine_color_mul_env;
     bool combine_color_mul_prim;
     bool combine_two_texture_blend;
+    bool combine_flame_texture_atlas;
     
     struct RGBA env_color, prim_color, fog_color, fill_color;
+    uint8_t prim_lod_frac;
     struct XYWidthHeight viewport, scissor;
     bool viewport_or_scissor_changed;
     void *z_buf_address;
@@ -291,6 +294,9 @@ static struct RenderingState {
     bool depth_mask;
     bool decal_mode;
     bool alpha_blend;
+    bool texture_env_color_valid;
+    uint32_t flame_texture_atlas_id;
+    struct RGBA texture_env_color;
     bool tri_pipeline_dirty;
     bool backend_state_dirty;
     struct TriPipelineState tri_pipeline;
@@ -787,6 +793,33 @@ static struct GfxRenderingAPI *gfx_rapi;
 
 #if defined(TARGET_PSP)
 static uint8_t psp_texture_stage_buf[256 * 256 * 4] __attribute__((aligned(16)));
+
+/* gEffFire combines a static I8 silhouette with a vertically scrolling I4 noise texture. The GU has one texture
+ * unit, so bake representative scroll phases once and select the matching atlas cell with texture coordinates. */
+#define GFX_FLAME_ATLAS_FRAME_WIDTH 32
+#define GFX_FLAME_ATLAS_FRAME_HEIGHT 64
+#define GFX_FLAME_ATLAS_COLUMNS 8
+#define GFX_FLAME_ATLAS_ROWS 4
+#define GFX_FLAME_ATLAS_PHASE_STEP 4
+#define GFX_FLAME_ATLAS_WIDTH (GFX_FLAME_ATLAS_FRAME_WIDTH * GFX_FLAME_ATLAS_COLUMNS)
+#define GFX_FLAME_ATLAS_HEIGHT (GFX_FLAME_ATLAS_FRAME_HEIGHT * GFX_FLAME_ATLAS_ROWS)
+#define GFX_FLAME_ATLAS_SIZE (GFX_FLAME_ATLAS_WIDTH * GFX_FLAME_ATLAS_HEIGHT)
+#define GFX_FLAME_ATLAS_CACHE_SIZE 4
+
+typedef struct __attribute__((aligned(16))) FlameAtlasCacheEntry {
+    uint8_t pixels[GFX_FLAME_ATLAS_SIZE];
+    uint32_t textureId;
+    const uint8_t* texture0Addr;
+    const uint8_t* texture1Addr;
+    uint32_t lastUsed;
+    uint8_t primLodFrac;
+    bool pixelsValid;
+    bool textureValid;
+} FlameAtlasCacheEntry;
+
+static FlameAtlasCacheEntry sFlameAtlasCache[GFX_FLAME_ATLAS_CACHE_SIZE] __attribute__((aligned(16)));
+static FlameAtlasCacheEntry* sPreparedFlameAtlas;
+static uint32_t sFlameAtlasUseClock;
 
 static inline uint32_t gfx_next_power_of_two(uint32_t value) {
     if (value <= 1) {
@@ -1566,6 +1599,14 @@ static unsigned int gfx_texture_cache_upload_size(uint16_t width, uint16_t heigh
 static void gfx_texture_cache_clear(void) {
     gfx_flush();
     texman_clear();
+#if defined(TARGET_PSP)
+    for (uint32_t i = 0; i < ARRAY_COUNTU(sFlameAtlasCache); i++) {
+        sFlameAtlasCache[i].textureId = 0;
+        sFlameAtlasCache[i].textureValid = false;
+    }
+    sPreparedFlameAtlas = NULL;
+    rendering_state.flame_texture_atlas_id = 0;
+#endif
     gfx_texture_cache.pool_pos = 0;
     memset(gfx_texture_cache.pool, 0, sizeof(gfx_texture_cache.pool));
     memset(gfx_texture_cache.hashmap, 0, sizeof(gfx_texture_cache.hashmap));
@@ -2241,6 +2282,125 @@ static void import_texture(int tile) {
     //printf("Time diff: %d\n", t1 - t0);
 }
 
+#if defined(TARGET_PSP)
+static bool gfx_flame_atlas_material_is_supported(void) {
+    const TextureTileState* texture0 = gfx_get_texture_tile(0);
+    const TextureTileState* texture1 = gfx_get_texture_tile(1);
+
+    return (texture0->fmt == G_IM_FMT_I) && (texture0->siz == G_IM_SIZ_8b) &&
+           (texture1->fmt == G_IM_FMT_I) && (texture1->siz == G_IM_SIZ_4b) &&
+           (gfx_texture_import_width(0) == GFX_FLAME_ATLAS_FRAME_WIDTH) &&
+           (gfx_texture_import_height(0) == GFX_FLAME_ATLAS_FRAME_HEIGHT) &&
+           (gfx_texture_import_width(1) == GFX_FLAME_ATLAS_FRAME_WIDTH) &&
+           (gfx_texture_import_height(1) == (GFX_FLAME_ATLAS_PHASE_STEP * GFX_FLAME_ATLAS_COLUMNS *
+                                             GFX_FLAME_ATLAS_ROWS));
+}
+
+static void gfx_build_flame_atlas(FlameAtlasCacheEntry* entry) {
+    const uint32_t texture0RowBytes = gfx_texture_row_bytes(GFX_FLAME_ATLAS_FRAME_WIDTH, G_IM_SIZ_8b);
+    const uint32_t texture1RowBytes = gfx_texture_row_bytes(GFX_FLAME_ATLAS_FRAME_WIDTH, G_IM_SIZ_4b);
+    uint8_t noiseSubtraction[16];
+    GfxTextureSwapState texture0Swap =
+        gfx_texture_source_swap_state(rdp.loaded_texture[0].addr, gfx_texture_source_span_size(0));
+    GfxTextureSwapState texture1Swap =
+        gfx_texture_source_swap_state(rdp.loaded_texture[1].addr, gfx_texture_source_span_size(1));
+
+    /* The RDP expression is TEXEL0 + (TEXEL1 - 1) * PRIM_LOD_FRAC. Its fraction uses an 8-bit fixed-point
+     * denominator, so precompute the only 16 possible I4 noise contributions rather than doing arithmetic for
+     * every atlas texel. Thirty-two phases keep the scroll error within two source rows. */
+    for (uint32_t noise = 0; noise < ARRAY_COUNTU(noiseSubtraction); noise++) {
+        noiseSubtraction[noise] =
+            (uint8_t)(((uint32_t)(0xFF - (noise * 0x11)) * entry->primLodFrac + 0x80) >> 8);
+    }
+
+    for (uint32_t phase = 0; phase < (GFX_FLAME_ATLAS_COLUMNS * GFX_FLAME_ATLAS_ROWS); phase++) {
+        const uint32_t atlasX = (phase % GFX_FLAME_ATLAS_COLUMNS) * GFX_FLAME_ATLAS_FRAME_WIDTH;
+        const uint32_t atlasY = (phase / GFX_FLAME_ATLAS_COLUMNS) * GFX_FLAME_ATLAS_FRAME_HEIGHT;
+        const uint32_t texture1Offset = phase * GFX_FLAME_ATLAS_PHASE_STEP;
+
+        for (uint32_t y = 0; y < GFX_FLAME_ATLAS_FRAME_HEIGHT; y++) {
+            const uint8_t* texture0Row = gfx_texture_row(0, y, texture0RowBytes);
+            const uint8_t* texture1Row =
+                gfx_texture_row(1, (y - texture1Offset) & 0x7F, texture1RowBytes);
+            uint8_t* atlasRow =
+                &entry->pixels[(atlasY + y) * GFX_FLAME_ATLAS_WIDTH + atlasX];
+
+            for (uint32_t x = 0; x < GFX_FLAME_ATLAS_FRAME_WIDTH; x++) {
+                const uint8_t flame = gfx_read_texture_source_u8(texture0Row, x, &texture0Swap);
+                const uint8_t noise = gfx_texture_read_4b(1, x, texture1Row, &texture1Swap);
+                const uint8_t subtraction = noiseSubtraction[noise];
+
+                atlasRow[x] = flame > subtraction ? flame - subtraction : 0;
+            }
+        }
+    }
+}
+
+static bool gfx_prepare_flame_atlas(void) {
+    FlameAtlasCacheEntry* entry = NULL;
+    FlameAtlasCacheEntry* victim = &sFlameAtlasCache[0];
+
+    for (uint32_t i = 0; i < ARRAY_COUNTU(sFlameAtlasCache); i++) {
+        FlameAtlasCacheEntry* candidate = &sFlameAtlasCache[i];
+
+        if (candidate->pixelsValid && (candidate->texture0Addr == rdp.loaded_texture[0].addr) &&
+            (candidate->texture1Addr == rdp.loaded_texture[1].addr) &&
+            (candidate->primLodFrac == rdp.prim_lod_frac)) {
+            entry = candidate;
+            break;
+        }
+        if (!candidate->pixelsValid ||
+            (victim->pixelsValid && (candidate->lastUsed < victim->lastUsed))) {
+            victim = candidate;
+        }
+    }
+
+    /* Tile-size commands change for every flame. Source textures do not, so a cache hit stays at pointer
+     * comparisons even when the Poe Collector's four souls alternate between three different face images. */
+    if ((entry != NULL) && entry->textureValid) {
+        entry->lastUsed = ++sFlameAtlasUseClock;
+        sPreparedFlameAtlas = entry;
+        return true;
+    }
+
+    if (!gfx_flame_atlas_material_is_supported() ||
+        !gfx_validate_texture_source(0, "flame-atlas-texture0") ||
+        !gfx_validate_texture_source(1, "flame-atlas-texture1")) {
+        return false;
+    }
+
+    if (entry == NULL) {
+        entry = victim;
+    }
+
+    gfx_flush();
+    if (entry->textureId == 0) {
+        if (!texman_vram_space_available(GFX_FLAME_ATLAS_SIZE) || !texman_texture_slot_available()) {
+            gfx_texture_cache_clear();
+        }
+        entry->textureId = gfx_rapi->new_texture();
+    } else {
+        gfx_rapi->select_texture(0, entry->textureId);
+    }
+
+    if (!entry->pixelsValid || (entry->texture0Addr != rdp.loaded_texture[0].addr) ||
+        (entry->texture1Addr != rdp.loaded_texture[1].addr) ||
+        (entry->primLodFrac != rdp.prim_lod_frac)) {
+        entry->texture0Addr = rdp.loaded_texture[0].addr;
+        entry->texture1Addr = rdp.loaded_texture[1].addr;
+        entry->primLodFrac = rdp.prim_lod_frac;
+        gfx_build_flame_atlas(entry);
+        entry->pixelsValid = true;
+    }
+    gfx_rapi->upload_texture(entry->pixels, GFX_FLAME_ATLAS_WIDTH, GFX_FLAME_ATLAS_HEIGHT, GU_PSM_T8);
+
+    entry->textureValid = true;
+    entry->lastUsed = ++sFlameAtlasUseClock;
+    sPreparedFlameAtlas = entry;
+    return true;
+}
+#endif
+
 static inline void gfx_mark_tri_pipeline_dirty(void) {
     rendering_state.tri_pipeline_dirty = true;
 }
@@ -2305,11 +2465,51 @@ static void gfx_prepare_texture_coord_state(struct TriPipelineState* state, int 
 #endif
 }
 
+#if defined(TARGET_PSP)
+static void gfx_prepare_flame_atlas_coord_state(struct TriPipelineState* state) {
+    const TextureTileState* texture0 = gfx_get_texture_tile(0);
+    const TextureTileState* texture1 = gfx_get_texture_tile(1);
+    const float textureSpanU = 8.0f * (texture0->lrs - texture0->uls + 4);
+    const float textureSpanV = 8.0f * (texture0->lrt - texture0->ult + 4);
+    const uint32_t scrollPixels = (texture1->ult + 2) >> G_TEXTURE_IMAGE_FRAC;
+    const uint32_t phase = ((scrollPixels + (GFX_FLAME_ATLAS_PHASE_STEP / 2)) /
+                            GFX_FLAME_ATLAS_PHASE_STEP) &
+                           ((GFX_FLAME_ATLAS_COLUMNS * GFX_FLAME_ATLAS_ROWS) - 1);
+    const uint32_t atlasX = (phase % GFX_FLAME_ATLAS_COLUMNS) * GFX_FLAME_ATLAS_FRAME_WIDTH;
+    const uint32_t atlasY = (phase / GFX_FLAME_ATLAS_COLUMNS) * GFX_FLAME_ATLAS_FRAME_HEIGHT;
+
+    state->tex_u_nominal_span[0] = textureSpanU;
+    state->tex_v_nominal_span[0] = textureSpanV;
+    state->tex_u_scale[0] = (GFX_FLAME_ATLAS_FRAME_WIDTH - 1.0f) /
+                            (GFX_FLAME_ATLAS_WIDTH * textureSpanU);
+    state->tex_v_scale[0] = (GFX_FLAME_ATLAS_FRAME_HEIGHT - 1.0f) /
+                            (GFX_FLAME_ATLAS_HEIGHT * textureSpanV);
+    state->tex_u_bias[0] =
+        (atlasX + 0.5f - (texture0->uls * 8.0f * (GFX_FLAME_ATLAS_FRAME_WIDTH - 1.0f) / textureSpanU)) /
+        GFX_FLAME_ATLAS_WIDTH;
+    state->tex_v_bias[0] =
+        (atlasY + 0.5f - (texture0->ult * 8.0f * (GFX_FLAME_ATLAS_FRAME_HEIGHT - 1.0f) / textureSpanV)) /
+        GFX_FLAME_ATLAS_HEIGHT;
+}
+#endif
+
 static void gfx_prepare_tri_pipeline_state(void) {
     if (!rendering_state.tri_pipeline_dirty) {
         return;
     }
 
+#if defined(TARGET_PSP)
+    const bool flame_texture_atlas =
+        rdp.combine_flame_texture_atlas && gfx_prepare_flame_atlas();
+#else
+    const bool flame_texture_atlas = false;
+#endif
+    /* Setup display lists often switch away from the flame combiner and back without drawing anything. Delay
+     * this transition flush until a different path actually prepares geometry, allowing consecutive flames to
+     * remain in one GU triangle batch. Their transforms, colors, and atlas phases are already per-vertex. */
+    if (flame_texture_atlas != rendering_state.tri_pipeline.flame_texture_atlas) {
+        gfx_flush();
+    }
     const bool backend_state_dirty = rendering_state.backend_state_dirty;
     bool depth_test = (rsp.geometry_mode & G_ZBUFFER) == G_ZBUFFER;
     if (backend_state_dirty || depth_test != rendering_state.depth_test) {
@@ -2385,9 +2585,19 @@ static void gfx_prepare_tri_pipeline_state(void) {
         gfx_rapi->set_use_alpha(alpha_blend);
         rendering_state.alpha_blend = alpha_blend;
     }
-    if (comb->texture_blend) {
+    if (comb->texture_blend &&
+        (backend_state_dirty || !rendering_state.texture_env_color_valid ||
+         (rendering_state.texture_env_color.r != rdp.prim_color.r) ||
+         (rendering_state.texture_env_color.g != rdp.prim_color.g) ||
+         (rendering_state.texture_env_color.b != rdp.prim_color.b))) {
         gfx_flush();
-        gfx_rapi->set_texture_env_color(rdp.prim_color.r, rdp.prim_color.g, rdp.prim_color.b, rdp.prim_color.a);
+        /* GU_TFX_BLEND uses only the texture-environment RGB. Flame opacity is already emitted per vertex, so
+         * changing primitive alpha (as every Poe trail element does) must not split the triangle batch. */
+        gfx_rapi->set_texture_env_color(rdp.prim_color.r, rdp.prim_color.g, rdp.prim_color.b,
+                                        0xFF);
+        rendering_state.texture_env_color = rdp.prim_color;
+        rendering_state.texture_env_color.a = 0xFF;
+        rendering_state.texture_env_color_valid = true;
     }
 
     const bool used_textures[2] = {
@@ -2398,7 +2608,7 @@ static void gfx_prepare_tri_pipeline_state(void) {
     const int active_texture = comb->active_texture;
 
     for (int i = 0; i < 2; i++) {
-        if (used_textures[i]) {
+        if (used_textures[i] && !flame_texture_atlas) {
             const TextureTileState* tileState = gfx_get_texture_tile(i);
 
             if (rendering_state.textures[i] == NULL) {
@@ -2428,13 +2638,26 @@ static void gfx_prepare_tri_pipeline_state(void) {
         }
     }
 
-    if ((active_texture >= 0) && (rendering_state.textures[active_texture] != NULL)) {
+    if (flame_texture_atlas) {
+#if defined(TARGET_PSP)
+        const uint32_t atlasTextureId = sPreparedFlameAtlas->textureId;
+
+        if (backend_state_dirty || (rendering_state.flame_texture_atlas_id != atlasTextureId)) {
+            gfx_flush();
+            gfx_rapi->set_sampler_parameters(0, linear_filter, G_TX_CLAMP, G_TX_CLAMP,
+                                             G_TX_NOMASK, G_TX_NOMASK);
+            gfx_rapi->select_texture(0, atlasTextureId);
+            rendering_state.flame_texture_atlas_id = atlasTextureId;
+        }
+#endif
+    } else if ((active_texture >= 0) && (rendering_state.textures[active_texture] != NULL)) {
         const TextureTileState* tileState = gfx_get_texture_tile(active_texture);
 
         gfx_flush();
         gfx_rapi->set_sampler_parameters(active_texture, linear_filter, tileState->cms, tileState->cmt,
                                          tileState->masks, tileState->maskt);
         gfx_rapi->select_texture(active_texture, rendering_state.textures[active_texture]->texture_id);
+        rendering_state.flame_texture_atlas_id = 0;
     }
 
     struct TriPipelineState *state = &rendering_state.tri_pipeline;
@@ -2444,6 +2667,7 @@ static void gfx_prepare_tri_pipeline_state(void) {
     state->used_textures[1] = used_textures[1];
     state->use_texture = used_textures[0] || used_textures[1];
     state->two_texture_blend = rdp.combine_two_texture_blend;
+    state->flame_texture_atlas = flame_texture_atlas;
     state->color_mul_env = rdp.combine_color_mul_env;
     state->color_mul_prim = rdp.combine_color_mul_prim;
     for (int i = 0; i < 2; i++) {
@@ -2463,8 +2687,14 @@ static void gfx_prepare_tri_pipeline_state(void) {
             base_texture = used_textures[0] ? 0 : 1;
         }
 
-        gfx_prepare_texture_coord_state(state, 0, base_texture, linear_filter);
-        if (state->two_texture_blend) {
+        if (state->flame_texture_atlas) {
+#if defined(TARGET_PSP)
+            gfx_prepare_flame_atlas_coord_state(state);
+#endif
+        } else {
+            gfx_prepare_texture_coord_state(state, 0, base_texture, linear_filter);
+        }
+        if (state->two_texture_blend && !state->flame_texture_atlas) {
             gfx_prepare_texture_coord_state(state, 1, 1, linear_filter);
         }
     }
@@ -3846,7 +4076,8 @@ static bool gfx_cc_is_combined_mul_primitive(uint32_t a, uint32_t b, uint32_t c,
 }
 
 static void gfx_dp_set_combine_mode(uint32_t rgb, uint32_t alpha, bool color_mul_env, bool color_mul_prim,
-                                    bool texture_blend, bool texture_blend_shade, bool two_texture_blend) {
+                                    bool texture_blend, bool texture_blend_shade, bool two_texture_blend,
+                                    bool flame_texture_atlas) {
     uint32_t combineMode = rgb | (alpha << 12);
 
     if (texture_blend) {
@@ -3854,17 +4085,19 @@ static void gfx_dp_set_combine_mode(uint32_t rgb, uint32_t alpha, bool color_mul
     }
     if ((rdp.combine_mode == combineMode) && (rdp.combine_color_mul_env == color_mul_env) &&
         (rdp.combine_color_mul_prim == color_mul_prim) &&
-        (rdp.combine_two_texture_blend == two_texture_blend)) {
+        (rdp.combine_two_texture_blend == two_texture_blend) &&
+        (rdp.combine_flame_texture_atlas == flame_texture_atlas)) {
         return;
     }
     if (rdp.combine_two_texture_blend != two_texture_blend) {
-        /* Do not let vertices from the one-pass and two-pass paths share a batch. */
+        /* The two-pass path changes how gfx_flush itself draws queued vertices. */
         gfx_flush();
     }
     rdp.combine_mode = combineMode;
     rdp.combine_color_mul_env = color_mul_env;
     rdp.combine_color_mul_prim = color_mul_prim;
     rdp.combine_two_texture_blend = two_texture_blend;
+    rdp.combine_flame_texture_atlas = flame_texture_atlas;
     gfx_mark_tri_pipeline_dirty();
 }
 
@@ -3899,6 +4132,7 @@ static GFX_DL_HANDLER void gfx_dp_set_combine(uint32_t w0, uint32_t w1) {
     bool textureBlend = gfx_cc_is_texture_prim_env_blend(rgbA0, rgbB0, rgbC0, rgbD0);
     bool textureBlendShade = false;
     bool twoTextureBlend = false;
+    bool flameTextureAtlas = false;
     uint32_t rgbComb = color_comb(rgbA0, rgbB0, rgbC0, rgbD0);
     uint32_t alphaComb = color_comb(alphaA0, alphaB0, alphaC0, alphaD0);
 
@@ -3948,6 +4182,16 @@ static GFX_DL_HANDLER void gfx_dp_set_combine(uint32_t w0, uint32_t w1) {
         textureBlend = true;
     }
 
+    flameTextureAtlas =
+        ((rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE) &&
+        (rgbA0 == G_CCMUX_TEXEL1) && (rgbB0 == G_CCMUX_PRIMITIVE) &&
+        (rgbC0 == G_CCMUX_PRIM_LOD_FRAC) && (rgbD0 == G_CCMUX_TEXEL0) &&
+        (rgbA1 == G_CCMUX_PRIMITIVE) && (rgbB1 == G_CCMUX_ENVIRONMENT) &&
+        (rgbC1 == G_CCMUX_COMBINED) && (rgbD1 == G_CCMUX_ENVIRONMENT) &&
+        (alphaA0 == G_ACMUX_TEXEL1) && (alphaB0 == G_ACMUX_1) &&
+        (alphaC0 == G_ACMUX_PRIM_LOD_FRAC) && (alphaD0 == G_ACMUX_TEXEL0) &&
+        gfx_cc_is_combined_mul_primitive(alphaA1, alphaB1, alphaC1, alphaD1);
+
     if (gfx_cc_is_two_cycle_texture_shade_prim_tint(rgbA0, rgbB0, rgbC0, rgbD0, rgbA1, rgbB1, rgbC1,
                                                      rgbD1)) {
         rgbComb = color_comb(G_CCMUX_TEXEL0, G_CCMUX_0, G_CCMUX_SHADE, G_CCMUX_0);
@@ -3957,7 +4201,7 @@ static GFX_DL_HANDLER void gfx_dp_set_combine(uint32_t w0, uint32_t w1) {
 #endif
 
     gfx_dp_set_combine_mode(rgbComb, alphaComb, colorMulEnv, colorMulPrim, textureBlend, textureBlendShade,
-                            twoTextureBlend);
+                            twoTextureBlend, flameTextureAtlas);
 #undef COMB_FIELD
 }
 
@@ -3968,12 +4212,13 @@ static void gfx_dp_set_env_color(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     rdp.env_color.a = a;
 }
 
-static void gfx_dp_set_prim_color(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+static void gfx_dp_set_prim_color(uint8_t lod_frac, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     if ((rdp.prim_color.r == r) && (rdp.prim_color.g == g) && (rdp.prim_color.b == b) &&
-        (rdp.prim_color.a == a)) {
+        (rdp.prim_color.a == a) && (rdp.prim_lod_frac == lod_frac)) {
         return;
     }
 
+    rdp.prim_lod_frac = lod_frac;
     rdp.prim_color.r = r;
     rdp.prim_color.g = g;
     rdp.prim_color.b = b;
@@ -4095,6 +4340,7 @@ static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int3
     bool saved_combine_color_mul_env = rdp.combine_color_mul_env;
     bool saved_combine_color_mul_prim = rdp.combine_color_mul_prim;
     bool saved_combine_two_texture_blend = rdp.combine_two_texture_blend;
+    bool saved_combine_flame_texture_atlas = rdp.combine_flame_texture_atlas;
     if ((rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_COPY) {
         // Per RDP Command Summary Set Tile's shift s and this dsdx should be set to 4 texels
         // Divide by 4 to get 1 instead
@@ -4102,7 +4348,7 @@ static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int3
         
         // Color combiner is turned off in copy mode
         gfx_dp_set_combine_mode(color_comb(0, 0, 0, G_CCMUX_TEXEL0), color_comb(0, 0, 0, G_ACMUX_TEXEL0),
-                                false, false, false, false, false);
+                                false, false, false, false, false, false);
         
         // Per documentation one extra pixel is added in this modes to each edge
         lrx += 1 << 2;
@@ -4148,6 +4394,7 @@ static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int3
     rdp.combine_color_mul_env = saved_combine_color_mul_env;
     rdp.combine_color_mul_prim = saved_combine_color_mul_prim;
     rdp.combine_two_texture_blend = saved_combine_two_texture_blend;
+    rdp.combine_flame_texture_atlas = saved_combine_flame_texture_atlas;
     gfx_mark_tri_pipeline_dirty();
 }
 
@@ -4174,9 +4421,10 @@ static void gfx_dp_fill_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t
     bool saved_combine_color_mul_env = rdp.combine_color_mul_env;
     bool saved_combine_color_mul_prim = rdp.combine_color_mul_prim;
     bool saved_combine_two_texture_blend = rdp.combine_two_texture_blend;
+    bool saved_combine_flame_texture_atlas = rdp.combine_flame_texture_atlas;
     if (use_fill_color) {
         gfx_dp_set_combine_mode(color_comb(0, 0, 0, G_CCMUX_SHADE), color_comb(0, 0, 0, G_ACMUX_SHADE), false, false,
-                                false, false, false);
+                                false, false, false, false);
     }
     gfx_draw_rectangle(ulx, uly, lrx, lry, gfx_rectangle_covers_screen(ulx, uly, lrx, lry),
                        gfx_rectangle_covers_width(ulx, lrx));
@@ -4185,6 +4433,7 @@ static void gfx_dp_fill_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t
         rdp.combine_color_mul_env = saved_combine_color_mul_env;
         rdp.combine_color_mul_prim = saved_combine_color_mul_prim;
         rdp.combine_two_texture_blend = saved_combine_two_texture_blend;
+        rdp.combine_flame_texture_atlas = saved_combine_flame_texture_atlas;
         gfx_mark_tri_pipeline_dirty();
     }
 }
@@ -4659,6 +4908,7 @@ static GFX_DL_HANDLER void gfx_sp_s2dex_bg_rect(uint32_t opcode, const void* bgA
     bool savedColorMulEnv;
     bool savedColorMulPrim;
     bool savedTwoTextureBlend;
+    bool savedFlameTextureAtlas;
     const bool scaled = opcode == G_BG_1CYC;
 
     if (!gfx_normalize_read_source(bgAddr, sizeof(uObjBg), "s2dex-bg", &normalizedBg)) {
@@ -4702,9 +4952,10 @@ static GFX_DL_HANDLER void gfx_sp_s2dex_bg_rect(uint32_t opcode, const void* bgA
     savedColorMulEnv = rdp.combine_color_mul_env;
     savedColorMulPrim = rdp.combine_color_mul_prim;
     savedTwoTextureBlend = rdp.combine_two_texture_blend;
+    savedFlameTextureAtlas = rdp.combine_flame_texture_atlas;
     if ((rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_COPY) {
         gfx_dp_set_combine_mode(color_comb(0, 0, 0, G_CCMUX_TEXEL0), color_comb(0, 0, 0, G_ACMUX_TEXEL0), false,
-                                false, false, false, false);
+                                false, false, false, false, false);
     }
 
     gfx_draw_rectangle(frameX, frameY, frameX + frameW, frameY + frameH, false, false);
@@ -4713,6 +4964,7 @@ static GFX_DL_HANDLER void gfx_sp_s2dex_bg_rect(uint32_t opcode, const void* bgA
     rdp.combine_color_mul_env = savedColorMulEnv;
     rdp.combine_color_mul_prim = savedColorMulPrim;
     rdp.combine_two_texture_blend = savedTwoTextureBlend;
+    rdp.combine_flame_texture_atlas = savedFlameTextureAtlas;
     gfx_mark_tri_pipeline_dirty();
 }
 #endif
@@ -4943,7 +5195,7 @@ static void gfx_run_dl(Gfx* cmd) {
                 gfx_dp_set_env_color(C1(24, 8), C1(16, 8), C1(8, 8), C1(0, 8));
                 break;
             case G_SETPRIMCOLOR:
-                gfx_dp_set_prim_color(C1(24, 8), C1(16, 8), C1(8, 8), C1(0, 8));
+                gfx_dp_set_prim_color(C0(0, 8), C1(24, 8), C1(16, 8), C1(8, 8), C1(0, 8));
                 break;
             case G_SETFOGCOLOR:
                 gfx_dp_set_fog_color(C1(24, 8), C1(16, 8), C1(8, 8), C1(0, 8));
