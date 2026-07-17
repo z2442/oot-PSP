@@ -313,6 +313,14 @@ static AttentionColor sAttentionColors[ACTORCAT_MAX + 1] = {
     { { 0, 255, 0, 255 }, { 0, 255, 0, 0 } },         // unused extra entry
 };
 
+#if PLATFORM_PSP
+/* The original NoN microcode draws the reticle at z = 0 without near clipping.
+ * Keep it inside the PSP GU's HUD projection instead. */
+#define LOCK_ON_RETICLE_Z -50.0f
+#else
+#define LOCK_ON_RETICLE_Z 0.0f
+#endif
+
 // unused
 Gfx D_80115FF0[] = {
     gsSPEndDisplayList(),
@@ -456,7 +464,7 @@ void Attention_Draw(Attention* attention, PlayState* play) {
                         lockOnScaleX = ((reticle->radius - 120.0f) * 0.001f) + 0.15f;
                     }
 
-                    Matrix_Translate(reticle->pos.x, reticle->pos.y, 0.0f, MTXMODE_NEW);
+                    Matrix_Translate(reticle->pos.x, reticle->pos.y, LOCK_ON_RETICLE_Z, MTXMODE_NEW);
                     Matrix_Scale(lockOnScaleX, 0.15f, 1.0f, MTXMODE_APPLY);
 
                     gDPSetPrimColor(OVERLAY_DISP++, 0, 0, reticle->color.r, reticle->color.g, reticle->color.b,
