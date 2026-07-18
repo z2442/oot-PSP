@@ -9,7 +9,6 @@ typedef enum OotPspHomeMenuResult {
 } OotPspHomeMenuResult;
 
 void OotPspHomeMenu_Init(void);
-void OotPspHomeMenu_RequestOpen(void);
 void OotPspHomeMenu_PollHomeButton(void);
 bool OotPspHomeMenu_IsOpen(void);
 OotPspHomeMenuResult OotPspHomeMenu_RunFrame(void);

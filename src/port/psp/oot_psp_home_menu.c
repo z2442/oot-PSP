@@ -9,63 +9,52 @@
 #include "oot_psp_controls.h"
 #include "oot_psp_renderer.h"
 
-#define OOT_PSP_HOME_MENU_ITEM_EXIT_GAME 0
+#define OOT_PSP_HOME_MENU_ITEM_RESUME_GAME 0
 #define OOT_PSP_HOME_MENU_ITEM_CONTROLLER_MAPPING 1
-#define OOT_PSP_HOME_MENU_ITEM_COUNT 2
+#define OOT_PSP_HOME_MENU_ITEM_EXIT_GAME 2
+#define OOT_PSP_HOME_MENU_ITEM_COUNT 3
 
 #define OOT_PSP_HOME_MENU_SCREEN_MAIN 0
 #define OOT_PSP_HOME_MENU_SCREEN_CONTROLLER_MAPPING 1
 
-#define OOT_PSP_HOME_MENU_HOME_INPUT_DELAY_US 250000
+#define OOT_PSP_HOME_MENU_INPUT_LOCKOUT_US 500000
+#define OOT_PSP_HOME_MENU_INPUT_DEBOUNCE_US 150000
+#define OOT_PSP_HOME_MENU_BUTTON_MASK \
+    (PSP_CTRL_CIRCLE | PSP_CTRL_CROSS | PSP_CTRL_START | PSP_CTRL_UP | PSP_CTRL_DOWN | PSP_CTRL_LEFT | PSP_CTRL_RIGHT)
 
 static volatile int sOpenRequested;
 static bool sActive;
-static bool sHomeCloseArmed;
-static bool sOpeningHomePressSeen;
 static int sSelectedIndex;
 static int sScreen;
 static int sControlSelectedIndex;
 static int sStatusTimer;
+static u32 sCurrentButtons;
 static u32 sLastButtons;
 static u32 sLastPolledButtons;
-static u32 sHomeInputDelayStartUsec;
-static bool sHomeInputDelayActive;
+static u32 sMenuInputLockoutStartUsec;
+static u32 sLastMenuInputUsec;
 static char sStatusMessage[64];
 
 static u32 OotPspHomeMenu_ReadButtons(void) {
-    SceCtrlData pad;
+    SceCtrlData pad = { 0 };
 
-    sceCtrlPeekBufferPositive(&pad, 1);
-    return pad.Buttons;
-}
-
-static void OotPspHomeMenu_BeginHomeInputDelay(void) {
-    sHomeInputDelayStartUsec = sceKernelGetSystemTimeLow();
-    sHomeInputDelayActive = true;
-}
-
-static bool OotPspHomeMenu_IsHomeInputDelayed(void) {
-    if (sHomeInputDelayActive &&
-        ((sceKernelGetSystemTimeLow() - sHomeInputDelayStartUsec) >= OOT_PSP_HOME_MENU_HOME_INPUT_DELAY_US)) {
-        sHomeInputDelayActive = false;
+    if (sceCtrlPeekBufferPositive(&pad, 1) > 0) {
+        sCurrentButtons = pad.Buttons;
     }
 
-    return sHomeInputDelayActive;
+    return sCurrentButtons;
 }
 
 static void OotPspHomeMenu_Open(void) {
     sActive = true;
-    sHomeCloseArmed = false;
-    OotPspHomeMenu_BeginHomeInputDelay();
-    sSelectedIndex = OOT_PSP_HOME_MENU_ITEM_EXIT_GAME;
+    sMenuInputLockoutStartUsec = sceKernelGetSystemTimeLow();
+    sSelectedIndex = OOT_PSP_HOME_MENU_ITEM_RESUME_GAME;
     sScreen = OOT_PSP_HOME_MENU_SCREEN_MAIN;
     sControlSelectedIndex = 0;
     sStatusTimer = 0;
     sStatusMessage[0] = '\0';
-    sLastButtons = OotPspHomeMenu_ReadButtons();
-    if ((sLastPolledButtons | sLastButtons) & PSP_CTRL_HOME) {
-        sOpeningHomePressSeen = true;
-    }
+    sLastButtons = sCurrentButtons;
+    sLastMenuInputUsec = sMenuInputLockoutStartUsec;
 
     OotPspRenderer_SetHomeMenuBackgroundActive(true);
     OotPspRenderer_RequestHomeMenuBackground();
@@ -73,8 +62,6 @@ static void OotPspHomeMenu_Open(void) {
 
 static void OotPspHomeMenu_Close(void) {
     sActive = false;
-    sHomeCloseArmed = false;
-    sOpeningHomePressSeen = false;
     sScreen = OOT_PSP_HOME_MENU_SCREEN_MAIN;
     sStatusTimer = 0;
     OotPspRenderer_SetHomeMenuBackgroundActive(false);
@@ -152,22 +139,21 @@ static void OotPspHomeMenu_ActivateControlRow(void) {
 void OotPspHomeMenu_Init(void) {
     sOpenRequested = false;
     sActive = false;
-    sHomeCloseArmed = false;
-    sOpeningHomePressSeen = false;
-    sSelectedIndex = OOT_PSP_HOME_MENU_ITEM_EXIT_GAME;
+    sSelectedIndex = OOT_PSP_HOME_MENU_ITEM_RESUME_GAME;
     sScreen = OOT_PSP_HOME_MENU_SCREEN_MAIN;
     sControlSelectedIndex = 0;
     sStatusTimer = 0;
+    sCurrentButtons = 0;
     sLastButtons = 0;
     sLastPolledButtons = OotPspHomeMenu_ReadButtons();
-    sHomeInputDelayStartUsec = 0;
-    sHomeInputDelayActive = false;
+    sMenuInputLockoutStartUsec = 0;
+    sLastMenuInputUsec = 0;
     sStatusMessage[0] = '\0';
 
     sceImposeSetHomePopup(0);
 }
 
-void OotPspHomeMenu_RequestOpen(void) {
+static void OotPspHomeMenu_RequestOpen(void) {
     sOpenRequested = true;
 }
 
@@ -176,14 +162,6 @@ void OotPspHomeMenu_PollHomeButton(void) {
     u32 pressed = buttons & ~sLastPolledButtons;
 
     sLastPolledButtons = buttons;
-
-    if (OotPspHomeMenu_IsHomeInputDelayed()) {
-        return;
-    }
-
-    if ((buttons & PSP_CTRL_HOME) && !sHomeCloseArmed) {
-        sOpeningHomePressSeen = true;
-    }
 
     if ((pressed & PSP_CTRL_HOME) && !sActive) {
         OotPspHomeMenu_RequestOpen();
@@ -197,16 +175,12 @@ bool OotPspHomeMenu_IsOpen(void) {
 OotPspHomeMenuResult OotPspHomeMenu_RunFrame(void) {
     u32 buttons;
     u32 pressed;
+    u32 now;
 
     if (sOpenRequested) {
         sOpenRequested = false;
 
-        /*
-         * The HOME press can be reported both by controller polling and by
-         * the PSP exit callback.  Treat requests as idempotent so the second
-         * notification cannot immediately close a menu opened by the first.
-         */
-        if (!sActive && !OotPspHomeMenu_IsHomeInputDelayed()) {
+        if (!sActive) {
             OotPspHomeMenu_Open();
         }
     }
@@ -215,7 +189,7 @@ OotPspHomeMenuResult OotPspHomeMenu_RunFrame(void) {
         return OOT_PSP_HOME_MENU_RESULT_NONE;
     }
 
-    buttons = OotPspHomeMenu_ReadButtons();
+    buttons = sCurrentButtons;
     pressed = buttons & ~sLastButtons;
     sLastButtons = buttons;
     sLastPolledButtons = buttons;
@@ -224,18 +198,18 @@ OotPspHomeMenuResult OotPspHomeMenu_RunFrame(void) {
         sStatusTimer--;
     }
 
-    if (!OotPspHomeMenu_IsHomeInputDelayed()) {
-        /* Do not let the HOME press that opened the menu close it as well. */
-        if (!sHomeCloseArmed) {
-            if (buttons & PSP_CTRL_HOME) {
-                sOpeningHomePressSeen = true;
-            } else if (sOpeningHomePressSeen) {
-                sHomeCloseArmed = true;
-            }
-        } else if (pressed & PSP_CTRL_HOME) {
-            OotPspHomeMenu_BeginHomeInputDelay();
-            OotPspHomeMenu_Close();
-            return OOT_PSP_HOME_MENU_RESULT_NONE;
+    now = sceKernelGetSystemTimeLow();
+    if ((now - sMenuInputLockoutStartUsec) < OOT_PSP_HOME_MENU_INPUT_LOCKOUT_US) {
+        OotPspRenderer_RenderHomeMenu(sSelectedIndex, sScreen, sControlSelectedIndex, NULL);
+        return OOT_PSP_HOME_MENU_RESULT_NONE;
+    }
+
+    pressed &= OOT_PSP_HOME_MENU_BUTTON_MASK;
+    if (pressed != 0) {
+        if ((now - sLastMenuInputUsec) < OOT_PSP_HOME_MENU_INPUT_DEBOUNCE_US) {
+            pressed = 0;
+        } else {
+            sLastMenuInputUsec = now;
         }
     }
 
@@ -254,17 +228,17 @@ OotPspHomeMenuResult OotPspHomeMenu_RunFrame(void) {
             OotPspHomeMenu_ActivateControlRow();
         }
     } else {
-        if (pressed & PSP_CTRL_CIRCLE) {
-            OotPspHomeMenu_Close();
-            return OOT_PSP_HOME_MENU_RESULT_NONE;
-        }
-
-        if (pressed & (PSP_CTRL_UP | PSP_CTRL_DOWN)) {
-            sSelectedIndex ^= 1;
+        if (pressed & PSP_CTRL_UP) {
+            sSelectedIndex = (sSelectedIndex + OOT_PSP_HOME_MENU_ITEM_COUNT - 1) % OOT_PSP_HOME_MENU_ITEM_COUNT;
+        } else if (pressed & PSP_CTRL_DOWN) {
+            sSelectedIndex = (sSelectedIndex + 1) % OOT_PSP_HOME_MENU_ITEM_COUNT;
         }
 
         if (pressed & (PSP_CTRL_CROSS | PSP_CTRL_START)) {
-            if (sSelectedIndex == OOT_PSP_HOME_MENU_ITEM_EXIT_GAME) {
+            if (sSelectedIndex == OOT_PSP_HOME_MENU_ITEM_RESUME_GAME) {
+                OotPspHomeMenu_Close();
+                return OOT_PSP_HOME_MENU_RESULT_NONE;
+            } else if (sSelectedIndex == OOT_PSP_HOME_MENU_ITEM_EXIT_GAME) {
                 OotPspHomeMenu_Close();
                 return OOT_PSP_HOME_MENU_RESULT_EXIT_GAME;
             }

@@ -538,16 +538,17 @@ static void gfx_scegu_prepare_home_menu_draw(void) {
 
 static void gfx_scegu_render_home_menu_main(int selectedIndex) {
     static const char *items[] = {
-        "Exit game",
+        "Resume Game",
         "Controller Mapping",
+        "Exit Game",
     };
     int i;
 
     gfx_scegu_draw_rect(0, 0, SCR_WIDTH, SCR_HEIGHT, gfx_scegu_rgba(0, 0, 0, 96));
-    gfx_scegu_draw_rect(112, 88, 256, 102, gfx_scegu_rgba(0, 0, 0, 132));
+    gfx_scegu_draw_rect(112, 70, 256, 142, gfx_scegu_rgba(0, 0, 0, 132));
 
-    for (i = 0; i < 2; i++) {
-        int y = 124 + (i * 34);
+    for (i = 0; i < 3; i++) {
+        int y = 106 + (i * 38);
         unsigned int color = gfx_scegu_rgba(218, 224, 218, 255);
 
         if (selectedIndex == i) {
@@ -1343,6 +1344,7 @@ static void gfx_scegu_end_frame(void) {
     void *previousDrawBuffer = sDrawBuffer;
 
     sceGuFinish();
+    sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
 #if OOT_PSP_WAIT_VBLANK
     sceDisplayWaitVblankStart();
 #endif

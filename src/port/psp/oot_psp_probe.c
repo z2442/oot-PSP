@@ -93,7 +93,6 @@ static void OotPspProfiler_Stop(UNUSED int shouldDump) {
 #endif
 
 static int OotPspExitCallback(UNUSED int arg1, UNUSED int arg2, UNUSED void* common) {
-    OotPspHomeMenu_RequestOpen();
     return 0;
 }
 

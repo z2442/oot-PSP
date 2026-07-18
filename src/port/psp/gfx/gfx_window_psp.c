@@ -5,7 +5,6 @@
 #include <psppower.h>
 #include <psprtc.h>
 
-#include "oot_psp_home_menu.h"
 #include "oot_port_macros.h"
 
 #define OOT_PSP_SCREEN_WIDTH  480
@@ -14,34 +13,13 @@
 static bool sQuitRequested;
 static unsigned int sLastSwapBeginUsec;
 
-static int oot_psp_exit_callback(UNUSED int arg1, UNUSED int arg2, UNUSED void* common) {
-    OotPspHomeMenu_RequestOpen();
-    return 0;
-}
-
-static int oot_psp_callback_thread(UNUSED SceSize args, UNUSED void* argp) {
-    SceUID cbid = sceKernelCreateCallback("OOT PSP Exit Callback", oot_psp_exit_callback, NULL);
-    if (cbid >= 0) {
-        sceKernelRegisterExitCallback(cbid);
-    }
-    sceKernelSleepThreadCB();
-    return 0;
-}
-
 static void gfx_window_psp_init(UNUSED const char* game_name, UNUSED bool start_in_fullscreen) {
-    SceUID thid;
-
     sQuitRequested = false;
     sLastSwapBeginUsec = sceKernelGetSystemTimeLow();
 
     scePowerSetClockFrequency(333, 333, 166);
     sceCtrlSetSamplingCycle(0);
     sceCtrlSetSamplingMode(PSP_CTRL_MODE_ANALOG);
-
-    thid = sceKernelCreateThread("OOTPspCallbackThread", oot_psp_callback_thread, 0x20, 0x1000, 0, NULL);
-    if (thid >= 0) {
-        sceKernelStartThread(thid, 0, NULL);
-    }
 }
 
 static void gfx_window_psp_set_keyboard_callbacks(UNUSED bool (*on_key_down)(int scancode),
