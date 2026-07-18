@@ -118,6 +118,13 @@ typedef struct {
 } OotPspMixerMeStorage;
 
 static OotPspMixerState sCpuMixer __attribute__((aligned(64)));
+/*
+ * Keep the ME mixer state in main RAM.  Allocating it from ME EDRAM and
+ * enabling/wiping VME can hang during startup on real PSP hardware before
+ * the ME reaches its command loop.  The scalar mixer still runs entirely on
+ * the Media Engine, so it does not consume Allegrex CPU time.
+ */
+static OotPspMixerMeStorage sMeScalarStorage __attribute__((aligned(64)));
 static OotPspMixerMeStorage* sMeStorage;
 static OotPspMixerState* sCurrentMixer = &sCpuMixer;
 static s32 sExecutingOnMe;
@@ -202,33 +209,25 @@ static s16 OotPspMixer_Vadd(s16 left, s16 right) {
 void OotPspMixer_InitVme(void) {
 #if defined(TARGET_PSP) && OOT_PSP_AUDIO_MIXER_VME
     if (meLibGetCpuId() == 1) {
-        OotPspMixerMeStorage* storage = meCoreEDRAMAlloc(ROUND_UP_64(sizeof(OotPspMixerMeStorage)));
+        OotPspMixerMeStorage* storage = &sMeScalarStorage;
 
-        if (storage != NULL) {
-            memset(storage, 0, sizeof(*storage));
-            storage->mixer.sampleCache = &storage->sampleCache;
-            storage->mixer.bookCache = &storage->bookCache;
-            storage->mixer.reverbCache = &storage->reverbCache;
-            sMeStorage = storage;
-        }
-        vmeLibEnable();
-        vmeLibWipe();
+        memset(storage, 0, sizeof(*storage));
+        storage->mixer.sampleCache = &storage->sampleCache;
+        storage->mixer.bookCache = &storage->bookCache;
+        storage->mixer.reverbCache = &storage->reverbCache;
+        sMeStorage = storage;
+        sMixerVmeReady = 0;
         meLibSync();
-        sMixerVmeReady = 1;
     }
 #endif
 }
 
 void OotPspMixer_ShutdownVme(void) {
 #if defined(TARGET_PSP) && OOT_PSP_AUDIO_MIXER_VME
-    if ((meLibGetCpuId() == 1) && sMixerVmeReady) {
+    if (meLibGetCpuId() == 1) {
         sMixerVmeReady = 0;
         meLibSync();
-        vmeLibDisable();
-        if (sMeStorage != NULL) {
-            meCoreEDRAMFree(sMeStorage);
-            sMeStorage = NULL;
-        }
+        sMeStorage = NULL;
     }
 #endif
 }

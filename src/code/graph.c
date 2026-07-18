@@ -31,6 +31,7 @@
 #include "play_state.h"
 #if defined(TARGET_PSP)
 #include "oot_psp_audio_backend.h"
+#include "oot_psp_performance.h"
 #endif
 
 #define GFXPOOL_HEAD_MAGIC 0x1234
@@ -350,6 +351,25 @@ void Graph_TaskSet00(GraphicsContext* gfxCtx) {
 
 void Graph_Update(GraphicsContext* gfxCtx, GameState* gameState) {
     u32 problem;
+#if defined(TARGET_PSP) && defined(OOTDEBUG)
+    u64 frameStartUsec;
+    u64 gameStartUsec;
+    u64 gameEndUsec;
+    u64 audioStartUsec;
+    u64 audioEndUsec;
+    s32 sceneId = -1;
+    s32 roomId = -1;
+
+    if (gameState->main == Play_Main) {
+        PlayState* play = (PlayState*)gameState;
+
+        sceneId = play->sceneId;
+        roomId = play->roomCtx.curRoom.num;
+    }
+    frameStartUsec = OotPspPerformance_Now();
+    OotPspPerformance_BeginFrame(sceneId, roomId);
+    gameStartUsec = OotPspPerformance_Now();
+#endif
 
     gameState->inPreNMIState = false;
     Graph_InitTHGA(gfxCtx);
@@ -367,6 +387,9 @@ void Graph_Update(GraphicsContext* gfxCtx, GameState* gameState) {
 
     GameState_ReqPadData(gameState);
     GameState_Update(gameState);
+#if defined(TARGET_PSP) && defined(OOTDEBUG)
+    gameEndUsec = OotPspPerformance_Now();
+#endif
 
 #if DEBUG_FEATURES
     OPEN_DISPS(gfxCtx, "../graph.c", 987);
@@ -474,9 +497,15 @@ void Graph_Update(GraphicsContext* gfxCtx, GameState* gameState) {
         gfxCtx->fbIdx++;
     }
 
+#if defined(TARGET_PSP) && defined(OOTDEBUG)
+    audioStartUsec = OotPspPerformance_Now();
+#endif
     Audio_Update();
 #if defined(TARGET_PSP)
     OotPspAudio_Update();
+#endif
+#if defined(TARGET_PSP) && defined(OOTDEBUG)
+    audioEndUsec = OotPspPerformance_Now();
 #endif
 
     {
@@ -495,6 +524,11 @@ void Graph_Update(GraphicsContext* gfxCtx, GameState* gameState) {
         }
         sGraphPrevUpdateEndTime = timeNow;
     }
+
+#if defined(TARGET_PSP) && defined(OOTDEBUG)
+    OotPspPerformance_EndFrame(gameEndUsec - gameStartUsec, audioEndUsec - audioStartUsec,
+                               OotPspPerformance_Now() - frameStartUsec);
+#endif
 
 #if DEBUG_FEATURES
     if (gIsCtrlr2Valid && CHECK_BTN_ALL(gameState->input[0].press.button, BTN_Z) &&

@@ -3,12 +3,40 @@
 
 #include "ultra64.h"
 
+#if defined(OOTDEBUG)
+typedef struct OotPspAudioProfileCounters {
+    u32 updates;
+    u32 waitUsec;
+    u32 prepareUsec;
+    u32 synthUsec;
+    u32 submitUsec;
+    u32 sequenceUsec;
+    u32 commandBuildUsec;
+    u32 abiCommands;
+    u32 sampleDmas;
+    u32 meSubmits;
+    u32 cpuMixes;
+    u32 meFailures;
+    u32 meActive;
+    u32 meState;
+    u32 meProgress;
+} OotPspAudioProfileCounters;
+#endif
+
 s32 OotPspAudioBackend_Init(void);
+s32 OotPspAudioBackend_BootMe(void);
 s32 OotPspAudioBackend_Queue(const void* buf, u32 size);
 s32 OotPspAudioBackend_SetFrequency(u32 frequency);
 u32 OotPspAudioBackend_GetLength(void);
 s32 OotPspAudioBackend_NeedsRefillUrgently(void);
 s32 OotPspAudioBackend_NeedsRefillDuringIo(void);
+#if defined(OOTDEBUG)
+void OotPspAudioBackend_GetThreadRunClocks(u64* producerClocks, u64* outputClocks);
+void OotPspAudioBackend_GetProfileCounters(OotPspAudioProfileCounters* counters);
+void OotPspAudioBackend_RecordUpdateProfile(u32 waitUsec, u32 prepareUsec, u32 synthUsec, u32 submitUsec,
+                                            u32 abiCommands, u32 sampleDmas);
+void OotPspAudioBackend_RecordSynthesisProfile(u32 sequenceUsec, u32 commandBuildUsec);
+#endif
 void OotPspAudioBackend_SubmitCommands(const Acmd* cmdList, s32 cmdCount);
 void OotPspAudioBackend_SubmitCommandsAndQueue(const Acmd* cmdList, s32 cmdCount, const void* buf, u32 size);
 void OotPspAudioBackend_WaitForCommands(void);

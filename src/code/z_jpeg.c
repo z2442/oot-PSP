@@ -12,9 +12,10 @@
 #if defined(TARGET_PSP)
 #include "oot_psp_asset_loader.h"
 
-#include <pspjpeg.h>
+#include <stdio.h>
+#include <jpeglib.h>
+#include <setjmp.h>
 #include <pspkernel.h>
-#include <psputility_modules.h>
 #include <string.h>
 #endif
 
@@ -294,7 +295,19 @@ static u8 sPspJpegInput[JPEG_PSP_RGBA16_SIZE] __attribute__((aligned(64)));
 static u8 sPspJpegRgba[JPEG_PSP_RGBA_SIZE] __attribute__((aligned(64)));
 static void* sPspDecodedImages[JPEG_PSP_DECODED_IMAGE_MAX];
 static s32 sPspDecodedImageCount;
-static s32 sPspJpegInitialized;
+
+typedef struct JpegPspErrorManager {
+    struct jpeg_error_mgr base;
+    jmp_buf jump;
+    char message[JMSG_LENGTH_MAX];
+} JpegPspErrorManager;
+
+static void JpegPsp_ErrorExit(j_common_ptr common) {
+    JpegPspErrorManager* error = (JpegPspErrorManager*)common->err;
+
+    (*common->err->format_message)(common, error->message);
+    longjmp(error->jump, 1);
+}
 
 s32 JpegPsp_WasDecoded(void* data) {
     s32 i;
@@ -414,41 +427,20 @@ static void JpegPsp_WriteOutputU16(u8* dst, size_t offset, u16 value, s32 textur
     JpegPsp_WriteOutputByte(dst, offset + 1, value & 0xFF, textureWords);
 }
 
-static s32 JpegPsp_InitDecoder(void) {
-    s32 ret;
-
-    if (sPspJpegInitialized) {
-        return true;
-    }
-
-    ret = sceUtilityLoadModule(PSP_MODULE_AV_AVCODEC);
-    if ((ret < 0) && (ret != (s32)SCE_KERNEL_ERROR_LIBRARY_FOUND)) {
-        osSyncPrintf("oot-psp jpeg avcodec load failed err=%ld\n", (long)ret);
-        return false;
-    }
-
-    ret = sceJpegInitMJpeg();
-    if (ret < 0) {
-        osSyncPrintf("oot-psp jpeg init failed err=%ld\n", (long)ret);
-        return false;
-    }
-
-    sPspJpegInitialized = true;
-    return true;
-}
-
 static s32 JpegPsp_Decode(void* data, void* output) {
     const u8* src = data;
     u8* dst = output;
     JpegByteLayout layout = Jpeg_GetByteLayout(src);
-    size_t jpegSize;
+    struct jpeg_decompress_struct decoder;
+    JpegPspErrorManager error;
+    JSAMPROW row[1];
+    size_t jpegSize = 0;
     int width;
     int height;
     int decodedWidth;
     int decodedHeight;
-    size_t rgbaSize;
+    size_t rgbStride;
     s32 textureWords;
-    s32 ret;
 
     if (layout == JPEG_BYTE_LAYOUT_INVALID) {
         return -1;
@@ -469,36 +461,42 @@ static s32 JpegPsp_Decode(void* data, void* output) {
         return -1;
     }
 
-    if (!JpegPsp_InitDecoder()) {
+    memset(&decoder, 0, sizeof(decoder));
+    memset(&error, 0, sizeof(error));
+    decoder.err = jpeg_std_error(&error.base);
+    error.base.error_exit = JpegPsp_ErrorExit;
+    if (setjmp(error.jump) != 0) {
+        if (decoder.mem != NULL) {
+            jpeg_destroy_decompress(&decoder);
+        }
+        osSyncPrintf("oot-psp jpeg software decode failed: %s\n", error.message);
         return -1;
     }
 
-    ret = sceJpegCreateMJpeg(width, height);
-    if (ret < 0) {
-        osSyncPrintf("oot-psp jpeg create failed %dx%d err=%ld\n", width, height, (long)ret);
-        return -1;
-    }
+    jpeg_create_decompress(&decoder);
+    jpeg_mem_src(&decoder, sPspJpegInput, jpegSize);
+    jpeg_read_header(&decoder, TRUE);
+    decoder.out_color_space = JCS_RGB;
+    jpeg_start_decompress(&decoder);
 
-    rgbaSize = (size_t)width * height * 4;
-    sceKernelDcacheWritebackRange(sPspJpegInput, jpegSize);
-    sceKernelDcacheWritebackInvalidateRange(sPspJpegRgba, rgbaSize);
-
-    ret = sceJpegDecodeMJpeg(sPspJpegInput, jpegSize, sPspJpegRgba, 0);
-    sceKernelDcacheInvalidateRange(sPspJpegRgba, rgbaSize);
-    sceJpegDeleteMJpeg();
-
-    if (ret < 0) {
-        osSyncPrintf("oot-psp jpeg decode failed err=%ld\n", (long)ret);
-        return -1;
-    }
-
-    decodedWidth = (ret >> 16) & 0xFFFF;
-    decodedHeight = ret & 0xFFFF;
-    if ((decodedWidth <= 0) || (decodedHeight <= 0) || (decodedWidth > JPEG_PSP_MAX_WIDTH) ||
+    decodedWidth = decoder.output_width;
+    decodedHeight = decoder.output_height;
+    if ((decodedWidth != width) || (decodedHeight != height) || (decoder.output_components != 3) ||
+        (decodedWidth <= 0) || (decodedHeight <= 0) || (decodedWidth > JPEG_PSP_MAX_WIDTH) ||
         (decodedHeight > JPEG_PSP_MAX_HEIGHT)) {
         osSyncPrintf("oot-psp jpeg bad decoded dimensions %dx%d\n", decodedWidth, decodedHeight);
+        jpeg_abort_decompress(&decoder);
+        jpeg_destroy_decompress(&decoder);
         return -1;
     }
+
+    rgbStride = (size_t)decodedWidth * 3;
+    while (decoder.output_scanline < decoder.output_height) {
+        row[0] = &sPspJpegRgba[(size_t)decoder.output_scanline * rgbStride];
+        jpeg_read_scanlines(&decoder, row, 1);
+    }
+    jpeg_finish_decompress(&decoder);
+    jpeg_destroy_decompress(&decoder);
 
     /*
      * JPEG room images are stored as texture-word assets while compressed, but the
@@ -512,7 +510,7 @@ static s32 JpegPsp_Decode(void* data, void* output) {
 
     for (int y = 0; y < decodedHeight; y++) {
         for (int x = 0; x < decodedWidth; x++) {
-            size_t rgbaOff = ((size_t)y * decodedWidth + x) * 4;
+            size_t rgbaOff = ((size_t)y * decodedWidth + x) * 3;
             size_t outOff = ((size_t)y * SCREEN_WIDTH + x) * sizeof(u16);
             u8 r = sPspJpegRgba[rgbaOff + 0];
             u8 g = sPspJpegRgba[rgbaOff + 1];

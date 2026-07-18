@@ -5,6 +5,7 @@
 #include "gfx/gfx_fast3d.h"
 #include "gfx/gfx_rendering_api.h"
 #include "gfx/gfx_window_psp.h"
+#include "oot_psp_performance.h"
 
 #define OOT_PSP_DISPLAY_WIDTH  480
 #define OOT_PSP_DISPLAY_HEIGHT 272
@@ -57,10 +58,20 @@ void OotPspRenderer_Init(void) {
 }
 
 void OotPspRenderer_RenderDisplayList(Gfx* dl) {
+#if defined(OOTDEBUG)
+    uint64_t startUsec;
+#endif
+
     OotPspRenderer_Init();
+#if defined(OOTDEBUG)
+    startUsec = OotPspPerformance_Now();
+#endif
     gfx_start_frame();
     gfx_run(dl);
     gfx_end_frame();
+#if defined(OOTDEBUG)
+    OotPspPerformance_RecordRenderer(OotPspPerformance_Now() - startUsec);
+#endif
 }
 
 void OotPspRenderer_RenderTask(const OSTask* task) {

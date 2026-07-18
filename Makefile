@@ -1192,7 +1192,10 @@ PSP_AUDIO_MIXER_FAST ?= 1
 PSP_AUDIO_MIXER_VERIFY ?= 0
 PSP_GFX_DIAGNOSTICS ?= 0
 PSP_FAST_SQRT ?= 1
+PSP_OOTDEBUG ?= 0
 PSP_AUDIO_ME_OPT_CFLAGS ?= -O3 -finline-functions
+PSP_AUDIO_CPU_OPT_CFLAGS ?= -O3 -finline-functions
+PSP_GFX_HOT_OPT_CFLAGS ?= -O3 -finline-functions
 PSP_PORT_AUDIO_MIXER_VARIANT :=
 PSP_PORT_AUDIO_SRC_VARIANT :=
 ifeq ($(PSP_AUDIO_HARDWARE_SRC),0)
@@ -1212,10 +1215,14 @@ PSP_PORT_AUDIO_MIXER_VARIANT := -mixer-vme-verify
 endif
 endif
 PSP_PORT_GPROF_ENABLED := $(filter 1 ON on TRUE true YES yes,$(PSP_ENABLE_GPROF))
+PSP_PORT_OOTDEBUG_ENABLED := $(filter 1 ON on TRUE true YES yes,$(PSP_OOTDEBUG))
+ifneq ($(PSP_PORT_OOTDEBUG_ENABLED),)
+PSP_PORT_OOTDEBUG_VARIANT := -ootdebug
+endif
 ifneq ($(PSP_PORT_GPROF_ENABLED),)
-PSP_PORT_DEFAULT_BUILD_DIR := build/psp-port-gprof$(PSP_PORT_AUDIO_MIXER_VARIANT)$(PSP_PORT_AUDIO_SRC_VARIANT)/$(VERSION)
+PSP_PORT_DEFAULT_BUILD_DIR := build/psp-port-gprof$(PSP_PORT_AUDIO_MIXER_VARIANT)$(PSP_PORT_AUDIO_SRC_VARIANT)$(PSP_PORT_OOTDEBUG_VARIANT)/$(VERSION)
 else
-PSP_PORT_DEFAULT_BUILD_DIR := build/psp-port$(PSP_PORT_AUDIO_MIXER_VARIANT)$(PSP_PORT_AUDIO_SRC_VARIANT)/$(VERSION)
+PSP_PORT_DEFAULT_BUILD_DIR := build/psp-port$(PSP_PORT_AUDIO_MIXER_VARIANT)$(PSP_PORT_AUDIO_SRC_VARIANT)$(PSP_PORT_OOTDEBUG_VARIANT)/$(VERSION)
 endif
 PSP_PORT_BUILD_DIR ?= $(PSP_PORT_DEFAULT_BUILD_DIR)
 PSP_PORT_PSPSDK := $(shell psp-config -p 2>/dev/null)
@@ -1234,6 +1241,7 @@ PSP_PORT_RUNTIME_ASM_SOURCES := \
 	src/port/psp/gfx/gfx_clip_vfpu.s \
 	src/port/psp/gfx/gfx_transform_vfpu.s \
 	src/port/psp/oot_psp_asset_transform.s \
+	src/port/psp/oot_psp_me_kcall.s \
 	src/port/psp/oot_psp_ucode_assets.s
 PSP_PORT_ROOT_ASSET_SOURCES := $(sort $(filter-out %.inc.c,$(wildcard assets/objects/*/*.c)))
 PSP_PORT_ROOT_TEXTURE_SOURCES := \
@@ -1418,6 +1426,7 @@ PSP_PORT_RUNTIME_SOURCES := \
 	src/port/psp/oot_psp_home_menu.c \
 	src/port/psp/oot_psp_memory.c \
 	src/port/psp/oot_psp_mixer.c \
+	src/port/psp/oot_psp_performance.c \
 	src/port/psp/oot_psp_renderer.c \
 	src/port/psp/oot_psp_runtime_patch.c \
 	src/port/psp/sys_ucode_psp.c \
@@ -1570,6 +1579,9 @@ PSP_PORT_DEFINES := \
 ifneq ($(PSP_PORT_GPROF_ENABLED),)
 PSP_PORT_DEFINES += -DOOT_PSP_GPROF=1
 endif
+ifneq ($(PSP_PORT_OOTDEBUG_ENABLED),)
+PSP_PORT_DEFINES += -DOOTDEBUG=1
+endif
 ifneq ($(PSP_PORT_INTRAFONT_LIB),)
 PSP_PORT_DEFINES += -DOOT_PSP_USE_INTRAFONT=1
 else
@@ -1601,8 +1613,10 @@ ifneq ($(PSP_PORT_GPROF_ENABLED),)
 PSP_PORT_CFLAGS += -pg -g -fno-omit-frame-pointer -fno-optimize-sibling-calls
 endif
 PSP_PORT_AUDIO_ME_CFLAGS := $(filter-out -pg,$(PSP_PORT_CFLAGS)) $(PSP_AUDIO_ME_OPT_CFLAGS)
+PSP_PORT_AUDIO_CPU_CFLAGS := $(PSP_PORT_CFLAGS) $(PSP_AUDIO_CPU_OPT_CFLAGS)
+PSP_PORT_GFX_HOT_CFLAGS := $(PSP_PORT_CFLAGS) $(PSP_GFX_HOT_OPT_CFLAGS)
 
-PSP_PORT_LIBS := -L$(PSP_PORT_PSPSDK)/lib -L$(PSP_PORT_PREFIX)/lib -lme-core -lpspdmac -lpspgu -lpspgum -lpspjpeg -lz \
+PSP_PORT_LIBS := -L$(PSP_PORT_PSPSDK)/lib -L$(PSP_PORT_PREFIX)/lib -lme-core -lpspdmac -lpspgu -lpspgum -ljpeg -lz \
 	-lpspdisplay -lpspge -lpspfpu -lpspctrl -lpsppower -lpspaudio -lpspdebug
 ifneq ($(PSP_PORT_INTRAFONT_LIB),)
 PSP_PORT_LIBS += -lintrafont
@@ -1612,13 +1626,14 @@ ifneq ($(PSP_PORT_GPROF_ENABLED),)
 PSP_PORT_LINKER_DEPS := $(PSP_PORT_GPROF_LINKER_SCRIPT)
 PSP_PORT_EXTRA_LINK_OBJECTS := $(PSP_PORT_ASSET_SEGMENT_OBJECT)
 PSP_PORT_LDFLAGS := -pg -g -Wl,-T$(PSP_PORT_GPROF_LINKER_SCRIPT) -Wl,-q -Wl,-zmax-page-size=128 -Wl,--gc-sections \
-	-Wl,-u,module_info -Wl,-u,sceKernelChangeThreadPriority \
+	-Wl,-u,module_info -Wl,-u,sceKernelChangeThreadPriority -Wl,-u,ootPspMeKcallImport \
 	$(PSP_PORT_LIBS)
 else
 PSP_PORT_LINKER_DEPS :=
 PSP_PORT_EXTRA_LINK_OBJECTS :=
 PSP_PORT_LDFLAGS := -specs=$(PSP_PORT_PSPSDK)/lib/prxspecs -Wl,-q,-T$(PSP_PORT_PSPSDK)/lib/linkfile.prx \
 	-Wl,-zmax-page-size=128 -Wl,--gc-sections -Wl,-u,module_info -Wl,-u,sceKernelChangeThreadPriority \
+	-Wl,-u,ootPspMeKcallImport \
 	$(PSP_PORT_PSPSDK)/lib/prxexports.o $(PSP_PORT_LIBS)
 endif
 
@@ -1697,7 +1712,12 @@ $(PSP_PORT_NATIVE_GENERATED_ASSET_STAMP): $(PSP_PORT_SETUP_STAMP)
 
 $(PSP_PORT_RUNTIME_OBJECTS): $(PSP_PORT_SETUP_STAMP) $(PSP_PORT_RUNTIME_GENERATED_ASSET_STAMP)
 
+$(PSP_PORT_BUILD_DIR)/src/audio/internal/playback.o \
+$(PSP_PORT_BUILD_DIR)/src/audio/internal/seqplayer.o \
+$(PSP_PORT_BUILD_DIR)/src/audio/internal/synthesis.o \
+$(PSP_PORT_BUILD_DIR)/src/audio/internal/thread.o: PSP_PORT_CFLAGS := $(PSP_PORT_AUDIO_CPU_CFLAGS)
 $(PSP_PORT_BUILD_DIR)/src/audio/internal/seqplayer.o: PSP_PORT_CFLAGS += -DMML_VERSION=MML_VERSION_OOT
+$(PSP_PORT_BUILD_DIR)/src/port/psp/gfx/gfx_fast3d.o: PSP_PORT_CFLAGS := $(PSP_PORT_GFX_HOT_CFLAGS)
 $(PSP_PORT_BUILD_DIR)/src/port/psp/oot_psp_audio_backend.o: PSP_PORT_CFLAGS := $(PSP_PORT_AUDIO_ME_CFLAGS)
 $(PSP_PORT_BUILD_DIR)/src/port/psp/oot_psp_mixer.o: PSP_PORT_CFLAGS := $(PSP_PORT_AUDIO_ME_CFLAGS)
 

@@ -34,6 +34,9 @@
 #include "oot_psp_compat.h"
 #include "oot_psp_gfx_ext.h"
 #include "oot_psp_memory.h"
+#if defined(TARGET_PSP)
+#include "oot_psp_performance.h"
+#endif
 #include "segmented_address.h"
 #include "sys_matrix.h"
 
@@ -295,7 +298,8 @@ static struct RenderingState {
     bool decal_mode;
     bool alpha_blend;
     bool texture_env_color_valid;
-    uint32_t flame_texture_atlas_id;
+    uint32_t bound_texture_id;
+    int8_t bound_texture_tile;
     struct RGBA texture_env_color;
     bool tri_pipeline_dirty;
     bool backend_state_dirty;
@@ -337,6 +341,13 @@ static bool sUploadedProjectionValid;
 static uint8_t sInvalidTextureBuf[256] __attribute__((aligned(16))) = { 0xff, 0xff, 0xff, 0xff };
 static uint8_t sInvalidPaletteBuf[512] __attribute__((aligned(16))) = { 0xff, 0xff };
 static struct GfxCmdSnapshot sCurrentCmd;
+#define GFX_VALIDATED_POINTER_CACHE_SIZE 256
+typedef struct GfxValidatedReadCacheEntry {
+    uintptr_t addr;
+    size_t size;
+} GfxValidatedReadCacheEntry;
+static uintptr_t sValidatedDlCursorCache[GFX_VALIDATED_POINTER_CACHE_SIZE];
+static GfxValidatedReadCacheEntry sValidatedReadCache[GFX_VALIDATED_POINTER_CACHE_SIZE];
 #if OOT_PSP_GFX_DIAGNOSTICS
 #define GFX_CAPTURE_CMD(dst, src) ((dst) = (src))
 #else
@@ -518,6 +529,21 @@ static bool gfx_is_valid_native_read_range(uintptr_t value, size_t size) {
     return gfx_is_loaded_external_range(value, size);
 }
 
+static inline bool gfx_is_valid_native_read_range_cached(uintptr_t value, size_t size) {
+    const size_t cacheIndex = ((value >> 4) ^ size) & (GFX_VALIDATED_POINTER_CACHE_SIZE - 1);
+
+    if ((sValidatedReadCache[cacheIndex].addr == value) &&
+        (sValidatedReadCache[cacheIndex].size == size)) {
+        return true;
+    }
+    if (!gfx_is_valid_native_read_range(value, size)) {
+        return false;
+    }
+    sValidatedReadCache[cacheIndex].addr = value;
+    sValidatedReadCache[cacheIndex].size = size;
+    return true;
+}
+
 static void gfx_log_bad_data_source(const char* context, const void* addr, size_t sizeBytes) {
     static s32 sBadDataSourceLogCount = 0;
     uintptr_t value = (uintptr_t)addr;
@@ -554,11 +580,19 @@ static void gfx_log_bad_data_source(const char* context, const void* addr, size_
 
 static bool gfx_normalize_read_source(const void* addr, size_t sizeBytes, const char* context, const void** normalized) {
     uintptr_t normalizedValue;
+    size_t cacheIndex;
 
-    if (gfx_normalize_native_range((uintptr_t)addr, sizeBytes, &normalizedValue) &&
-        gfx_is_valid_native_read_range(normalizedValue, sizeBytes)) {
-        *normalized = (const void*)normalizedValue;
-        return true;
+    if (gfx_normalize_native_range((uintptr_t)addr, sizeBytes, &normalizedValue)) {
+        cacheIndex = ((normalizedValue >> 4) ^ sizeBytes) & (GFX_VALIDATED_POINTER_CACHE_SIZE - 1);
+        if ((sValidatedReadCache[cacheIndex].addr == normalizedValue) &&
+            (sValidatedReadCache[cacheIndex].size == sizeBytes)) {
+            *normalized = (const void*)normalizedValue;
+            return true;
+        }
+        if (gfx_is_valid_native_read_range_cached(normalizedValue, sizeBytes)) {
+            *normalized = (const void*)normalizedValue;
+            return true;
+        }
     }
 
     gfx_log_bad_data_source(context, addr, sizeBytes);
@@ -783,6 +817,20 @@ static psp_fast_t buf_vbo[MAX_BUFFERED  * 3] __attribute__ ((aligned (32))); // 
 static psp_uv_t buf_vbo_tex1[MAX_BUFFERED * 3] __attribute__((aligned(32)));
 #else
 static float buf_vbo[MAX_BUFFERED * (26 * 3)] // 3 vertices in a triangle and 26 floats per vtx
+#endif
+
+#if defined(TARGET_PSP) && defined(OOTDEBUG)
+static uint32_t sPerformanceCommandCount;
+static uint32_t sPerformanceInputTriangleCount;
+static uint32_t sPerformanceOutputTriangleCount;
+static uint32_t sPerformanceFlushCount;
+static uint32_t sPerformanceDrawCallCount;
+static uint32_t sPerformanceOpaqueDrawCallCount;
+static uint32_t sPerformanceOpaqueTriangleCount;
+static uint32_t sPerformanceTranslucentDrawCallCount;
+static uint32_t sPerformanceTranslucentTriangleCount;
+static uint32_t sPerformanceMaxBatchTriangles;
+static uint32_t sPerformanceTextureUploadCount;
 #endif
 static size_t buf_vbo_len;
 static size_t buf_num_vert;
@@ -1047,6 +1095,10 @@ static inline __attribute__((always_inline)) void gfx_upload_texture(int tile, c
     const bool mirror_s = (tileState->cms & G_TX_MIRROR) != 0 && tileState->masks != G_TX_NOMASK;
     const bool mirror_t = (tileState->cmt & G_TX_MIRROR) != 0 && tileState->maskt != G_TX_NOMASK;
 
+#if defined(TARGET_PSP) && defined(OOTDEBUG)
+    sPerformanceTextureUploadCount++;
+#endif
+
     if (__builtin_expect(!mirror_s && !mirror_t && gfx_is_power_of_two(width) && gfx_is_power_of_two(height), 1)) {
         rendering_state.textures[tile]->mirror_s = false;
         rendering_state.textures[tile]->mirror_t = false;
@@ -1299,7 +1351,6 @@ void gfx_clip_single_vert( struct LoadedVertex *p_p_vertices, size_t *p_num_vert
 
 //******************* End Clipping things
 
-
 static void gfx_flush(void) {
     if (buf_vbo_len > 0) {
         //int num = buf_vbo_num_tris;
@@ -1307,6 +1358,21 @@ static void gfx_flush(void) {
 #if defined(TARGET_PSP)
         const bool twoTextureBlend = rendering_state.tri_pipeline.two_texture_blend &&
                                      rendering_state.textures[0] != NULL && rendering_state.textures[1] != NULL;
+
+#if defined(OOTDEBUG)
+        sPerformanceFlushCount++;
+        sPerformanceDrawCallCount += twoTextureBlend ? 2 : 1;
+        if (rendering_state.alpha_blend || twoTextureBlend) {
+            sPerformanceTranslucentDrawCallCount += twoTextureBlend ? 2 : 1;
+            sPerformanceTranslucentTriangleCount += buf_vbo_num_tris * (twoTextureBlend ? 2 : 1);
+        } else {
+            sPerformanceOpaqueDrawCallCount++;
+            sPerformanceOpaqueTriangleCount += buf_vbo_num_tris;
+        }
+        if (buf_vbo_num_tris > sPerformanceMaxBatchTriangles) {
+            sPerformanceMaxBatchTriangles = buf_vbo_num_tris;
+        }
+#endif
 
         if (twoTextureBlend) {
             gfx_rapi->set_use_alpha(true);
@@ -1331,6 +1397,8 @@ static void gfx_flush(void) {
             gfx_rapi->draw_triangles((float *)buf_vbo, buf_vbo_len, buf_vbo_num_tris);
             gfx_rapi->set_use_alpha(rendering_state.alpha_blend);
             gfx_rapi->select_texture(0, rendering_state.textures[0]->texture_id);
+            rendering_state.bound_texture_id = rendering_state.textures[0]->texture_id;
+            rendering_state.bound_texture_tile = 0;
         }
 #endif
         buf_vbo_len = 0;
@@ -1479,8 +1547,8 @@ static inline void gfx_color_mul_prim(struct RGBA* color) {
 }
 
 #if defined(TARGET_PSP)
-static inline void gfx_two_texture_blend_pass_alphas(uint8_t surfaceAlpha, uint8_t mixAlpha, uint8_t* baseAlpha,
-                                                     uint8_t* overlayAlpha) {
+static GFX_DL_HANDLER void gfx_two_texture_blend_pass_alphas(uint8_t surfaceAlpha, uint8_t mixAlpha,
+                                                             uint8_t* baseAlpha, uint8_t* overlayAlpha) {
     uint32_t overlay = ((uint32_t)surfaceAlpha * mixAlpha + 127) / 255;
     uint32_t denominator = 255 - overlay;
     uint32_t base = 0;
@@ -1605,7 +1673,8 @@ static void gfx_texture_cache_clear(void) {
         sFlameAtlasCache[i].textureValid = false;
     }
     sPreparedFlameAtlas = NULL;
-    rendering_state.flame_texture_atlas_id = 0;
+    rendering_state.bound_texture_id = 0;
+    rendering_state.bound_texture_tile = -1;
 #endif
     gfx_texture_cache.pool_pos = 0;
     memset(gfx_texture_cache.pool, 0, sizeof(gfx_texture_cache.pool));
@@ -2510,6 +2579,12 @@ static void gfx_prepare_tri_pipeline_state(void) {
     if (flame_texture_atlas != rendering_state.tri_pipeline.flame_texture_atlas) {
         gfx_flush();
     }
+    /* The two-texture fallback is another property consumed by gfx_flush itself. Keep the prepared value until
+     * geometry actually reaches the new combiner, just as the flame-atlas path does. This collapses material
+     * setup display lists that switch the combiner several times without emitting triangles. */
+    if (rdp.combine_two_texture_blend != rendering_state.tri_pipeline.two_texture_blend) {
+        gfx_flush();
+    }
     const bool backend_state_dirty = rendering_state.backend_state_dirty;
     bool depth_test = (rsp.geometry_mode & G_ZBUFFER) == G_ZBUFFER;
     if (backend_state_dirty || depth_test != rendering_state.depth_test) {
@@ -2642,22 +2717,26 @@ static void gfx_prepare_tri_pipeline_state(void) {
 #if defined(TARGET_PSP)
         const uint32_t atlasTextureId = sPreparedFlameAtlas->textureId;
 
-        if (backend_state_dirty || (rendering_state.flame_texture_atlas_id != atlasTextureId)) {
+        if (backend_state_dirty || (rendering_state.bound_texture_id != atlasTextureId) ||
+            (rendering_state.bound_texture_tile != 0)) {
             gfx_flush();
             gfx_rapi->set_sampler_parameters(0, linear_filter, G_TX_CLAMP, G_TX_CLAMP,
                                              G_TX_NOMASK, G_TX_NOMASK);
             gfx_rapi->select_texture(0, atlasTextureId);
-            rendering_state.flame_texture_atlas_id = atlasTextureId;
+            rendering_state.bound_texture_id = atlasTextureId;
+            rendering_state.bound_texture_tile = 0;
         }
 #endif
     } else if ((active_texture >= 0) && (rendering_state.textures[active_texture] != NULL)) {
-        const TextureTileState* tileState = gfx_get_texture_tile(active_texture);
+        const uint32_t textureId = rendering_state.textures[active_texture]->texture_id;
 
-        gfx_flush();
-        gfx_rapi->set_sampler_parameters(active_texture, linear_filter, tileState->cms, tileState->cmt,
-                                         tileState->masks, tileState->maskt);
-        gfx_rapi->select_texture(active_texture, rendering_state.textures[active_texture]->texture_id);
-        rendering_state.flame_texture_atlas_id = 0;
+        if (backend_state_dirty || (rendering_state.bound_texture_id != textureId) ||
+            (rendering_state.bound_texture_tile != active_texture)) {
+            gfx_flush();
+            gfx_rapi->select_texture(active_texture, textureId);
+            rendering_state.bound_texture_id = textureId;
+            rendering_state.bound_texture_tile = active_texture;
+        }
     }
 
     struct TriPipelineState *state = &rendering_state.tri_pipeline;
@@ -3009,8 +3088,9 @@ static float gfx_hud_anchor_offset_pixels(void) {
     return sHudAnchorOffsetPixels;
 }
 
-static void gfx_apply_unmasked_texture_axis(const struct LoadedVertex *const vertices[], size_t n_vertices,
-                                            bool use_u, float nominal_span, float *scale, float *bias) {
+static GFX_DL_HANDLER void gfx_apply_unmasked_texture_axis(const struct LoadedVertex *const vertices[],
+                                                           size_t n_vertices, bool use_u, float nominal_span,
+                                                           float *scale, float *bias) {
     float min_coord;
     float max_coord;
     float span;
@@ -3298,80 +3378,96 @@ static inline __attribute__((always_inline)) float gfx_triangle_cross_homogeneou
 }
 #endif
 
-static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
-    struct LoadedVertex *v1 = &rsp.loaded_vertices[vtx1_idx];
-    struct LoadedVertex *v2 = &rsp.loaded_vertices[vtx2_idx];
-    struct LoadedVertex *v3 = &rsp.loaded_vertices[vtx3_idx];
-    struct LoadedVertex *v_arr[3] = {v1, v2, v3};
-    const uint32_t clip_flags = v1->clip_rej | v2->clip_rej | v3->clip_rej;
+#if defined(F3DEX_GBI_2) || defined(F3DEX_GBI) || defined(F3DLP_GBI)
+#define GFX_TRI_INDEX_DIVISOR 2
+#else
+#define GFX_TRI_INDEX_DIVISOR 10
+#endif
 
-    if (v1->clip_rej & v2->clip_rej & v3->clip_rej) {
-        // The whole triangle lies outside the visible area
-        return;
-    }
-    const uint32_t cull_mode = rsp.geometry_mode & G_CULL_BOTH;
+static void gfx_sp_triangles(uint32_t packed0, uint32_t packed1, uint8_t triangleCount) {
+    /* Most model geometry uses G_TRI2. Keep both triangles in one handler invocation so the PSP pays the large
+     * clip/material setup prologue once per command while retaining independent culling and clipping. */
+#if defined(TARGET_PSP) && defined(OOTDEBUG)
+    sPerformanceInputTriangleCount += triangleCount;
+#endif
+    for (uint8_t triangle = 0; triangle < triangleCount; triangle++) {
+        const uint32_t packed = triangle == 0 ? packed0 : packed1;
+        const uint8_t vtx1_idx = ((packed >> 16) & 0xFF) / GFX_TRI_INDEX_DIVISOR;
+        const uint8_t vtx2_idx = ((packed >> 8) & 0xFF) / GFX_TRI_INDEX_DIVISOR;
+        const uint8_t vtx3_idx = (packed & 0xFF) / GFX_TRI_INDEX_DIVISOR;
+        struct LoadedVertex *v1 = &rsp.loaded_vertices[vtx1_idx];
+        struct LoadedVertex *v2 = &rsp.loaded_vertices[vtx2_idx];
+        struct LoadedVertex *v3 = &rsp.loaded_vertices[vtx3_idx];
+        struct LoadedVertex *v_arr[3] = {v1, v2, v3};
+        const uint32_t clip_flags = v1->clip_rej | v2->clip_rej | v3->clip_rej;
+
+        if (v1->clip_rej & v2->clip_rej & v3->clip_rej) {
+            // The whole triangle lies outside the visible area
+            continue;
+        }
+        const uint32_t cull_mode = rsp.geometry_mode & G_CULL_BOTH;
 #if defined(TARGET_PSP)
-    if (cull_mode != 0) {
-        float cross;
+        if (cull_mode != 0) {
+            float cross;
 
-        if (clip_flags == 0) {
-            /* Fully visible vertices have positive W, so the homogeneous
-             * winding test avoids three divides on the common path.  The VFPU
-             * evaluates both projected edge vectors in parallel. */
-            cross = gfx_triangle_cross_homogeneous_vfpu(v1, v2, v3);
-        } else {
-            /* Scripted cameras can sit outside one-sided scene geometry. A
-             * large back face crossing the frustum must be rejected before it
-             * is clipped, or it covers the intended cutscene view. */
-            const float invW1 = 1.0f / v1->_w;
-            const float invW2 = 1.0f / v2->_w;
-            const float invW3 = 1.0f / v3->_w;
-            const float dx1 = v1->_x * invW1 - v2->_x * invW2;
-            const float dy1 = v1->_y * invW1 - v2->_y * invW2;
-            const float dx2 = v3->_x * invW3 - v2->_x * invW2;
-            const float dy2 = v3->_y * invW3 - v2->_y * invW2;
+            if (clip_flags == 0) {
+                /* Fully visible vertices have positive W, so the homogeneous
+                 * winding test avoids three divides on the common path.  The VFPU
+                 * evaluates both projected edge vectors in parallel. */
+                cross = gfx_triangle_cross_homogeneous_vfpu(v1, v2, v3);
+            } else {
+                /* Scripted cameras can sit outside one-sided scene geometry. A
+                 * large back face crossing the frustum must be rejected before it
+                 * is clipped, or it covers the intended cutscene view. */
+                const float invW1 = 1.0f / v1->_w;
+                const float invW2 = 1.0f / v2->_w;
+                const float invW3 = 1.0f / v3->_w;
+                const float dx1 = v1->_x * invW1 - v2->_x * invW2;
+                const float dy1 = v1->_y * invW1 - v2->_y * invW2;
+                const float dx2 = v3->_x * invW3 - v2->_x * invW2;
+                const float dy2 = v3->_y * invW3 - v2->_y * invW2;
 
-            cross = dx1 * dy2 - dy1 * dx2;
-            if ((v1->_w < 0.0f) ^ (v2->_w < 0.0f) ^ (v3->_w < 0.0f)) {
-                cross = -cross;
+                cross = dx1 * dy2 - dy1 * dx2;
+                if ((v1->_w < 0.0f) ^ (v2->_w < 0.0f) ^ (v3->_w < 0.0f)) {
+                    cross = -cross;
+                }
+            }
+
+            if (((cull_mode == G_CULL_FRONT) && (cross <= 0.0f)) ||
+                ((cull_mode == G_CULL_BACK) && (cross >= 0.0f)) ||
+                (cull_mode == G_CULL_BOTH)) {
+                continue;
             }
         }
-
-        if (((cull_mode == G_CULL_FRONT) && (cross <= 0.0f)) ||
-            ((cull_mode == G_CULL_BACK) && (cross >= 0.0f)) ||
-            (cull_mode == G_CULL_BOTH)) {
-            return;
-        }
-    }
 #else
-    if (cull_mode != 0) {
-        const float inv_w1 = 1.0f / v1->_w;
-        const float inv_w2 = 1.0f / v2->_w;
-        const float inv_w3 = 1.0f / v3->_w;
-        float dx1 = v1->_x * inv_w1 - v2->_x * inv_w2;
-        float dy1 = v1->_y * inv_w1 - v2->_y * inv_w2;
-        float dx2 = v3->_x * inv_w3 - v2->_x * inv_w2;
-        float dy2 = v3->_y * inv_w3 - v2->_y * inv_w2;
-        float cross = dx1 * dy2 - dy1 * dx2;
-        
-        if ((v1->_w < 0) ^ (v2->_w < 0) ^ (v3->_w < 0)) {
-            // If one vertex lies behind the eye, negating cross will give the correct result.
-            // If all vertices lie behind the eye, the triangle will be rejected anyway.
-            cross = -cross;
-        }
+        if (cull_mode != 0) {
+            const float inv_w1 = 1.0f / v1->_w;
+            const float inv_w2 = 1.0f / v2->_w;
+            const float inv_w3 = 1.0f / v3->_w;
+            float dx1 = v1->_x * inv_w1 - v2->_x * inv_w2;
+            float dy1 = v1->_y * inv_w1 - v2->_y * inv_w2;
+            float dx2 = v3->_x * inv_w3 - v2->_x * inv_w2;
+            float dy2 = v3->_y * inv_w3 - v2->_y * inv_w2;
+            float cross = dx1 * dy2 - dy1 * dx2;
 
-        switch (cull_mode) {
-            case G_CULL_FRONT:
-                if (cross <= 0) return;
-                break;
-            case G_CULL_BACK:
-                if (cross >= 0) return;
-                break;
-            case G_CULL_BOTH:
-                // Why is this even an option?
-                return;
+            if ((v1->_w < 0) ^ (v2->_w < 0) ^ (v3->_w < 0)) {
+                // If one vertex lies behind the eye, negating cross will give the correct result.
+                // If all vertices lie behind the eye, the triangle will be rejected anyway.
+                cross = -cross;
+            }
+
+            switch (cull_mode) {
+                case G_CULL_FRONT:
+                    if (cross <= 0) continue;
+                    break;
+                case G_CULL_BACK:
+                    if (cross >= 0) continue;
+                    break;
+                case G_CULL_BOTH:
+                    // Why is this even an option?
+                    continue;
+            }
         }
-    }
 #endif
 
     /* Setup to clip but if we dont, we preload correct values and fix up pointers; */
@@ -3383,7 +3479,7 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
 
         if (!clipped_vertices_num) {
             /* No idea if this is possible */
-            return;
+            continue;
         }
         size_t i;
         for (i = 0; i < clipped_vertices_num; i++) {
@@ -3441,8 +3537,12 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
     const size_t new_tri_count = clipped_vertices_num / 3;
 
     if (new_tri_count == 0) {
-        return;
+        continue;
     }
+
+#if defined(TARGET_PSP) && defined(OOTDEBUG)
+    sPerformanceOutputTriangleCount += new_tri_count;
+#endif
 
 #if defined(TARGET_PSP)
     if ((buf_num_vert + clipped_vertices_num) > (sizeof(buf_vbo) / sizeof(buf_vbo[0]))) {
@@ -3510,7 +3610,10 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
     if (buf_vbo_num_tris >= MAX_BUFFERED) {
         gfx_flush();
     }
+    }
 }
+
+#undef GFX_TRI_INDEX_DIVISOR
 
 /* This will be going away possibly, it all depends on how we end up treating hw sprites */
 static void gfx_sp_tri1_2d(uint8_t vtx1_idx, uint8_t vtx2_idx, UNUSED uint8_t vtx3_idx) {
@@ -3774,10 +3877,17 @@ static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t t
     if (gfx_get_render_tile_slot(tile, &renderSlot)) {
         TextureTileState* tileState = gfx_get_texture_tile(renderSlot);
         const uint32_t lineSizeBytes = line * 8;
-        bool changed = (tileState->fmt != fmt) || (tileState->siz != siz) ||
-                       (tileState->cms != cms) || (tileState->cmt != cmt) ||
-                       (tileState->masks != masks) || (tileState->maskt != maskt) ||
-                       (tileState->line_size_bytes != lineSizeBytes);
+        const bool oldMirrorS = (tileState->cms & G_TX_MIRROR) != 0 && tileState->masks != G_TX_NOMASK;
+        const bool oldMirrorT = (tileState->cmt & G_TX_MIRROR) != 0 && tileState->maskt != G_TX_NOMASK;
+        const bool newMirrorS = (cms & G_TX_MIRROR) != 0 && masks != G_TX_NOMASK;
+        const bool newMirrorT = (cmt & G_TX_MIRROR) != 0 && maskt != G_TX_NOMASK;
+        bool descriptorChanged = (tileState->fmt != fmt) || (tileState->siz != siz) ||
+                                 (tileState->cms != cms) || (tileState->cmt != cmt) ||
+                                 (tileState->masks != masks) || (tileState->maskt != maskt) ||
+                                 (tileState->line_size_bytes != lineSizeBytes);
+        bool textureImportChanged = (tileState->fmt != fmt) || (tileState->siz != siz) ||
+                                    (tileState->line_size_bytes != lineSizeBytes) ||
+                                    (oldMirrorS != newMirrorS) || (oldMirrorT != newMirrorT);
 
         if (tile == G_TX_RENDERTILE) {
             SUPPORT_CHECK(palette == 0); // palette should set upper 4 bits of color index in 4b mode
@@ -3791,12 +3901,15 @@ static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t t
         tileState->line_size_bytes = lineSizeBytes;
 #if defined(TARGET_PSP)
         if (renderSlot == 1 && tmem == 0 && rdp.loaded_texture[0].addr != NULL) {
-            changed = changed || rdp.textures_changed[0] ||
-                      (rdp.loaded_texture[1].addr != rdp.loaded_texture[0].addr) ||
-                      (rdp.loaded_texture[1].size_bytes != rdp.loaded_texture[0].size_bytes) ||
-                      (rdp.loaded_texture[1].source_size_bytes != rdp.loaded_texture[0].source_size_bytes) ||
-                      (rdp.loaded_texture[1].row_stride_bytes != rdp.loaded_texture[0].row_stride_bytes) ||
-                      (rdp.loaded_texture[1].source_nibble_offset != rdp.loaded_texture[0].source_nibble_offset);
+            const bool sourceChanged = rdp.textures_changed[0] ||
+                                       (rdp.loaded_texture[1].addr != rdp.loaded_texture[0].addr) ||
+                                       (rdp.loaded_texture[1].size_bytes != rdp.loaded_texture[0].size_bytes) ||
+                                       (rdp.loaded_texture[1].source_size_bytes != rdp.loaded_texture[0].source_size_bytes) ||
+                                       (rdp.loaded_texture[1].row_stride_bytes != rdp.loaded_texture[0].row_stride_bytes) ||
+                                       (rdp.loaded_texture[1].source_nibble_offset != rdp.loaded_texture[0].source_nibble_offset);
+
+            descriptorChanged = descriptorChanged || sourceChanged;
+            textureImportChanged = textureImportChanged || sourceChanged;
             /*
              * Many scrolling-surface display lists load one image into TMEM 0,
              * then define tile 1 as another view of that same TMEM data. The
@@ -3806,8 +3919,13 @@ static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t t
             rdp.loaded_texture[1] = rdp.loaded_texture[0];
         }
 #endif
-        if (changed) {
-            rdp.textures_changed[renderSlot] = true;
+        if (descriptorChanged) {
+            /* Wrap, clamp, masks, and filtering are sampler/coordinate state. They do not change the uploaded
+             * image unless PSP mirror emulation turns on or off, so avoid a cache lookup and texture bind for
+             * sampler-only display-list changes. */
+            if (textureImportChanged) {
+                rdp.textures_changed[renderSlot] = true;
+            }
             gfx_mark_tri_pipeline_dirty();
         }
     }
@@ -3827,6 +3945,10 @@ static void gfx_dp_set_tile_size(uint8_t tile, uint16_t uls, uint16_t ult, uint1
 
     if (gfx_get_render_tile_slot(tile, &renderSlot)) {
         TextureTileState* tileState = gfx_get_texture_tile(renderSlot);
+        const uint16_t oldSpanS = tileState->lrs - tileState->uls;
+        const uint16_t oldSpanT = tileState->lrt - tileState->ult;
+        const uint16_t newSpanS = lrs - uls;
+        const uint16_t newSpanT = lrt - ult;
 
         if ((tileState->uls == uls) && (tileState->ult == ult) &&
             (tileState->lrs == lrs) && (tileState->lrt == lrt)) {
@@ -3837,10 +3959,39 @@ static void gfx_dp_set_tile_size(uint8_t tile, uint16_t uls, uint16_t ult, uint1
         tileState->ult = ult;
         tileState->lrs = lrs;
         tileState->lrt = lrt;
-        rdp.textures_changed[renderSlot] = true;
+        /* Scrolling changes both endpoints while keeping the span fixed. The source image is still identical;
+         * only the per-vertex UV transform changes. Keeping the current texture bound lets independent actors
+         * and animated surfaces share a GU batch. A size change still selects/imports the matching cache entry. */
+        if ((oldSpanS != newSpanS) || (oldSpanT != newSpanT)) {
+            rdp.textures_changed[renderSlot] = true;
+        }
         gfx_mark_tri_pipeline_dirty();
     }
 }
+
+#if defined(TARGET_PSP)
+static bool gfx_loaded_texture_matches_static_cache(int loadSlot, const uint8_t* sourceAddr,
+                                                    uint32_t sizeBytes, uint32_t sourceSizeBytes,
+                                                    uint32_t rowStrideBytes, uint8_t sourceNibbleOffset) {
+    const struct TextureHashmapNode* node = rendering_state.textures[loadSlot];
+    const bool usesPalette = rdp.texture_to_load.fmt == G_IM_FMT_CI;
+
+    if (rdp.textures_changed[loadSlot] || (node == NULL) || (node->source_key == 0) ||
+        (node->texture_addr != sourceAddr) || (node->fmt != rdp.texture_to_load.fmt) ||
+        (node->siz != rdp.texture_to_load.siz) ||
+        (rdp.loaded_texture[loadSlot].addr != sourceAddr) ||
+        (rdp.loaded_texture[loadSlot].size_bytes != sizeBytes) ||
+        (rdp.loaded_texture[loadSlot].source_size_bytes != sourceSizeBytes) ||
+        (rdp.loaded_texture[loadSlot].row_stride_bytes != rowStrideBytes) ||
+        (rdp.loaded_texture[loadSlot].source_nibble_offset != sourceNibbleOffset)) {
+        return false;
+    }
+
+    /* Runtime CI palettes can change in place. Only suppress the load when both image and palette came from
+     * immutable external assets and the cached palette is still the one selected by the display list. */
+    return !usesPalette || ((node->palette_key != 0) && (node->palette_addr == rdp.palette));
+}
+#endif
 
 static void gfx_dp_load_tlut(UNUSED uint8_t tile, uint32_t high_index) {
     _UNUSED(high_index);
@@ -3857,10 +4008,16 @@ static void gfx_dp_load_tlut(UNUSED uint8_t tile, uint32_t high_index) {
     SUPPORT_CHECK(tile == G_TX_LOADTILE);
     SUPPORT_CHECK(rdp.texture_to_load.siz == G_IM_SIZ_16b);
 #endif
+    const bool paletteChanged = rdp.palette != rdp.texture_to_load.addr;
+
     rdp.palette = rdp.texture_to_load.addr;
 #if defined(TARGET_PSP)
     GFX_CAPTURE_CMD(rdp.loaded_texture[loadSlot].image_cmd, rdp.texture_to_load.image_cmd);
     GFX_CAPTURE_CMD(rdp.loaded_texture[loadSlot].load_cmd, sCurrentCmd);
+    if (paletteChanged) {
+        rdp.textures_changed[loadSlot] = true;
+        gfx_mark_tri_pipeline_dirty();
+    }
 #endif
 }
 
@@ -3901,6 +4058,12 @@ static void gfx_dp_load_block(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t
             break;
     }
     uint32_t size_bytes = (lrs + 1) << word_size_shift;
+#if defined(TARGET_PSP)
+    const bool sameStaticTexture =
+        (size_bytes <= 4096U) &&
+        gfx_loaded_texture_matches_static_cache(loadSlot, rdp.texture_to_load.addr, size_bytes,
+                                                size_bytes, 0, 0);
+#endif
     rdp.loaded_texture[loadSlot].size_bytes = size_bytes;
     rdp.loaded_texture[loadSlot].source_size_bytes = size_bytes;
     rdp.loaded_texture[loadSlot].row_stride_bytes = 0;
@@ -3920,8 +4083,15 @@ static void gfx_dp_load_block(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t
     rdp.loaded_texture[loadSlot].addr = rdp.texture_to_load.addr;
 #endif
     
+#if defined(TARGET_PSP)
+    if (!sameStaticTexture) {
+        rdp.textures_changed[loadSlot] = true;
+        gfx_mark_tri_pipeline_dirty();
+    }
+#else
     rdp.textures_changed[loadSlot] = true;
     gfx_mark_tri_pipeline_dirty();
+#endif
 }
 
 static void gfx_dp_load_tile(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t lrs, uint32_t lrt) {
@@ -3968,6 +4138,13 @@ static void gfx_dp_load_tile(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t 
     uint32_t size_bytes = row_bytes * height;
     uint32_t source_size_bytes = height > 0 ? ((height - 1) * source_stride) + row_bytes : 0;
     const uint8_t* source_addr = rdp.texture_to_load.addr + (size_t)source_ult * source_stride + source_x_offset;
+#if defined(TARGET_PSP)
+    const uint8_t sourceNibbleOffset = rdp.texture_to_load.siz == G_IM_SIZ_4b ? (source_uls & 1) : 0;
+    const bool sameStaticTexture =
+        (size_bytes <= 4096U) &&
+        gfx_loaded_texture_matches_static_cache(loadSlot, source_addr, size_bytes, source_size_bytes,
+                                                source_stride, sourceNibbleOffset);
+#endif
 
     rdp.loaded_texture[loadSlot].size_bytes = size_bytes;
     rdp.loaded_texture[loadSlot].source_size_bytes = source_size_bytes;
@@ -4000,8 +4177,15 @@ static void gfx_dp_load_tile(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t 
     gfx_get_texture_tile(loadSlot)->lrt = lrt;
 #endif
 
+#if defined(TARGET_PSP)
+    if (!sameStaticTexture) {
+        rdp.textures_changed[loadSlot] = true;
+        gfx_mark_tri_pipeline_dirty();
+    }
+#else
     rdp.textures_changed[loadSlot] = true;
     gfx_mark_tri_pipeline_dirty();
+#endif
 }
 
 
@@ -4088,10 +4272,6 @@ static void gfx_dp_set_combine_mode(uint32_t rgb, uint32_t alpha, bool color_mul
         (rdp.combine_two_texture_blend == two_texture_blend) &&
         (rdp.combine_flame_texture_atlas == flame_texture_atlas)) {
         return;
-    }
-    if (rdp.combine_two_texture_blend != two_texture_blend) {
-        /* The two-pass path changes how gfx_flush itself draws queued vertices. */
-        gfx_flush();
     }
     rdp.combine_mode = combineMode;
     rdp.combine_color_mul_env = color_mul_env;
@@ -4518,7 +4698,7 @@ static inline bool gfx_addr_looks_segmented(uintptr_t addr) {
      * 0x0900AAC0; interpreting those as segment 9 first adds the active segment
      * base and sends display-list execution into unrelated graph-pool data.
      */
-    if (gfx_is_valid_native_read_range(addr, 1)) {
+    if (gfx_is_valid_native_read_range_cached(addr, 1)) {
         return false;
     }
 
@@ -4606,6 +4786,7 @@ static void gfx_log_bad_dl_cursor(const char* reason, uintptr_t raw, uintptr_t t
 static bool gfx_validate_dl_cursor(uintptr_t raw, Gfx** cmdP) {
     uintptr_t translated = (uintptr_t)*cmdP;
     uintptr_t normalized;
+    size_t cacheIndex;
 
     if (!gfx_normalize_native_range(translated, sizeof(Gfx), &normalized)) {
         gfx_log_bad_dl_cursor("unmapped", raw, translated);
@@ -4617,11 +4798,18 @@ static bool gfx_validate_dl_cursor(uintptr_t raw, Gfx** cmdP) {
         return false;
     }
 
+    cacheIndex = (normalized >> 3) & (GFX_VALIDATED_POINTER_CACHE_SIZE - 1);
+    if (sValidatedDlCursorCache[cacheIndex] == normalized) {
+        *cmdP = (Gfx*)normalized;
+        return true;
+    }
+
     if (!gfx_is_valid_native_dl_range(normalized, sizeof(Gfx))) {
         gfx_log_bad_dl_cursor("non-dl-native-range", raw, normalized);
         return false;
     }
 
+    sValidatedDlCursorCache[cacheIndex] = normalized;
     *cmdP = (Gfx*)normalized;
     return true;
 }
@@ -4871,6 +5059,8 @@ static bool gfx_s2dex_bg_prepare_texture(const uint8_t* source, uint32_t width, 
         gfx_rapi->select_texture(tile, rendering_state.textures[tile]->texture_id);
         gfx_rapi->set_sampler_parameters(tile, false, tileState->cms, tileState->cmt,
                                          tileState->masks, tileState->maskt);
+        rendering_state.bound_texture_id = rendering_state.textures[tile]->texture_id;
+        rendering_state.bound_texture_tile = tile;
     }
 
     rdp.textures_changed[tile] = false;
@@ -4973,10 +5163,9 @@ static bool gfx_translate_dl_cursor(Gfx** cmdP) {
     uintptr_t raw = (uintptr_t)*cmdP;
     uintptr_t normalized;
 
-    if (gfx_normalize_native_range(raw, sizeof(Gfx), &normalized) &&
-        gfx_is_valid_native_dl_range(normalized, sizeof(Gfx))) {
+    if (gfx_normalize_native_range(raw, sizeof(Gfx), &normalized)) {
         *cmdP = (Gfx*)normalized;
-        return true;
+        return gfx_validate_dl_cursor(raw, cmdP);
     }
 
     if (gfx_addr_looks_segmented(raw)) {
@@ -5001,12 +5190,19 @@ static bool gfx_translate_dl_cursor(Gfx** cmdP) {
 #define C1(pos, width) ((cmd->words.w1 >> (pos)) & ((1U << width) - 1))
 
 static void gfx_run_dl(Gfx* cmd) {
+#define GFX_DL_RETURN_STACK_SIZE 64
+    Gfx* returnStack[GFX_DL_RETURN_STACK_SIZE];
+    uint32_t returnDepth = 0;
+
     if (!gfx_translate_dl_cursor(&cmd)) {
         return;
     }
 
     for (;;) {
         uint32_t opcode = cmd->words.w0 >> 24;
+#if defined(TARGET_PSP) && defined(OOTDEBUG)
+        sPerformanceCommandCount++;
+#endif
 #if defined(TARGET_PSP) && OOT_PSP_GFX_DIAGNOSTICS
         sCurrentCmd.addr = (uintptr_t)cmd;
         sCurrentCmd.w0 = cmd->words.w0;
@@ -5067,7 +5263,7 @@ static void gfx_run_dl(Gfx* cmd) {
                     }
 
                     cmd = branchTarget;
-                    --cmd;
+                    continue;
                 }
                 break;
             case G_VTX:
@@ -5093,22 +5289,22 @@ static void gfx_run_dl(Gfx* cmd) {
                 break;
             case G_DL:
             {
-                void* target = seg_addr(cmd->words.w1);
+                Gfx* target = (Gfx*)seg_addr(cmd->words.w1);
+
+                if (!gfx_translate_dl_cursor(&target)) {
+                    return;
+                }
 
                 if (C0(16, 1) == 0) {
-                    // Push return address
-                    gfx_run_dl((Gfx *)target);
-                } else {
-                    Gfx* jumpTarget = (Gfx*)target;
-
-                    if (!gfx_translate_dl_cursor(&jumpTarget)) {
+                    if (returnDepth >= GFX_DL_RETURN_STACK_SIZE) {
+                        gfx_log_bad_dl_cursor("return-stack-overflow", (uintptr_t)target,
+                                              (uintptr_t)target);
                         return;
                     }
-
-                    cmd = jumpTarget;
-                    --cmd; // increase after break
+                    returnStack[returnDepth++] = cmd + 1;
                 }
-                break;
+                cmd = target;
+                continue;
             }
 #if defined(TARGET_PSP) && defined(F3DEX_GBI_2)
             case (uint8_t)G_BG_1CYC:
@@ -5117,7 +5313,11 @@ static void gfx_run_dl(Gfx* cmd) {
                 break;
 #endif
             case (uint8_t)G_ENDDL:
-                return;
+                if (returnDepth == 0) {
+                    return;
+                }
+                cmd = returnStack[--returnDepth];
+                continue;
 #ifdef F3DEX_GBI_2
             case G_GEOMETRYMODE:
                 gfx_sp_geometry_mode(~C0(0, 24), cmd->words.w1);
@@ -5132,23 +5332,21 @@ static void gfx_run_dl(Gfx* cmd) {
 #endif
             case (uint8_t)G_TRI1:
 #ifdef F3DEX_GBI_2
-                gfx_sp_tri1(C0(16, 8) / 2, C0(8, 8) / 2, C0(0, 8) / 2);
+                gfx_sp_triangles(cmd->words.w0, 0, 1);
 #elif defined(F3DEX_GBI) || defined(F3DLP_GBI)
-                gfx_sp_tri1(C1(16, 8) / 2, C1(8, 8) / 2, C1(0, 8) / 2);
+                gfx_sp_triangles(cmd->words.w1, 0, 1);
 #else
-                gfx_sp_tri1(C1(16, 8) / 10, C1(8, 8) / 10, C1(0, 8) / 10);
+                gfx_sp_triangles(cmd->words.w1, 0, 1);
 #endif
                 break;
 #if defined(F3DEX_GBI_2) || defined(F3DEX_GBI) || defined(F3DLP_GBI)
             case (uint8_t)G_TRI2:
-                gfx_sp_tri1(C0(16, 8) / 2, C0(8, 8) / 2, C0(0, 8) / 2);
-                gfx_sp_tri1(C1(16, 8) / 2, C1(8, 8) / 2, C1(0, 8) / 2);
+                gfx_sp_triangles(cmd->words.w0, cmd->words.w1, 2);
                 break;
 #endif
 #ifdef F3DEX_GBI_2
             case (uint8_t)G_QUAD:
-                gfx_sp_tri1(C0(16, 8) / 2, C0(8, 8) / 2, C0(0, 8) / 2);
-                gfx_sp_tri1(C1(16, 8) / 2, C1(8, 8) / 2, C1(0, 8) / 2);
+                gfx_sp_triangles(cmd->words.w0, cmd->words.w1, 2);
                 break;
 #endif
             case (uint8_t)G_SETOTHERMODE_L:
@@ -5268,6 +5466,7 @@ static void gfx_run_dl(Gfx* cmd) {
         }
         ++cmd;
     }
+#undef GFX_DL_RETURN_STACK_SIZE
 }
 
 static void gfx_sp_reset() {
@@ -5376,15 +5575,35 @@ struct GfxRenderingAPI *gfx_get_current_rendering_api(void) {
     return gfx_rapi;
 }
 
-unsigned int total_t0, total_t1;
-
 void gfx_start_frame(void) {
     //sceIoWrite(1, "----START FRAME!\n", 18);
-    total_t0 = sceKernelLibcClock();
+#if defined(TARGET_PSP)
+#if defined(OOTDEBUG)
+    sPerformanceCommandCount = 0;
+    sPerformanceInputTriangleCount = 0;
+    sPerformanceOutputTriangleCount = 0;
+    sPerformanceFlushCount = 0;
+    sPerformanceDrawCallCount = 0;
+    sPerformanceOpaqueDrawCallCount = 0;
+    sPerformanceOpaqueTriangleCount = 0;
+    sPerformanceTranslucentDrawCallCount = 0;
+    sPerformanceTranslucentTriangleCount = 0;
+    sPerformanceMaxBatchTriangles = 0;
+    sPerformanceTextureUploadCount = 0;
+#endif
+    memset(sValidatedDlCursorCache, 0, sizeof(sValidatedDlCursorCache));
+    memset(sValidatedReadCache, 0, sizeof(sValidatedReadCache));
+#endif
     gfx_wapi->handle_events();
 }
 
 void gfx_run(Gfx *commands) {
+#if defined(TARGET_PSP) && defined(OOTDEBUG)
+    uint64_t displayListStartUsec;
+    uint64_t displayListEndUsec;
+    uint64_t submitEndUsec;
+#endif
+
     gfx_sp_reset();
     
     //INFO_MSG("New frame");
@@ -5394,14 +5613,33 @@ void gfx_run(Gfx *commands) {
         return;
     }
     dropped_frame = false;
-    //double t0 = gfx_wapi->get_time();
-    unsigned int t0 = sceKernelLibcClock();
     gfx_rapi->start_frame();
+    /* The GU backend invalidates its texture binding at frame start because callback rendering may have changed
+     * it. Mirror that here so the first material rebinds once, while later materials can use the cross-draw
+     * binding cache. */
+    rendering_state.bound_texture_id = 0;
+    rendering_state.bound_texture_tile = -1;
+    gfx_mark_tri_pipeline_dirty();
     sUploadedProjectionValid = false;
+#if defined(TARGET_PSP) && defined(OOTDEBUG)
+    displayListStartUsec = OotPspPerformance_Now();
+#endif
     gfx_run_dl(commands);
     gfx_flush();
+#if defined(TARGET_PSP) && defined(OOTDEBUG)
+    displayListEndUsec = OotPspPerformance_Now();
+#endif
     gfx_rapi->end_frame();
     gfx_wapi->swap_buffers_begin();
+#if defined(TARGET_PSP) && defined(OOTDEBUG)
+    submitEndUsec = OotPspPerformance_Now();
+    OotPspPerformance_RecordGfx(
+        displayListEndUsec - displayListStartUsec, submitEndUsec - displayListEndUsec, sPerformanceCommandCount,
+        sPerformanceInputTriangleCount, sPerformanceOutputTriangleCount, sPerformanceFlushCount,
+        sPerformanceDrawCallCount, sPerformanceOpaqueDrawCallCount, sPerformanceOpaqueTriangleCount,
+        sPerformanceTranslucentDrawCallCount, sPerformanceTranslucentTriangleCount,
+        sPerformanceMaxBatchTriangles, sPerformanceTextureUploadCount);
+#endif
     //double t1 = gfx_wapi->get_time();
 
 }

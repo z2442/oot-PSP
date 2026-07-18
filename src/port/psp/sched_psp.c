@@ -1,6 +1,7 @@
 #include "sched.h"
 
 #include "array_count.h"
+#include "oot_psp_performance.h"
 #include "oot_psp_renderer.h"
 
 #include <pspkernel.h>
@@ -57,13 +58,23 @@ void Sched_Notify(Scheduler* sc) {
         }
 
         if (task->list.t.type == M_GFXTASK) {
+#if defined(OOTDEBUG)
+            u64 paceStartUsec;
+#endif
+
             OotPspRenderer_RenderTask(&task->list);
 
             if ((task->flags & OS_SC_SWAPBUFFER) && task->framebuffer != NULL) {
                 osViSwapBuffer(task->framebuffer->swapBuffer);
             }
 
+#if defined(OOTDEBUG)
+            paceStartUsec = OotPspPerformance_Now();
+#endif
             SchedPsp_PaceGfxTask(task);
+#if defined(OOTDEBUG)
+            OotPspPerformance_RecordPacing(OotPspPerformance_Now() - paceStartUsec);
+#endif
         }
 
         if (task->msgQueue != NULL) {

@@ -725,7 +725,17 @@ u32 osGetCount(void) {
      * calls osGetCount only as a changing entropy source, so avoid a kernel
      * syscall on every audio random update.
      */
-    return __atomic_add_fetch(&sFastCount, 0x9E3779B9U, __ATOMIC_RELAXED);
+    /*
+     * This value is only mixed into the audio PRNG; it is not a clock and no
+     * caller depends on observing every increment.  An atomic add emits an
+     * LL/SC retry loop plus memory barriers on Allegrex.  Audio and rendering
+     * share one PSP core, so that synchronization can steal a disproportionate
+     * amount of frame time when a busy scene also drives frequent audio
+     * updates.  A volatile word update preserves the changing entropy source
+     * without cross-thread serialization.
+     */
+    sFastCount += 0x9E3779B9U;
+    return sFastCount;
 }
 
 s32 osSetTimer(OSTimer* timer, OSTime countdown, OSTime interval, OSMesgQueue* mq, OSMesg msg) {

@@ -9,6 +9,9 @@
 #include "audio.h"
 #if defined(TARGET_PSP)
 #include "oot_psp_audio_backend.h"
+#if defined(OOTDEBUG)
+#include <pspkernel.h>
+#endif
 #endif
 
 #define SAMPLES_TO_OVERPRODUCE 0x10
@@ -56,6 +59,13 @@ AudioTask* AudioThread_UpdateImpl(void) {
     u32 sp4C;
     s32 sp48;
     s32 i;
+#if defined(TARGET_PSP) && defined(OOTDEBUG)
+    u32 profileStartUsec;
+    u32 profileAfterWaitUsec;
+    u32 profileBeforeSynthUsec;
+    u32 profileAfterSynthUsec;
+    u32 profileEndUsec;
+#endif
 
     gAudioCtx.totalTaskCount++;
     if (gAudioCtx.totalTaskCount % (gAudioCtx.audioBufferParameters.specUnk4) != 0) {
@@ -71,8 +81,14 @@ AudioTask* AudioThread_UpdateImpl(void) {
         }
     }
 
+#if defined(TARGET_PSP) && defined(OOTDEBUG)
+    profileStartUsec = sceKernelGetSystemTimeLow();
+#endif
 #if defined(TARGET_PSP)
     OotPspAudioBackend_WaitForCommands();
+#endif
+#if defined(TARGET_PSP) && defined(OOTDEBUG)
+    profileAfterWaitUsec = sceKernelGetSystemTimeLow();
 #endif
 
     osSendMesg(gAudioCtx.taskStartQueueP, (OSMesg)gAudioCtx.totalTaskCount, OS_MESG_NOBLOCK);
@@ -171,11 +187,24 @@ AudioTask* AudioThread_UpdateImpl(void) {
         }
     }
 
+#if defined(TARGET_PSP) && defined(OOTDEBUG)
+    profileBeforeSynthUsec = sceKernelGetSystemTimeLow();
+#endif
     gAudioCtx.curAbiCmdBuf =
         AudioSynth_Update(gAudioCtx.curAbiCmdBuf, &abiCmdCnt, curAiBuffer, gAudioCtx.aiBufLengths[index]);
+#if defined(TARGET_PSP) && defined(OOTDEBUG)
+    profileAfterSynthUsec = sceKernelGetSystemTimeLow();
+#endif
 #if defined(TARGET_PSP)
     OotPspAudioBackend_SubmitCommandsAndQueue(gAudioCtx.abiCmdBufs[gAudioCtx.rspTaskIndex], abiCmdCnt,
                                               curAiBuffer, gAudioCtx.aiBufLengths[index] * 4);
+#endif
+#if defined(TARGET_PSP) && defined(OOTDEBUG)
+    profileEndUsec = sceKernelGetSystemTimeLow();
+    OotPspAudioBackend_RecordUpdateProfile(
+        profileAfterWaitUsec - profileStartUsec, profileBeforeSynthUsec - profileAfterWaitUsec,
+        profileAfterSynthUsec - profileBeforeSynthUsec, profileEndUsec - profileAfterSynthUsec,
+        (u32)abiCmdCnt, (u32)gAudioCtx.curAudioFrameDmaCount);
 #endif
 
     // Update audioRandom to the next random number

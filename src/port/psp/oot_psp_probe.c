@@ -11,8 +11,10 @@
 #include "gfx.h"
 #include "libc64/malloc.h"
 #include "oot_psp_asset_loader.h"
+#include "oot_psp_audio_backend.h"
 #include "oot_psp_controls.h"
 #include "oot_psp_home_menu.h"
+#include "oot_psp_performance.h"
 #include "oot_psp_runtime_patch.h"
 #include "play_state.h"
 #include "setup_state.h"
@@ -117,6 +119,7 @@ static void OotPspSetupCallbacks(void) {
 int main(int argc, char** argv) {
 
     pspFpuSetEnable(0);
+    (void)OotPspAudioBackend_BootMe();
     OotPspHomeMenu_Init();
     OotPspSetupCallbacks();
 
@@ -157,6 +160,9 @@ int main(int argc, char** argv) {
             OotPspHomeMenu_PollHomeButton();
 
             if (OotPspHomeMenu_IsOpen()) {
+#if defined(OOTDEBUG)
+                OotPspPerformance_Flush();
+#endif
                 if (OotPspHomeMenu_RunFrame() == OOT_PSP_HOME_MENU_RESULT_EXIT_GAME) {
                     gameState->running = false;
                     nextInit = NULL;
@@ -183,6 +189,9 @@ int main(int argc, char** argv) {
     }
 
     OotPspProfiler_Stop(true);
+#if defined(OOTDEBUG)
+    OotPspPerformance_Flush();
+#endif
     Graph_Destroy(&gfxCtx);
     sceKernelExitGame();
     return 0;

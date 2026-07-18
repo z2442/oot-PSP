@@ -1586,7 +1586,7 @@ s32 AudioSeq_SeqLayerProcessScriptStep4(SequenceLayer* layer, s32 cmd) {
     s32 speed;
     f32 temp_f14;
     f32 temp_f2;
-    Portamento* portamento;
+    Portamento* portamento = &layer->portamento;
     f32 freqScale;
     f32 freqScale2;
     TunedSample* tunedSample;
@@ -1803,8 +1803,8 @@ s32 AudioSeq_SeqLayerProcessScriptStep4(SequenceLayer* layer, s32 cmd) {
  */
 s32 AudioSeq_SeqLayerProcessScriptStep3(SequenceLayer* layer, s32 cmd) {
     SeqScriptState* state = &layer->scriptState;
-    u16 delay;
-    s32 velocity;
+    u16 delay = layer->lastDelay;
+    s32 velocity = 0x7F;
     SequenceChannel* channel = layer->channel;
     SequencePlayer* seqPlayer = channel->seqPlayer;
     s32 intDelta;

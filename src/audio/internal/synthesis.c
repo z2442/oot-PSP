@@ -6,7 +6,11 @@
 #include "audio.h"
 #if defined(TARGET_PSP)
 #include "oot_psp_asset_loader.h"
+#include "oot_psp_audio_backend.h"
 #include "oot_psp_audio_commands.h"
+#if defined(OOTDEBUG)
+#include <pspkernel.h>
+#endif
 #endif
 
 // DMEM Addresses for the RSP
@@ -272,12 +276,19 @@ Acmd* AudioSynth_Update(Acmd* cmdStart, s32* cmdCnt, s16* aiStart, s32 aiBufLen)
     s32 i;
     s32 j;
     SynthesisReverb* reverb;
+#if defined(TARGET_PSP) && defined(OOTDEBUG)
+    u32 profileStartUsec = sceKernelGetSystemTimeLow();
+    u32 profileAfterSequenceUsec;
+#endif
 
     cmdP = cmdStart;
     for (i = gAudioCtx.audioBufferParameters.ticksPerUpdate; i > 0; i--) {
         AudioSeq_ProcessSequences(i - 1);
         func_800DB03C(gAudioCtx.audioBufferParameters.ticksPerUpdate - i);
     }
+#if defined(TARGET_PSP) && defined(OOTDEBUG)
+    profileAfterSequenceUsec = sceKernelGetSystemTimeLow();
+#endif
 
     aiBufP = aiStart;
     gAudioCtx.curLoadedBook = NULL;
@@ -312,6 +323,10 @@ Acmd* AudioSynth_Update(Acmd* cmdStart, s32* cmdCnt, s16* aiStart, s32 aiBufLen)
     }
 
     *cmdCnt = cmdP - cmdStart;
+#if defined(TARGET_PSP) && defined(OOTDEBUG)
+    OotPspAudioBackend_RecordSynthesisProfile(profileAfterSequenceUsec - profileStartUsec,
+                                              sceKernelGetSystemTimeLow() - profileAfterSequenceUsec);
+#endif
     return cmdP;
 }
 
@@ -858,7 +873,7 @@ Acmd* AudioSynth_DoOneAudioUpdate(s16* aiBuf, s32 aiBufLen, Acmd* cmd, s32 updat
     s32 i;
     NoteSubEu* noteSubEu;
     NoteSubEu* noteSubEu2;
-    s32 unk14;
+    s32 unk14 = 0;
 
     t = gAudioCtx.numNotes * updateIndex;
     count = 0;
@@ -1006,7 +1021,7 @@ Acmd* AudioSynth_ProcessNote(s32 noteIndex, NoteSubEu* noteSubEu, NoteSynthesisS
     s32 phi_s4;
     s32 nFirstFrameSamplesToIgnore;
     s32 pad2[7];
-    s32 frameSize;
+    s32 frameSize = 0;
     s32 nFramesToDecode;
     s32 skipInitialSamples;
     s32 sampleDataStart;

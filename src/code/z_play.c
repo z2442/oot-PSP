@@ -47,6 +47,7 @@
 #include "save.h"
 #include "vis.h"
 #if PLATFORM_PSP
+#include "oot_psp_performance.h"
 #include "oot_psp_renderer.h"
 #endif
 
@@ -1096,12 +1097,19 @@ void Play_Update(PlayState* this) {
 
                     if (!this->haltAllActors) {
                         #if PLATFORM_PSP
+                        #if defined(OOTDEBUG)
+                        u64 actorUpdateStartUsec = OotPspPerformance_Now();
+                        #endif
+
                         if (ootPspLogUpdate) {
                             OOT_PSP_PLAY_STATE_LOG("update.before_actors", this);
                         }
                         #endif
                         Actor_UpdateAll(this, &this->actorCtx);
                         #if PLATFORM_PSP
+                        #if defined(OOTDEBUG)
+                        OotPspPerformance_RecordActorUpdate(OotPspPerformance_Now() - actorUpdateStartUsec);
+                        #endif
                         if (ootPspLogUpdate) {
                             OOT_PSP_PLAY_STATE_LOG("update.after_actors", this);
                         }
@@ -1473,7 +1481,13 @@ void Play_Draw(PlayState* this) {
         }
 
         if (!DEBUG_FEATURES || (R_HREG_MODE != HREG_MODE_PLAY) || R_PLAY_DRAW_ACTORS) {
+#if PLATFORM_PSP && defined(OOTDEBUG)
+            u64 actorDrawStartUsec = OotPspPerformance_Now();
+#endif
             Actor_DrawAll(this, &this->actorCtx);
+#if PLATFORM_PSP && defined(OOTDEBUG)
+            OotPspPerformance_RecordActorDraw(OotPspPerformance_Now() - actorDrawStartUsec);
+#endif
         }
 
         if (!DEBUG_FEATURES || (R_HREG_MODE != HREG_MODE_PLAY) || R_PLAY_DRAW_LENS_FLARES) {
