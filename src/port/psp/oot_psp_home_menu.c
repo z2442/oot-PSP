@@ -2,6 +2,7 @@
 
 #include <pspctrl.h>
 #include <pspimpose_driver.h>
+#include <pspkernel.h>
 #include <stddef.h>
 #include <stdio.h>
 
@@ -15,14 +16,20 @@
 #define OOT_PSP_HOME_MENU_SCREEN_MAIN 0
 #define OOT_PSP_HOME_MENU_SCREEN_CONTROLLER_MAPPING 1
 
+#define OOT_PSP_HOME_MENU_HOME_INPUT_DELAY_US 250000
+
 static volatile int sOpenRequested;
 static bool sActive;
+static bool sHomeCloseArmed;
+static bool sOpeningHomePressSeen;
 static int sSelectedIndex;
 static int sScreen;
 static int sControlSelectedIndex;
 static int sStatusTimer;
 static u32 sLastButtons;
 static u32 sLastPolledButtons;
+static u32 sHomeInputDelayStartUsec;
+static bool sHomeInputDelayActive;
 static char sStatusMessage[64];
 
 static u32 OotPspHomeMenu_ReadButtons(void) {
@@ -32,14 +39,33 @@ static u32 OotPspHomeMenu_ReadButtons(void) {
     return pad.Buttons;
 }
 
+static void OotPspHomeMenu_BeginHomeInputDelay(void) {
+    sHomeInputDelayStartUsec = sceKernelGetSystemTimeLow();
+    sHomeInputDelayActive = true;
+}
+
+static bool OotPspHomeMenu_IsHomeInputDelayed(void) {
+    if (sHomeInputDelayActive &&
+        ((sceKernelGetSystemTimeLow() - sHomeInputDelayStartUsec) >= OOT_PSP_HOME_MENU_HOME_INPUT_DELAY_US)) {
+        sHomeInputDelayActive = false;
+    }
+
+    return sHomeInputDelayActive;
+}
+
 static void OotPspHomeMenu_Open(void) {
     sActive = true;
+    sHomeCloseArmed = false;
+    OotPspHomeMenu_BeginHomeInputDelay();
     sSelectedIndex = OOT_PSP_HOME_MENU_ITEM_EXIT_GAME;
     sScreen = OOT_PSP_HOME_MENU_SCREEN_MAIN;
     sControlSelectedIndex = 0;
     sStatusTimer = 0;
     sStatusMessage[0] = '\0';
     sLastButtons = OotPspHomeMenu_ReadButtons();
+    if ((sLastPolledButtons | sLastButtons) & PSP_CTRL_HOME) {
+        sOpeningHomePressSeen = true;
+    }
 
     OotPspRenderer_SetHomeMenuBackgroundActive(true);
     OotPspRenderer_RequestHomeMenuBackground();
@@ -47,6 +73,8 @@ static void OotPspHomeMenu_Open(void) {
 
 static void OotPspHomeMenu_Close(void) {
     sActive = false;
+    sHomeCloseArmed = false;
+    sOpeningHomePressSeen = false;
     sScreen = OOT_PSP_HOME_MENU_SCREEN_MAIN;
     sStatusTimer = 0;
     OotPspRenderer_SetHomeMenuBackgroundActive(false);
@@ -124,12 +152,16 @@ static void OotPspHomeMenu_ActivateControlRow(void) {
 void OotPspHomeMenu_Init(void) {
     sOpenRequested = false;
     sActive = false;
+    sHomeCloseArmed = false;
+    sOpeningHomePressSeen = false;
     sSelectedIndex = OOT_PSP_HOME_MENU_ITEM_EXIT_GAME;
     sScreen = OOT_PSP_HOME_MENU_SCREEN_MAIN;
     sControlSelectedIndex = 0;
     sStatusTimer = 0;
     sLastButtons = 0;
     sLastPolledButtons = OotPspHomeMenu_ReadButtons();
+    sHomeInputDelayStartUsec = 0;
+    sHomeInputDelayActive = false;
     sStatusMessage[0] = '\0';
 
     sceImposeSetHomePopup(0);
@@ -144,6 +176,14 @@ void OotPspHomeMenu_PollHomeButton(void) {
     u32 pressed = buttons & ~sLastPolledButtons;
 
     sLastPolledButtons = buttons;
+
+    if (OotPspHomeMenu_IsHomeInputDelayed()) {
+        return;
+    }
+
+    if ((buttons & PSP_CTRL_HOME) && !sHomeCloseArmed) {
+        sOpeningHomePressSeen = true;
+    }
 
     if ((pressed & PSP_CTRL_HOME) && !sActive) {
         OotPspHomeMenu_RequestOpen();
@@ -161,12 +201,14 @@ OotPspHomeMenuResult OotPspHomeMenu_RunFrame(void) {
     if (sOpenRequested) {
         sOpenRequested = false;
 
-        if (sActive) {
-            OotPspHomeMenu_Close();
-            return OOT_PSP_HOME_MENU_RESULT_NONE;
+        /*
+         * The HOME press can be reported both by controller polling and by
+         * the PSP exit callback.  Treat requests as idempotent so the second
+         * notification cannot immediately close a menu opened by the first.
+         */
+        if (!sActive && !OotPspHomeMenu_IsHomeInputDelayed()) {
+            OotPspHomeMenu_Open();
         }
-
-        OotPspHomeMenu_Open();
     }
 
     if (!sActive) {
@@ -182,9 +224,19 @@ OotPspHomeMenuResult OotPspHomeMenu_RunFrame(void) {
         sStatusTimer--;
     }
 
-    if (pressed & PSP_CTRL_HOME) {
-        OotPspHomeMenu_Close();
-        return OOT_PSP_HOME_MENU_RESULT_NONE;
+    if (!OotPspHomeMenu_IsHomeInputDelayed()) {
+        /* Do not let the HOME press that opened the menu close it as well. */
+        if (!sHomeCloseArmed) {
+            if (buttons & PSP_CTRL_HOME) {
+                sOpeningHomePressSeen = true;
+            } else if (sOpeningHomePressSeen) {
+                sHomeCloseArmed = true;
+            }
+        } else if (pressed & PSP_CTRL_HOME) {
+            OotPspHomeMenu_BeginHomeInputDelay();
+            OotPspHomeMenu_Close();
+            return OOT_PSP_HOME_MENU_RESULT_NONE;
+        }
     }
 
     if (sScreen == OOT_PSP_HOME_MENU_SCREEN_CONTROLLER_MAPPING) {
