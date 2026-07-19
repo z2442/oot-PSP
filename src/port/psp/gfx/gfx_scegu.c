@@ -1318,6 +1318,13 @@ static void gfx_scegu_init(void) {
 
         sceKernelExitGame();
     }
+
+#if OOT_PSP_USE_INTRAFONT
+    /* Load the firmware font while the renderer is initialized, before game
+     * assets consume the remaining heap. Menu drawing then only activates the
+     * already-resident font and cannot fall into the partial emergency font. */
+    gfx_scegu_ensure_home_menu_font();
+#endif
 }
 
 static void gfx_scegu_start_frame(void) {
