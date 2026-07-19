@@ -16,7 +16,8 @@
  *   0x10: clip-space position vec4
  *   0x20: texture coordinates vec2
  *   0x28: packed RGBA
- *   0x2C: clip flags
+ *   0x2C: clip flags byte
+ *   0x2D: fog alpha byte
  *   sizeof(LoadedVertex) == 0x30
  */
 
@@ -27,6 +28,7 @@
 #define LOADED_VERTEX_V 36
 #define LOADED_VERTEX_COLOR 40
 #define LOADED_VERTEX_CLIP_REJ 44
+#define LOADED_VERTEX_FOG_ALPHA 45
 #define CLIP_EPSILON_BITS 0x322BCC77
 
 .globl gfx_clip_to_hyperplane_vfpu
@@ -49,6 +51,7 @@ gfx_clip_to_hyperplane_vfpu:
 	lv.q    C310, LOADED_VERTEX_CLIP_POS($a1)
 	lv.q    C320, LOADED_VERTEX_UV($a1)
 	lw      $t4, LOADED_VERTEX_COLOR($a1)
+	lbu     $t8, LOADED_VERTEX_FOG_ALPHA($a1)
 	addiu   $a1, $a1, LOADED_VERTEX_SIZE
 
 	vdot.q  S702, C310, C000
@@ -65,6 +68,7 @@ gfx_clip_to_hyperplane_vfpu:
 	lv.q    C220, LOADED_VERTEX_UV($a1)
 	vcmp.s  GT, S701, S700
 	lw      $t3, LOADED_VERTEX_COLOR($a1)
+	lbu     $t9, LOADED_VERTEX_FOG_ALPHA($a1)
 
 	bvt     0, .La_is_outside
 	nop
@@ -231,7 +235,20 @@ gfx_clip_to_hyperplane_vfpu:
 	or      $t5, $t5, $t6
 
 	sw      $t5, LOADED_VERTEX_COLOR($a0)
-	sw      $zero, LOADED_VERTEX_CLIP_REJ($a0)
+	sb      $zero, LOADED_VERTEX_CLIP_REJ($a0)
+
+	/* Fog alpha is independent from surface alpha and must remain so while
+	 * clipping creates new vertices. */
+	mtc1    $t8, $f2
+	mtc1    $t9, $f4
+	cvt.s.w $f2, $f2
+	cvt.s.w $f4, $f4
+	sub.s   $f4, $f4, $f2
+	mul.s   $f4, $f4, $f0
+	add.s   $f4, $f4, $f2
+	trunc.w.s $f4, $f4
+	mfc1    $t6, $f4
+	sb      $t6, LOADED_VERTEX_FOG_ALPHA($a0)
 
 	vcmp.s  GT, S701, S700
 	bvt     0, .La_is_outside_after_intersection
@@ -244,6 +261,7 @@ gfx_clip_to_hyperplane_vfpu:
 	vmov.q  C310, C210
 	vmov.q  C320, C220
 	or      $t4, $t3, $zero
+	or      $t8, $t9, $zero
 	vmov.s  S702, S701
 
 	addiu   $a3, $a3, -1

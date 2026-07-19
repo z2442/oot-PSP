@@ -115,6 +115,27 @@ printf("%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n", shader_id,
 
 unsigned int __attribute__((aligned(64))) list[262144 * 2];
 
+/* sceGuGetMemory stores transient vertices inside the display list. Fog adds a
+ * second vertex stream, so dense scenes can otherwise run past the fixed list
+ * buffer and corrupt later texture commands on real hardware. Leave room for
+ * the draw/state commands emitted after each allocation and safely continue in
+ * a fresh list when necessary. GE state and the frame/depth buffers persist
+ * across direct lists. */
+#define GU_LIST_COMMAND_RESERVE 4096
+
+static void gfx_scegu_reserve_list_memory(size_t dataSize) {
+    const size_t allocationSize = (dataSize + 3) & ~(size_t)3;
+    const size_t requiredSize = allocationSize + 8 + GU_LIST_COMMAND_RESERVE;
+
+    if (((size_t)sceGuCheckList() + requiredSize) <= sizeof(list)) {
+        return;
+    }
+
+    sceGuFinish();
+    sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
+    sceGuStart(GU_DIRECT, list);
+}
+
 static unsigned int staticOffset = 0;
 unsigned int scegu_fog_color = 0;
 
@@ -203,6 +224,12 @@ typedef struct Vertex {
     float x, y, z;
 } Vertex;
 
+typedef struct FogVertex {
+    float u, v;
+    unsigned int color;
+    float x, y, z;
+} FogVertex;
+
 typedef struct VertexColor {
     unsigned short a, b;
     unsigned long color;
@@ -218,6 +245,9 @@ static int active_texture_tile = -1;
 static struct SamplerState sAppliedSamplerState;
 static bool sAppliedSamplerStateValid;
 static bool gl_blend = false;
+static bool sDepthTestEnabled = true;
+static bool sDepthWriteEnabled = true;
+static unsigned int sTextureEnvColor = 0xffffffff;
 static void *sDrawBuffer;
 static void *sDisplayBuffer;
 static void *sDepthBuffer;
@@ -365,6 +395,7 @@ static void gfx_scegu_draw_rect(int x, int y, int width, int height, unsigned in
         return;
     }
 
+    gfx_scegu_reserve_list_memory(sizeof(VertexColor) * 2);
     verts = (VertexColor *)sceGuGetMemory(sizeof(VertexColor) * 2);
     if (verts == NULL) {
         return;
@@ -986,6 +1017,7 @@ static void gfx_scegu_set_sampler_parameters(const int tile, const bool linear_f
 static void gfx_scegu_set_texture_env_color(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     uint32_t color = (uint32_t)r | ((uint32_t)g << 8) | ((uint32_t)b << 16) | ((uint32_t)a << 24);
 
+    sTextureEnvColor = color;
     sceGuTexEnvColor(color);
 }
 
@@ -1085,6 +1117,7 @@ static void gfx_scegu_upload_texture(const uint8_t *rgba32_buf, int width, int h
 }
 
 static void gfx_scegu_set_depth_test(bool depth_test) {
+    sDepthTestEnabled = depth_test;
     sceGuDepthFunc(GU_GEQUAL);
 
     if (depth_test) {
@@ -1095,6 +1128,7 @@ static void gfx_scegu_set_depth_test(bool depth_test) {
 }
 
 static void gfx_scegu_set_depth_mask(bool z_upd) {
+    sDepthWriteEnabled = z_upd;
     sceGuDepthMask(z_upd ? GU_FALSE : GU_TRUE);
 }
 
@@ -1134,47 +1168,66 @@ static void gfx_scegu_set_use_alpha(bool use_alpha) {
     }
 }
 
-// draws the same triangles as plain fog color + fog intensity as alpha
-// on top of the normal tris and blends them to achieve sort of the same effect
-// as fog would
-static inline void gfx_scegu_blend_fog_tris(void) {
-    /*@Todo: figure this out! */
-    return;
-#if 0
-    // if a texture was used, replace it with fog color instead, but still keep the alpha
-    if (cur_shader->texture_used[0]) {
-        glActiveTexture(GL_TEXTURE0);
-        TEXENV_COMBINE_ON();
-        // out.rgb = input0.rgb
-        TEXENV_COMBINE_SET1(RGB, GL_REPLACE, GL_PRIMARY_COLOR);
-        // out.a = texel0.a * input0.a
-        TEXENV_COMBINE_SET2(ALPHA, GL_MODULATE, GL_TEXTURE, GL_PRIMARY_COLOR);
-    }
-
-    glEnableClientState(GL_COLOR_ARRAY); // enable color array temporarily
-    glColorPointer(4, GL_FLOAT, cur_buf_stride, cur_fog_ofs); // set fog colors as primary colors
-    if (!gl_blend) glEnable(GL_BLEND); // enable blending temporarily
-    glDepthFunc(GL_LEQUAL); // Z is the same as the base triangles
-
-    glDrawArrays(GL_TRIANGLES, 0, 3 * cur_buf_num_tris);
-
-    glDepthFunc(GL_LESS); // set back to default
-    if (!gl_blend) glDisable(GL_BLEND); // disable blending if it was disabled
-    glDisableClientState(GL_COLOR_ARRAY); // will get reenabled later anyway
-#endif
-}
-
 static void gfx_scegu_draw_triangles(float buf_vbo[], UNUSED size_t buf_vbo_len, size_t buf_vbo_num_tris) {
     if (!is_shader_enabled(cur_shader->shader_id)) {
         gfx_scegu_apply_shader(get_shader_from_id(get_shader_remap(cur_shader->shader_id)));
     }
 
+    gfx_scegu_reserve_list_memory(sizeof(Vertex) * 3 * buf_vbo_num_tris);
     void *buf = sceGuGetMemory(sizeof(Vertex) * 3 * buf_vbo_num_tris);
     OotPsp_MemcpyVfpu(buf, buf_vbo, sizeof(Vertex) * 3 * buf_vbo_num_tris);
     sceGuDrawArray(GU_TRIANGLES, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D, 3 * buf_vbo_num_tris, 0, buf);
+}
 
-    // cur_fog_ofs is only set if GL_EXT_fog_coord isn't used
-    // if (cur_fog_ofs) gfx_scegu_blend_fog_tris();
+static void gfx_scegu_draw_fog_triangles(float buf_vbo[], UNUSED size_t buf_vbo_len,
+                                         size_t buf_vbo_num_tris) {
+    struct ShaderProgram *restoreShader = sAppliedShader;
+    const bool useTextureAlpha = restoreShader != NULL &&
+                                 (restoreShader->texture_used[0] || restoreShader->texture_used[1]) &&
+                                 gfx_scegu_shader_uses_texture_alpha(restoreShader);
+    const size_t vertexCount = 3 * buf_vbo_num_tris;
+
+    gfx_scegu_reserve_list_memory(sizeof(FogVertex) * vertexCount);
+    void *buf = sceGuGetMemory(sizeof(FogVertex) * vertexCount);
+
+    OotPsp_MemcpyVfpu(buf, buf_vbo, sizeof(FogVertex) * vertexCount);
+
+    /* N64 fog is an RDP blend after texture/color combining. Re-draw the same
+     * geometry as fog RGB with the VFPU-computed shade alpha. */
+    if (useTextureAlpha) {
+        const unsigned int fogRgb = ((const FogVertex *)buf_vbo)->color & 0x00ffffff;
+
+        /* With vertex RGB and the texture-environment RGB both set to fog,
+         * GU_TFX_BLEND leaves RGB constant while multiplying alpha by texel alpha. */
+        sceGuEnable(GU_TEXTURE_2D);
+        sceGuTexEnvColor(fogRgb | 0xff000000);
+        sceGuTexFunc(GU_TFX_BLEND, GU_TCC_RGBA);
+    } else {
+        sceGuDisable(GU_TEXTURE_2D);
+    }
+    sceGuDisable(GU_ALPHA_TEST);
+    sceGuDepthMask(GU_TRUE);
+    if (sDepthTestEnabled && sDepthWriteEnabled) {
+        /* Matching the depth written by the base pass also preserves cutout holes. */
+        sceGuDepthFunc(GU_EQUAL);
+    }
+    sceGuEnable(GU_BLEND);
+    sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
+    sceGuDrawArray(GU_TRIANGLES, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D,
+                   vertexCount, 0, buf);
+
+    sceGuDepthFunc(GU_GEQUAL);
+    sceGuDepthMask(sDepthWriteEnabled ? GU_FALSE : GU_TRUE);
+    if (useTextureAlpha) {
+        sceGuTexEnvColor(sTextureEnvColor);
+    }
+    if (restoreShader != NULL) {
+        sAppliedShader = NULL;
+        gfx_scegu_apply_shader(restoreShader);
+    }
+    if (!gl_blend) {
+        sceGuDisable(GU_BLEND);
+    }
 }
 
 void gfx_scegu_draw_triangles_2d(float buf_vbo[], UNUSED size_t buf_vbo_len, UNUSED size_t buf_vbo_num_tris) {
@@ -1186,6 +1239,7 @@ void gfx_scegu_draw_triangles_2d(float buf_vbo[], UNUSED size_t buf_vbo_len, UNU
         gfx_scegu_apply_shader(get_shader_from_id(get_shader_remap(cur_shader->shader_id)));
     }
 
+    gfx_scegu_reserve_list_memory(sizeof(VertexColor) * 2);
     quad = sceGuGetMemory(sizeof(VertexColor) * 2);
     OotPsp_MemcpyVfpu(quad, buf_vbo, sizeof(VertexColor) * 2);
 
@@ -1202,6 +1256,9 @@ void gfx_scegu_draw_triangles_2d(float buf_vbo[], UNUSED size_t buf_vbo_len, UNU
 
 static void gfx_scegu_init(void) {
     sceGuInit();
+    sDepthTestEnabled = true;
+    sDepthWriteEnabled = true;
+    sTextureEnvColor = 0xffffffff;
     active_texture_tile = -1;
     sAppliedShader = NULL;
     sAppliedSamplerStateValid = false;
@@ -1380,6 +1437,7 @@ struct GfxRenderingAPI gfx_scegu_api = {
     gfx_scegu_set_scissor,
     gfx_scegu_set_use_alpha,
     gfx_scegu_draw_triangles,
+    gfx_scegu_draw_fog_triangles,
     gfx_scegu_init,
     gfx_scegu_on_resize,
     gfx_scegu_start_frame,

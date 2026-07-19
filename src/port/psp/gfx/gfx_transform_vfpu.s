@@ -9,18 +9,26 @@
  *     struct LoadedVertex *dest,
  *     const Vtx *source,
  *     uint32_t count,
- *     const struct GfxVfpuTransformMatrices *matrices);
+ *     const struct GfxVfpuTransformState *state);
  *
  * Vtx is 16 bytes, with signed object coordinates at offsets 0, 2, and 4.
  * LoadedVertex is 48 bytes; its model and clip vectors start at 0 and 16.
  * Matrices use the renderer's row-vector layout, so each VFPU dot product is
- * made against one matrix column.
+ * made against one matrix column. Surface alpha remains at offset 43. When
+ * N64 fog is enabled, the separate fog alpha at offset 45 receives
+ * clamp((clip_z / clip_w) * fog_mul + fog_offset, 0, 255).
  */
 
 #define VTX_SIZE 16
 #define LOADED_VERTEX_SIZE 48
 #define LOADED_VERTEX_MODEL_POS 0
 #define LOADED_VERTEX_CLIP_POS 16
+#define LOADED_VERTEX_ALPHA 43
+#define LOADED_VERTEX_FOG_ALPHA 45
+#define VTX_ALPHA 15
+#define TRANSFORM_STATE_FOG_MUL 8
+#define TRANSFORM_STATE_FOG_OFFSET 12
+#define TRANSFORM_STATE_FOG_ENABLED 16
 
 .globl gfx_transform_vertices_vfpu
 gfx_transform_vertices_vfpu:
@@ -28,6 +36,7 @@ gfx_transform_vertices_vfpu:
 	nop
 	lw      $t8, 0($a3)
 	lw      $t9, 4($a3)
+	lw      $t7, TRANSFORM_STATE_FOG_ENABLED($a3)
 
 	/* Model matrix columns. */
 	lv.s    S000, 0($t8)
@@ -65,6 +74,18 @@ gfx_transform_vertices_vfpu:
 	lv.s    S132, 44($t9)
 	lv.s    S133, 60($t9)
 
+	beq     $t7, $zero, .Ltransform_vertex
+	nop
+	lw      $t0, TRANSFORM_STATE_FOG_MUL($a3)
+	lw      $t1, TRANSFORM_STATE_FOG_OFFSET($a3)
+	mtv     $t0, S220
+	mtv     $t1, S221
+	vi2f.s  S220, S220, 0
+	vi2f.s  S221, S221, 0
+	vzero.s S222
+	li      $t0, 0x437f0000
+	mtv     $t0, S223
+
 .Ltransform_vertex:
 	lh      $t0, 0($a1)
 	lh      $t1, 2($a1)
@@ -89,6 +110,35 @@ gfx_transform_vertices_vfpu:
 
 	sv.q    C300, LOADED_VERTEX_MODEL_POS($a0)
 	sv.q    C310, LOADED_VERTEX_CLIP_POS($a0)
+	lbu     $t0, VTX_ALPHA($a1)
+	sb      $t0, LOADED_VERTEX_ALPHA($a0)
+
+	beq     $t7, $zero, .Lfog_disabled
+	nop
+	vcmp.s  LE, S313, S222
+	bvt     0, .Lfog_zero
+	nop
+	vrcp.s  S230, S313
+	vmul.s  S230, S312, S230
+	vmul.s  S230, S230, S220
+	vadd.s  S230, S230, S221
+	vmax.s  S230, S230, S222
+	vmin.s  S230, S230, S223
+	vf2iz.s S230, S230, 0
+	mfv     $t0, S230
+	b       .Lstore_fog_alpha
+	nop
+
+.Lfog_zero:
+	or      $t0, $zero, $zero
+	b       .Lstore_fog_alpha
+	nop
+
+.Lfog_disabled:
+	or      $t0, $zero, $zero
+
+.Lstore_fog_alpha:
+	sb      $t0, LOADED_VERTEX_FOG_ALPHA($a0)
 
 	addiu   $a1, $a1, VTX_SIZE
 	addiu   $a0, $a0, LOADED_VERTEX_SIZE

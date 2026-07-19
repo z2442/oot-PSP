@@ -121,21 +121,27 @@ struct LoadedVertex {
     float _x, _y, _z, _w;
     float u, v;
     struct RGBA color;
-    uint32_t clip_rej;
+    uint8_t clip_rej;
+    uint8_t fog_alpha;
+    uint16_t padding;
 } __attribute__((packed, aligned(16)));
 
 #if defined(TARGET_PSP)
 typedef char LoadedVertex_vfpu_size_check[(sizeof(struct LoadedVertex) == 48) ? 1 : -1];
 typedef char Vtx_vfpu_size_check[(sizeof(Vtx) == 16) ? 1 : -1];
 /* Keep the assembly entry point to four arguments so it does not depend on PSP EABI extension registers. */
-struct GfxVfpuTransformMatrices {
+struct GfxVfpuTransformState {
     const float (*model)[4];
     const float (*projection)[4];
+    int32_t fog_mul;
+    int32_t fog_offset;
+    uint32_t fog_enabled;
 };
+typedef char GfxVfpuTransformState_size_check[(sizeof(struct GfxVfpuTransformState) == 20) ? 1 : -1];
 extern uint32_t gfx_clip_to_hyperplane_vfpu(struct LoadedVertex *dest, const struct LoadedVertex *source,
                                             const float plane[4], uint32_t inCount);
 extern void gfx_transform_vertices_vfpu(struct LoadedVertex* dest, const Vtx* source, uint32_t count,
-                                        const struct GfxVfpuTransformMatrices* matrices);
+                                        const struct GfxVfpuTransformState* state);
 #endif
 
 typedef struct VertexColor {
@@ -194,6 +200,7 @@ static uint8_t color_combiner_cache_next_way[COLOR_COMBINER_CACHE_SET_COUNT];
 struct TriPipelineState {
     struct ColorCombiner *comb;
     bool use_alpha;
+    bool use_fog;
     bool used_textures[2];
     bool use_texture;
     bool two_texture_blend;
@@ -813,8 +820,15 @@ typedef struct psp_uv_t {
   float u,v;
   uint8_t alpha;
 } psp_uv_t;
+typedef struct psp_fog_t {
+  float u,v;
+  struct RGBA color;
+  float x,y,z;
+} psp_fog_t;
+typedef char psp_fog_t_size_check[(sizeof(psp_fog_t) == 24) ? 1 : -1];
 static psp_fast_t buf_vbo[MAX_BUFFERED  * 3] __attribute__ ((aligned (32))); // 3 vertices in a triangle and 26 floats per vtx
 static psp_uv_t buf_vbo_tex1[MAX_BUFFERED * 3] __attribute__((aligned(32)));
+static psp_fog_t buf_vbo_fog[MAX_BUFFERED * 3] __attribute__((aligned(32)));
 #else
 static float buf_vbo[MAX_BUFFERED * (26 * 3)] // 3 vertices in a triangle and 26 floats per vtx
 #endif
@@ -1195,6 +1209,7 @@ void gfx_clip_interpolate_vert(struct LoadedVertex* out, const struct  LoadedVer
     out->color.g = lhs->color.g + (rhs->color.g - lhs->color.g) * factor;
     out->color.b = lhs->color.b + (rhs->color.b - lhs->color.b) * factor;
     out->color.a = lhs->color.a + (rhs->color.a - lhs->color.a) * factor;
+    out->fog_alpha = lhs->fog_alpha + (rhs->fog_alpha - lhs->fog_alpha) * factor;
     // texture
     out->u = lhs->u + (rhs->u - lhs->u) * factor;
     out->v = lhs->v + (rhs->v - lhs->v) * factor;
@@ -1358,10 +1373,11 @@ static void gfx_flush(void) {
 #if defined(TARGET_PSP)
         const bool twoTextureBlend = rendering_state.tri_pipeline.two_texture_blend &&
                                      rendering_state.textures[0] != NULL && rendering_state.textures[1] != NULL;
+        const bool useFog = rendering_state.tri_pipeline.use_fog;
 
 #if defined(OOTDEBUG)
         sPerformanceFlushCount++;
-        sPerformanceDrawCallCount += twoTextureBlend ? 2 : 1;
+        sPerformanceDrawCallCount += (twoTextureBlend ? 2 : 1) + (useFog ? 1 : 0);
         if (rendering_state.alpha_blend || twoTextureBlend) {
             sPerformanceTranslucentDrawCallCount += twoTextureBlend ? 2 : 1;
             sPerformanceTranslucentTriangleCount += buf_vbo_num_tris * (twoTextureBlend ? 2 : 1);
@@ -1399,6 +1415,14 @@ static void gfx_flush(void) {
             gfx_rapi->select_texture(0, rendering_state.textures[0]->texture_id);
             rendering_state.bound_texture_id = rendering_state.textures[0]->texture_id;
             rendering_state.bound_texture_tile = 0;
+        }
+        if (useFog) {
+#if defined(OOTDEBUG)
+            sPerformanceTranslucentDrawCallCount++;
+            sPerformanceTranslucentTriangleCount += buf_vbo_num_tris;
+#endif
+            gfx_rapi->draw_fog_triangles((float *)buf_vbo_fog, sizeof(psp_fog_t) * buf_num_vert,
+                                         buf_vbo_num_tris);
         }
 #endif
         buf_vbo_len = 0;
@@ -2742,6 +2766,7 @@ static void gfx_prepare_tri_pipeline_state(void) {
     struct TriPipelineState *state = &rendering_state.tri_pipeline;
     state->comb = comb;
     state->use_alpha = use_alpha;
+    state->use_fog = use_fog;
     state->used_textures[0] = used_textures[0];
     state->used_textures[1] = used_textures[1];
     state->use_texture = used_textures[0] || used_textures[1];
@@ -3160,12 +3185,15 @@ static bool gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
     vertices = (const Vtx*)normalizedSource;
 
     {
-        const struct GfxVfpuTransformMatrices matrices = {
+        const struct GfxVfpuTransformState transformState = {
             rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1],
             rsp.P_matrix,
+            rsp.fog_mul,
+            rsp.fog_offset,
+            (geometryMode & G_FOG) != 0,
         };
 
-        gfx_transform_vertices_vfpu(&rsp.loaded_vertices[dest_index], vertices, n_vertices, &matrices);
+        gfx_transform_vertices_vfpu(&rsp.loaded_vertices[dest_index], vertices, n_vertices, &transformState);
     }
 #endif
     if ((geometryMode & G_LIGHTING) && rsp.lights_changed) {
@@ -3278,37 +3306,9 @@ static bool gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
         d->_z = z;
         d->_w = w;
 
-        /*@Note: this is a trainwreck*/
-        /*if (rsp.geometry_mode & G_FOG) {
-            if (fabsf(w) < 0.001f) {
-                // To avoid division by zero
-                w = 0.001f;
-            }
-            
-            float winv = 1.0f / w;
-            if (winv < 0.0f) {
-                winv = 32767.0f;
-            }
-            
-            float fog_z = z * winv * rsp.fog_mul + rsp.fog_offset;
-            if (fog_z < 0) fog_z = 0;
-            if (fog_z > 255) fog_z = 255;
-            d->color.a = fog_z; // Use alpha variable to store fog factor
-            //d->color.r = d->color.r + (rdp.fog_color.r - d->color.r) * (fog_z/255);
-            //d->color.g = d->color.g + (rdp.fog_color.g - d->color.g) * (fog_z/255);
-            //d->color.b = d->color.b + (rdp.fog_color.b - d->color.b) * (fog_z/255);
-            
-            d->color.r = d->color.r + (255 - d->color.r) * (fog_z/255);
-            d->color.g = d->color.g + (0 - d->color.g) * (fog_z/255);
-            d->color.b = d->color.b + (0 - d->color.b) * (fog_z/255);
-            //d->color.r = 255-fog_z;
-            //d->color.g = 255-fog_z;
-            //d->color.b = 255-fog_z;
-            d->color.a = 255;
-        } else {
-            d->color.a = v->cn[3];
-        }*/
+#if !defined(TARGET_PSP)
         d->color.a = v->cn[3];
+#endif
     }
 
     return true;
@@ -3575,15 +3575,6 @@ static void gfx_sp_triangles(uint32_t packed0, uint32_t packed1, uint8_t triangl
             out->v = 0.0f;
         }
         
-        /*
-        //@Note no fog currently
-        if (use_fog) {
-            buf_vbo[buf_vbo_len++] = rdp.fog_color.r / 255.0f;
-            buf_vbo[buf_vbo_len++] = rdp.fog_color.g / 255.0f;
-            buf_vbo[buf_vbo_len++] = rdp.fog_color.b / 255.0f;
-            buf_vbo[buf_vbo_len++] = clipped_vertices[i].color.a / 255.0f; // fog factor (not alpha)
-        }
-        */
         out->color = gfx_get_vertex_rgba(comb, use_alpha, &vertex->color, vertex->w, true);
         if (state->color_mul_env) {
             gfx_color_mul_env(&out->color);
@@ -3592,6 +3583,8 @@ static void gfx_sp_triangles(uint32_t packed0, uint32_t packed1, uint8_t triangl
             gfx_color_mul_prim(&out->color);
         }
 
+        const uint8_t surfaceAlpha = use_alpha ? out->color.a : 0xFF;
+
         if (state->two_texture_blend) {
             uint8_t baseAlpha;
             uint8_t overlayAlpha;
@@ -3599,6 +3592,17 @@ static void gfx_sp_triangles(uint32_t packed0, uint32_t packed1, uint8_t triangl
             gfx_two_texture_blend_pass_alphas(out->color.a, rdp.env_color.a, &baseAlpha, &overlayAlpha);
             out->color.a = baseAlpha;
             buf_vbo_tex1[buf_num_vert].alpha = overlayAlpha;
+        }
+        if (state->use_fog) {
+            psp_fog_t *fogOut = &buf_vbo_fog[buf_num_vert];
+
+            fogOut->color = rdp.fog_color;
+            fogOut->color.a = gfx_color_mul_channel(vertex->fog_alpha, surfaceAlpha);
+            fogOut->u = out->u;
+            fogOut->v = out->v;
+            fogOut->x = vertex->x;
+            fogOut->y = vertex->y;
+            fogOut->z = vertex->z;
         }
         if (shader_program_id == 0x01A00045) {
             /* Matches the old code, which only updated the temporary pointer after the copy. */
@@ -4407,6 +4411,13 @@ static void gfx_dp_set_prim_color(uint8_t lod_frac, uint8_t r, uint8_t g, uint8_
 }
 
 static void gfx_dp_set_fog_color(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+    if ((rdp.fog_color.r == r) && (rdp.fog_color.g == g) && (rdp.fog_color.b == b) &&
+        (rdp.fog_color.a == a)) {
+        return;
+    }
+    if (rendering_state.tri_pipeline.use_fog) {
+        gfx_flush();
+    }
     rdp.fog_color.r = r;
     rdp.fog_color.g = g;
     rdp.fog_color.b = b;
