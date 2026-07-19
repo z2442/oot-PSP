@@ -17,6 +17,7 @@
 #include "oot_psp_performance.h"
 #include "oot_psp_runtime_patch.h"
 #include "play_state.h"
+#include "player.h"
 #include "setup_state.h"
 #include "title_setup_state.h"
 
@@ -159,10 +160,21 @@ int main(int argc, char** argv) {
             OotPspHomeMenu_PollHomeButton();
 
             if (OotPspHomeMenu_IsOpen()) {
+                const Color_RGB8* tunicColor = NULL;
+
 #if defined(OOTDEBUG)
                 OotPspPerformance_Flush();
 #endif
-                if (OotPspHomeMenu_RunFrame() == OOT_PSP_HOME_MENU_RESULT_EXIT_GAME) {
+                if (nextInit == Play_Init) {
+                    Player* player = GET_PLAYER((PlayState*)gameState);
+
+                    if ((player != NULL) && (player->currentTunic >= PLAYER_TUNIC_KOKIRI) &&
+                        (player->currentTunic < PLAYER_TUNIC_MAX)) {
+                        tunicColor = &sTunicColors[player->currentTunic];
+                    }
+                }
+
+                if (OotPspHomeMenu_RunFrame(tunicColor) == OOT_PSP_HOME_MENU_RESULT_EXIT_GAME) {
                     gameState->running = false;
                     nextInit = NULL;
                     break;

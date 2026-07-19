@@ -16,7 +16,8 @@ extern void gfx_scegu_set_pause_background_active(bool active);
 extern void gfx_scegu_request_home_menu_background(void);
 extern void gfx_scegu_set_home_menu_background_active(bool active);
 extern void gfx_scegu_render_home_menu(int selectedIndex, int screen, int controlSelectedIndex,
-                                       const char* statusMessage);
+                                       const char* statusMessage, uint8_t highlightRed, uint8_t highlightGreen,
+                                       uint8_t highlightBlue);
 extern void gfx_scegu_render_first_boot_progress(uint32_t progressPermille, const char* statusMessage, bool error);
 extern bool gfx_scegu_depth_is_clear(int32_t x, int32_t y);
 extern bool gfx_scegu_depth_test(int32_t x, int32_t y, float projectedZ);
@@ -28,6 +29,9 @@ typedef struct OotPspHomeMenuRenderArgs {
     int screen;
     int controlSelectedIndex;
     const char* statusMessage;
+    uint8_t highlightRed;
+    uint8_t highlightGreen;
+    uint8_t highlightBlue;
 } OotPspHomeMenuRenderArgs;
 
 typedef struct OotPspFirstBootProgressRenderArgs {
@@ -39,7 +43,8 @@ typedef struct OotPspFirstBootProgressRenderArgs {
 static void OotPspRenderer_DrawHomeMenu(void* arg) {
     const OotPspHomeMenuRenderArgs* menu = (const OotPspHomeMenuRenderArgs*)arg;
 
-    gfx_scegu_render_home_menu(menu->selectedIndex, menu->screen, menu->controlSelectedIndex, menu->statusMessage);
+    gfx_scegu_render_home_menu(menu->selectedIndex, menu->screen, menu->controlSelectedIndex, menu->statusMessage,
+                               menu->highlightRed, menu->highlightGreen, menu->highlightBlue);
 }
 
 static void OotPspRenderer_DrawFirstBootProgress(void* arg) {
@@ -124,7 +129,8 @@ void OotPspRenderer_SetHomeMenuBackgroundActive(bool active) {
 }
 
 void OotPspRenderer_RenderHomeMenu(int selectedIndex, int screen, int controlSelectedIndex,
-                                   const char* statusMessage) {
+                                   const char* statusMessage, uint8_t highlightRed, uint8_t highlightGreen,
+                                   uint8_t highlightBlue) {
     OotPspHomeMenuRenderArgs args;
 
     OotPspRenderer_Init();
@@ -132,6 +138,9 @@ void OotPspRenderer_RenderHomeMenu(int selectedIndex, int screen, int controlSel
     args.screen = screen;
     args.controlSelectedIndex = controlSelectedIndex;
     args.statusMessage = statusMessage;
+    args.highlightRed = highlightRed;
+    args.highlightGreen = highlightGreen;
+    args.highlightBlue = highlightBlue;
 
     gfx_render_callback_frame(OotPspRenderer_DrawHomeMenu, &args);
 }

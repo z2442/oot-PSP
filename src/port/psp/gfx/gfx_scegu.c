@@ -536,7 +536,8 @@ static void gfx_scegu_prepare_home_menu_draw(void) {
     sceGuDepthMask(GU_FALSE);
 }
 
-static void gfx_scegu_render_home_menu_main(int selectedIndex) {
+static void gfx_scegu_render_home_menu_main(int selectedIndex, uint8_t highlightRed, uint8_t highlightGreen,
+                                            uint8_t highlightBlue) {
     static const char *items[] = {
         "Resume Game",
         "Controller Mapping",
@@ -552,7 +553,8 @@ static void gfx_scegu_render_home_menu_main(int selectedIndex) {
         unsigned int color = gfx_scegu_rgba(218, 224, 218, 255);
 
         if (selectedIndex == i) {
-            gfx_scegu_draw_rect(128, y - 22, 224, 28, gfx_scegu_rgba(38, 92, 78, 205));
+            gfx_scegu_draw_rect(128, y - 22, 224, 28,
+                                gfx_scegu_rgba(highlightRed, highlightGreen, highlightBlue, 205));
             color = gfx_scegu_rgba(255, 255, 245, 255);
         }
 
@@ -608,7 +610,8 @@ void gfx_scegu_render_first_boot_progress(uint32_t progressPermille, const char*
                                   INTRAFONT_ALIGN_CENTER);
 }
 
-static void gfx_scegu_render_controller_mapping(int selectedIndex, const char* statusMessage) {
+static void gfx_scegu_render_controller_mapping(int selectedIndex, const char* statusMessage, uint8_t highlightRed,
+                                                 uint8_t highlightGreen, uint8_t highlightBlue) {
     char line[80];
     char value[96];
     int bindingCount = OotPspControls_GetBindingCount();
@@ -646,7 +649,8 @@ static void gfx_scegu_render_controller_mapping(int selectedIndex, const char* s
             unsigned int color = gfx_scegu_rgba(218, 224, 218, 255);
 
             if (selectedIndex == row) {
-                gfx_scegu_draw_rect(54, y - 17, 372, 22, gfx_scegu_rgba(38, 92, 78, 205));
+                gfx_scegu_draw_rect(54, y - 17, 372, 22,
+                                    gfx_scegu_rgba(highlightRed, highlightGreen, highlightBlue, 205));
                 color = gfx_scegu_rgba(255, 255, 245, 255);
             }
 
@@ -1409,13 +1413,15 @@ void gfx_scegu_set_home_menu_background_active(bool active) {
     }
 }
 
-void gfx_scegu_render_home_menu(int selectedIndex, int screen, int controlSelectedIndex, const char* statusMessage) {
+void gfx_scegu_render_home_menu(int selectedIndex, int screen, int controlSelectedIndex, const char* statusMessage,
+                                uint8_t highlightRed, uint8_t highlightGreen, uint8_t highlightBlue) {
     gfx_scegu_prepare_home_menu_draw();
 
     if (screen == 1) {
-        gfx_scegu_render_controller_mapping(controlSelectedIndex, statusMessage);
+        gfx_scegu_render_controller_mapping(controlSelectedIndex, statusMessage, highlightRed, highlightGreen,
+                                             highlightBlue);
     } else {
-        gfx_scegu_render_home_menu_main(selectedIndex);
+        gfx_scegu_render_home_menu_main(selectedIndex, highlightRed, highlightGreen, highlightBlue);
     }
 }
 

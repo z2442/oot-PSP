@@ -17,7 +17,8 @@ void OotPspRenderer_SetPauseBackgroundActive(bool active);
 void OotPspRenderer_RequestHomeMenuBackground(void);
 void OotPspRenderer_SetHomeMenuBackgroundActive(bool active);
 void OotPspRenderer_RenderHomeMenu(int selectedIndex, int screen, int controlSelectedIndex,
-                                   const char* statusMessage);
+                                   const char* statusMessage, uint8_t highlightRed, uint8_t highlightGreen,
+                                   uint8_t highlightBlue);
 void OotPspRenderer_RenderFirstBootProgress(uint32_t progressPermille, const char* statusMessage, bool error);
 
 #endif

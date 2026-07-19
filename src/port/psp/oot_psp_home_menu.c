@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <stdio.h>
 
+#include "color.h"
 #include "oot_psp_controls.h"
 #include "oot_psp_renderer.h"
 
@@ -19,6 +20,9 @@
 
 #define OOT_PSP_HOME_MENU_INPUT_LOCKOUT_US 500000
 #define OOT_PSP_HOME_MENU_INPUT_DEBOUNCE_US 150000
+#define OOT_PSP_HOME_MENU_FALLBACK_HIGHLIGHT_RED 38
+#define OOT_PSP_HOME_MENU_FALLBACK_HIGHLIGHT_GREEN 92
+#define OOT_PSP_HOME_MENU_FALLBACK_HIGHLIGHT_BLUE 78
 #define OOT_PSP_HOME_MENU_BUTTON_MASK \
     (PSP_CTRL_CIRCLE | PSP_CTRL_CROSS | PSP_CTRL_START | PSP_CTRL_UP | PSP_CTRL_DOWN | PSP_CTRL_LEFT | PSP_CTRL_RIGHT)
 
@@ -157,6 +161,21 @@ static void OotPspHomeMenu_RequestOpen(void) {
     sOpenRequested = true;
 }
 
+static void OotPspHomeMenu_Render(const char* statusMessage, const Color_RGB8* tunicColor) {
+    u8 highlightRed = OOT_PSP_HOME_MENU_FALLBACK_HIGHLIGHT_RED;
+    u8 highlightGreen = OOT_PSP_HOME_MENU_FALLBACK_HIGHLIGHT_GREEN;
+    u8 highlightBlue = OOT_PSP_HOME_MENU_FALLBACK_HIGHLIGHT_BLUE;
+
+    if (tunicColor != NULL) {
+        highlightRed = tunicColor->r;
+        highlightGreen = tunicColor->g;
+        highlightBlue = tunicColor->b;
+    }
+
+    OotPspRenderer_RenderHomeMenu(sSelectedIndex, sScreen, sControlSelectedIndex, statusMessage, highlightRed,
+                                  highlightGreen, highlightBlue);
+}
+
 void OotPspHomeMenu_PollHomeButton(void) {
     u32 buttons = OotPspHomeMenu_ReadButtons();
     u32 pressed = buttons & ~sLastPolledButtons;
@@ -172,7 +191,7 @@ bool OotPspHomeMenu_IsOpen(void) {
     return sActive || sOpenRequested;
 }
 
-OotPspHomeMenuResult OotPspHomeMenu_RunFrame(void) {
+OotPspHomeMenuResult OotPspHomeMenu_RunFrame(const Color_RGB8* tunicColor) {
     u32 buttons;
     u32 pressed;
     u32 now;
@@ -200,7 +219,7 @@ OotPspHomeMenuResult OotPspHomeMenu_RunFrame(void) {
 
     now = sceKernelGetSystemTimeLow();
     if ((now - sMenuInputLockoutStartUsec) < OOT_PSP_HOME_MENU_INPUT_LOCKOUT_US) {
-        OotPspRenderer_RenderHomeMenu(sSelectedIndex, sScreen, sControlSelectedIndex, NULL);
+        OotPspHomeMenu_Render(NULL, tunicColor);
         return OOT_PSP_HOME_MENU_RESULT_NONE;
     }
 
@@ -247,7 +266,6 @@ OotPspHomeMenuResult OotPspHomeMenu_RunFrame(void) {
         }
     }
 
-    OotPspRenderer_RenderHomeMenu(sSelectedIndex, sScreen, sControlSelectedIndex,
-                                  (sStatusTimer > 0) ? sStatusMessage : NULL);
+    OotPspHomeMenu_Render((sStatusTimer > 0) ? sStatusMessage : NULL, tunicColor);
     return OOT_PSP_HOME_MENU_RESULT_NONE;
 }

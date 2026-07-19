@@ -1047,6 +1047,7 @@ void Player_DrawPauseOnPage(struct PlayState* play, u8* segment, SkelAnime* skel
 
 // z_player_lib.c
 extern FlexSkeletonHeader* gPlayerSkelHeaders[2];
+extern Color_RGB8 sTunicColors[PLAYER_TUNIC_MAX];
 extern u8 gPlayerModelTypes[PLAYER_MODELGROUP_MAX][PLAYER_MODELGROUPENTRY_MAX];
 extern Gfx* gPlayerLeftHandBgsDLs[];
 extern Gfx* gPlayerLeftHandOpenDLs[];
