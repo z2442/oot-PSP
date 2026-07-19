@@ -204,11 +204,15 @@ struct TriPipelineState {
     bool used_textures[2];
     bool use_texture;
     bool two_texture_blend;
+    bool two_texture_blend_uses_prim_lod;
+    bool two_texture_alpha_blend;
     bool flame_texture_atlas;
     bool color_mul_env;
     bool color_mul_prim;
+    bool alpha_mul_env;
     float tex_u_scale[2], tex_v_scale[2];
     float tex_u_bias[2], tex_v_bias[2];
+    float tex_u_shift_scale[2], tex_v_shift_scale[2];
     float tex_u_nominal_span[2], tex_v_nominal_span[2];
     bool tex_u_scale_to_primitive[2], tex_v_scale_to_primitive[2];
 } __attribute__((aligned(4)));
@@ -218,6 +222,7 @@ typedef struct TextureTileState {
     uint8_t siz;
     uint8_t cms, cmt;
     uint8_t masks, maskt;
+    uint8_t shifts, shiftt;
     uint16_t uls, ult, lrs, lrt; // U10.2
     uint32_t line_size_bytes;
 } TextureTileState;
@@ -283,6 +288,9 @@ static struct RDP {
     bool combine_color_mul_env;
     bool combine_color_mul_prim;
     bool combine_two_texture_blend;
+    bool combine_two_texture_blend_uses_prim_lod;
+    bool combine_two_texture_alpha_blend;
+    bool combine_alpha_mul_env;
     bool combine_flame_texture_atlas;
     
     struct RGBA env_color, prim_color, fog_color, fill_color;
@@ -681,6 +689,8 @@ static void gfx_set_invalid_texture_tile(int tile) {
     tileState->ult = 0;
     tileState->lrs = 0;
     tileState->lrt = 0;
+    tileState->shifts = G_TX_NOLOD;
+    tileState->shiftt = G_TX_NOLOD;
     tileState->line_size_bytes = 2;
 }
 
@@ -829,6 +839,10 @@ typedef char psp_fog_t_size_check[(sizeof(psp_fog_t) == 24) ? 1 : -1];
 static psp_fast_t buf_vbo[MAX_BUFFERED  * 3] __attribute__ ((aligned (32))); // 3 vertices in a triangle and 26 floats per vtx
 static psp_uv_t buf_vbo_tex1[MAX_BUFFERED * 3] __attribute__((aligned(32)));
 static psp_fog_t buf_vbo_fog[MAX_BUFFERED * 3] __attribute__((aligned(32)));
+static uint8_t buf_vbo_fog_tex1_alpha[MAX_BUFFERED * 3] __attribute__((aligned(32)));
+static GFX_DL_HANDLER void gfx_two_texture_blend_pass_alphas(uint8_t surfaceAlpha, uint8_t mixAlpha,
+                                                             bool blendTextureAlpha, uint8_t* baseAlpha,
+                                                             uint8_t* overlayAlpha);
 #else
 static float buf_vbo[MAX_BUFFERED * (26 * 3)] // 3 vertices in a triangle and 26 floats per vtx
 #endif
@@ -1374,10 +1388,12 @@ static void gfx_flush(void) {
         const bool twoTextureBlend = rendering_state.tri_pipeline.two_texture_blend &&
                                      rendering_state.textures[0] != NULL && rendering_state.textures[1] != NULL;
         const bool useFog = rendering_state.tri_pipeline.use_fog;
+        const bool twoTextureAlphaFog =
+            useFog && twoTextureBlend && rendering_state.tri_pipeline.two_texture_alpha_blend;
 
 #if defined(OOTDEBUG)
         sPerformanceFlushCount++;
-        sPerformanceDrawCallCount += (twoTextureBlend ? 2 : 1) + (useFog ? 1 : 0);
+        sPerformanceDrawCallCount += (twoTextureBlend ? 2 : 1) + (useFog ? (twoTextureAlphaFog ? 2 : 1) : 0);
         if (rendering_state.alpha_blend || twoTextureBlend) {
             sPerformanceTranslucentDrawCallCount += twoTextureBlend ? 2 : 1;
             sPerformanceTranslucentTriangleCount += buf_vbo_num_tris * (twoTextureBlend ? 2 : 1);
@@ -1405,9 +1421,10 @@ static void gfx_flush(void) {
 
             /*
              * The GU has one texture unit. Emulate the RGB part of:
-             *   (TEXEL1 - TEXEL0) * ENV_ALPHA + TEXEL0
-             * with two alpha-blended passes. The per-pass alpha values are
-             * chosen so PRIM_ALPHA still controls the final surface opacity.
+             *   (TEXEL1 - TEXEL0) * mix + TEXEL0
+             * with two alpha-blended passes. The per-pass alpha values retain
+             * the surface opacity while mix comes from ENV_ALPHA or the
+             * programmed LOD fraction.
              */
             gfx_rapi->select_texture(1, rendering_state.textures[1]->texture_id);
             gfx_rapi->draw_triangles((float *)buf_vbo, buf_vbo_len, buf_vbo_num_tris);
@@ -1418,11 +1435,28 @@ static void gfx_flush(void) {
         }
         if (useFog) {
 #if defined(OOTDEBUG)
-            sPerformanceTranslucentDrawCallCount++;
-            sPerformanceTranslucentTriangleCount += buf_vbo_num_tris;
+            sPerformanceTranslucentDrawCallCount += twoTextureAlphaFog ? 2 : 1;
+            sPerformanceTranslucentTriangleCount += buf_vbo_num_tris * (twoTextureAlphaFog ? 2 : 1);
 #endif
-            gfx_rapi->draw_fog_triangles((float *)buf_vbo_fog, sizeof(psp_fog_t) * buf_num_vert,
-                                         buf_vbo_num_tris);
+            if (twoTextureAlphaFog) {
+                gfx_rapi->draw_fog_triangles((float *)buf_vbo_fog, sizeof(psp_fog_t) * buf_num_vert,
+                                             buf_vbo_num_tris);
+
+                for (size_t i = 0; i < buf_num_vert; i++) {
+                    buf_vbo_fog[i].u = buf_vbo_tex1[i].u;
+                    buf_vbo_fog[i].v = buf_vbo_tex1[i].v;
+                    buf_vbo_fog[i].color.a = buf_vbo_fog_tex1_alpha[i];
+                }
+                gfx_rapi->select_texture(1, rendering_state.textures[1]->texture_id);
+                gfx_rapi->draw_fog_triangles((float *)buf_vbo_fog, sizeof(psp_fog_t) * buf_num_vert,
+                                             buf_vbo_num_tris);
+                gfx_rapi->select_texture(0, rendering_state.textures[0]->texture_id);
+                rendering_state.bound_texture_id = rendering_state.textures[0]->texture_id;
+                rendering_state.bound_texture_tile = 0;
+            } else {
+                gfx_rapi->draw_fog_triangles((float *)buf_vbo_fog, sizeof(psp_fog_t) * buf_num_vert,
+                                             buf_vbo_num_tris);
+            }
         }
 #endif
         buf_vbo_len = 0;
@@ -1572,10 +1606,35 @@ static inline void gfx_color_mul_prim(struct RGBA* color) {
 
 #if defined(TARGET_PSP)
 static GFX_DL_HANDLER void gfx_two_texture_blend_pass_alphas(uint8_t surfaceAlpha, uint8_t mixAlpha,
-                                                             uint8_t* baseAlpha, uint8_t* overlayAlpha) {
-    uint32_t overlay = ((uint32_t)surfaceAlpha * mixAlpha + 127) / 255;
-    uint32_t denominator = 255 - overlay;
-    uint32_t base = 0;
+                                                             bool blendTextureAlpha, uint8_t* baseAlpha,
+                                                             uint8_t* overlayAlpha) {
+    uint32_t base;
+    uint32_t overlay;
+    uint32_t denominator;
+
+    if (blendTextureAlpha) {
+        /* Draw TEXEL0 first, then TEXEL1. This ordering preserves
+         * lerp(TEXEL0.a, TEXEL1.a, mix) when TEXEL0 is opaque, as it is for
+         * the Dark Link room's water layer. */
+        base = ((uint32_t)surfaceAlpha * (255 - mixAlpha) + 127) / 255;
+        denominator = 255 - base;
+        overlay = 0;
+
+        if (denominator != 0) {
+            overlay = ((uint32_t)surfaceAlpha * mixAlpha + denominator / 2) / denominator;
+            if (overlay > 255) {
+                overlay = 255;
+            }
+        }
+
+        *baseAlpha = base;
+        *overlayAlpha = overlay;
+        return;
+    }
+
+    overlay = ((uint32_t)surfaceAlpha * mixAlpha + 127) / 255;
+    denominator = 255 - overlay;
+    base = 0;
 
     if (denominator != 0) {
         base = ((uint32_t)surfaceAlpha * (255 - mixAlpha) + denominator / 2) / denominator;
@@ -2505,10 +2564,23 @@ static inline bool gfx_blend_cycle_uses_framebuffer(uint32_t other_mode_l, uint3
     return (m2a == G_BL_CLR_MEM) && ((m2b == G_BL_1MA) || (m2b == G_BL_1));
 }
 
+static inline float gfx_texture_shift_scale(uint8_t shift) {
+    if (shift <= 10) {
+        return 1.0f / (float)(1U << shift);
+    }
+
+    return (float)(1U << (16 - shift));
+}
+
 static void gfx_prepare_texture_coord_state(struct TriPipelineState* state, int coordSlot, int textureSlot,
                                             bool linear_filter) {
     const TextureTileState* tileState = gfx_get_texture_tile(textureSlot);
     const float filter_bias = linear_filter ? 16.0f : 0.0f;
+    const float shift_scale_s = gfx_texture_shift_scale(tileState->shifts);
+    const float shift_scale_t = gfx_texture_shift_scale(tileState->shiftt);
+
+    state->tex_u_shift_scale[coordSlot] = shift_scale_s;
+    state->tex_v_shift_scale[coordSlot] = shift_scale_t;
 
     state->tex_u_nominal_span[coordSlot] = 8.0f * (tileState->lrs - tileState->uls + 4);
     state->tex_v_nominal_span[coordSlot] = 8.0f * (tileState->lrt - tileState->ult + 4);
@@ -2517,10 +2589,12 @@ static void gfx_prepare_texture_coord_state(struct TriPipelineState* state, int 
         return;
     }
 
-    state->tex_u_scale[coordSlot] = 1.0f / state->tex_u_nominal_span[coordSlot];
-    state->tex_v_scale[coordSlot] = 1.0f / state->tex_v_nominal_span[coordSlot];
-    state->tex_u_bias[coordSlot] = (filter_bias - tileState->uls * 8.0f) * state->tex_u_scale[coordSlot];
-    state->tex_v_bias[coordSlot] = (filter_bias - tileState->ult * 8.0f) * state->tex_v_scale[coordSlot];
+    state->tex_u_scale[coordSlot] = shift_scale_s / state->tex_u_nominal_span[coordSlot];
+    state->tex_v_scale[coordSlot] = shift_scale_t / state->tex_v_nominal_span[coordSlot];
+    state->tex_u_bias[coordSlot] =
+        (filter_bias - tileState->uls * 8.0f) / state->tex_u_nominal_span[coordSlot];
+    state->tex_v_bias[coordSlot] =
+        (filter_bias - tileState->ult * 8.0f) / state->tex_v_nominal_span[coordSlot];
     state->tex_u_scale_to_primitive[coordSlot] = tileState->masks == G_TX_NOMASK;
     state->tex_v_scale_to_primitive[coordSlot] = tileState->maskt == G_TX_NOMASK;
 #if defined(TARGET_PSP)
@@ -2607,6 +2681,12 @@ static void gfx_prepare_tri_pipeline_state(void) {
      * geometry actually reaches the new combiner, just as the flame-atlas path does. This collapses material
      * setup display lists that switch the combiner several times without emitting triangles. */
     if (rdp.combine_two_texture_blend != rendering_state.tri_pipeline.two_texture_blend) {
+        gfx_flush();
+    }
+    if ((rdp.combine_two_texture_blend_uses_prim_lod !=
+         rendering_state.tri_pipeline.two_texture_blend_uses_prim_lod) ||
+        (rdp.combine_two_texture_alpha_blend !=
+         rendering_state.tri_pipeline.two_texture_alpha_blend)) {
         gfx_flush();
     }
     const bool backend_state_dirty = rendering_state.backend_state_dirty;
@@ -2771,14 +2851,19 @@ static void gfx_prepare_tri_pipeline_state(void) {
     state->used_textures[1] = used_textures[1];
     state->use_texture = used_textures[0] || used_textures[1];
     state->two_texture_blend = rdp.combine_two_texture_blend;
+    state->two_texture_blend_uses_prim_lod = rdp.combine_two_texture_blend_uses_prim_lod;
+    state->two_texture_alpha_blend = rdp.combine_two_texture_alpha_blend;
     state->flame_texture_atlas = flame_texture_atlas;
     state->color_mul_env = rdp.combine_color_mul_env;
     state->color_mul_prim = rdp.combine_color_mul_prim;
+    state->alpha_mul_env = rdp.combine_alpha_mul_env;
     for (int i = 0; i < 2; i++) {
         state->tex_u_scale[i] = 0.0f;
         state->tex_v_scale[i] = 0.0f;
         state->tex_u_bias[i] = 0.0f;
         state->tex_v_bias[i] = 0.0f;
+        state->tex_u_shift_scale[i] = 1.0f;
+        state->tex_v_shift_scale[i] = 1.0f;
         state->tex_u_nominal_span[i] = 0.0f;
         state->tex_v_nominal_span[i] = 0.0f;
         state->tex_u_scale_to_primitive[i] = false;
@@ -3115,7 +3200,7 @@ static float gfx_hud_anchor_offset_pixels(void) {
 
 static GFX_DL_HANDLER void gfx_apply_unmasked_texture_axis(const struct LoadedVertex *const vertices[],
                                                            size_t n_vertices, bool use_u, float nominal_span,
-                                                           float *scale, float *bias) {
+                                                           float shift_scale, float *scale, float *bias) {
     float min_coord;
     float max_coord;
     float span;
@@ -3124,11 +3209,11 @@ static GFX_DL_HANDLER void gfx_apply_unmasked_texture_axis(const struct LoadedVe
         return;
     }
 
-    min_coord = use_u ? vertices[0]->u : vertices[0]->v;
+    min_coord = (use_u ? vertices[0]->u : vertices[0]->v) * shift_scale;
     max_coord = min_coord;
 
     for (size_t i = 1; i < n_vertices; i++) {
-        const float coord = use_u ? vertices[i]->u : vertices[i]->v;
+        const float coord = (use_u ? vertices[i]->u : vertices[i]->v) * shift_scale;
 
         if (coord < min_coord) {
             min_coord = coord;
@@ -3144,8 +3229,8 @@ static GFX_DL_HANDLER void gfx_apply_unmasked_texture_axis(const struct LoadedVe
     }
 
     /* Unmasked axes can use oversize UVs to stretch one tile, not repeat it. */
-    *scale = 1.0f / (span + 1.0f);
-    *bias = -min_coord * *scale;
+    *scale = shift_scale / (span + 1.0f);
+    *bias = -min_coord / (span + 1.0f);
 }
 
 struct ShaderProgram {
@@ -3524,11 +3609,13 @@ static void gfx_sp_triangles(uint32_t packed0, uint32_t packed1, uint8_t triangl
             for (int coord = 0; coord < coord_count; coord++) {
                 if (state->tex_u_scale_to_primitive[coord]) {
                     gfx_apply_unmasked_texture_axis(uv_vertices, 3, true, state->tex_u_nominal_span[coord],
-                                                    &adjusted_tex_u_scale[coord], &adjusted_tex_u_bias[coord]);
+                                                    state->tex_u_shift_scale[coord], &adjusted_tex_u_scale[coord],
+                                                    &adjusted_tex_u_bias[coord]);
                 }
                 if (state->tex_v_scale_to_primitive[coord]) {
                     gfx_apply_unmasked_texture_axis(uv_vertices, 3, false, state->tex_v_nominal_span[coord],
-                                                    &adjusted_tex_v_scale[coord], &adjusted_tex_v_bias[coord]);
+                                                    state->tex_v_shift_scale[coord], &adjusted_tex_v_scale[coord],
+                                                    &adjusted_tex_v_bias[coord]);
                 }
             }
         }
@@ -3582,14 +3669,21 @@ static void gfx_sp_triangles(uint32_t packed0, uint32_t packed1, uint8_t triangl
         if (state->color_mul_prim) {
             gfx_color_mul_prim(&out->color);
         }
+        if (state->alpha_mul_env) {
+            out->color.a = gfx_color_mul_channel(out->color.a, rdp.env_color.a);
+        }
 
         const uint8_t surfaceAlpha = use_alpha ? out->color.a : 0xFF;
 
         if (state->two_texture_blend) {
             uint8_t baseAlpha;
             uint8_t overlayAlpha;
+            const uint8_t mixAlpha = state->two_texture_blend_uses_prim_lod
+                                         ? rdp.prim_lod_frac
+                                         : rdp.env_color.a;
 
-            gfx_two_texture_blend_pass_alphas(out->color.a, rdp.env_color.a, &baseAlpha, &overlayAlpha);
+            gfx_two_texture_blend_pass_alphas(out->color.a, mixAlpha, state->two_texture_alpha_blend,
+                                              &baseAlpha, &overlayAlpha);
             out->color.a = baseAlpha;
             buf_vbo_tex1[buf_num_vert].alpha = overlayAlpha;
         }
@@ -3598,6 +3692,18 @@ static void gfx_sp_triangles(uint32_t packed0, uint32_t packed1, uint8_t triangl
 
             fogOut->color = rdp.fog_color;
             fogOut->color.a = gfx_color_mul_channel(vertex->fog_alpha, surfaceAlpha);
+            if (state->two_texture_blend && state->two_texture_alpha_blend) {
+                uint8_t baseAlpha;
+                uint8_t overlayAlpha;
+                const uint8_t mixAlpha = state->two_texture_blend_uses_prim_lod
+                                             ? rdp.prim_lod_frac
+                                             : rdp.env_color.a;
+
+                gfx_two_texture_blend_pass_alphas(fogOut->color.a, mixAlpha, true,
+                                                  &baseAlpha, &overlayAlpha);
+                fogOut->color.a = baseAlpha;
+                buf_vbo_fog_tex1_alpha[buf_num_vert] = overlayAlpha;
+            }
             fogOut->u = out->u;
             fogOut->v = out->v;
             fogOut->x = vertex->x;
@@ -3644,8 +3750,8 @@ static void gfx_sp_tri1_2d(uint8_t vtx1_idx, uint8_t vtx2_idx, UNUSED uint8_t vt
         tri_buf[tri_num_vert].z = 0;
         
         if (use_texture) {
-            int32_t u = (v_arr[i]->u - tileState->uls * 8) / 32;
-            int32_t v = (v_arr[i]->v - tileState->ult * 8) / 32;
+            int32_t u = ((v_arr[i]->u * gfx_texture_shift_scale(tileState->shifts)) - tileState->uls * 8) / 32;
+            int32_t v = ((v_arr[i]->v * gfx_texture_shift_scale(tileState->shiftt)) - tileState->ult * 8) / 32;
 #if defined(TARGET_PSP)
             const int active_texture = comb->active_texture;
             const struct TextureHashmapNode *texture_node =
@@ -3690,6 +3796,10 @@ static void gfx_sp_tri1_2d(uint8_t vtx1_idx, uint8_t vtx2_idx, UNUSED uint8_t vt
         }
         if (state->color_mul_prim) {
             gfx_color_mul_prim(&tri_buf[tri_num_vert].color);
+        }
+        if (state->alpha_mul_env) {
+            tri_buf[tri_num_vert].color.a =
+                gfx_color_mul_channel(tri_buf[tri_num_vert].color.a, rdp.env_color.a);
         }
         tri_num_vert++;
     }
@@ -3874,8 +3984,6 @@ static void gfx_dp_set_texture_image(uint32_t format, uint32_t size, uint32_t wi
 }
 
 static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t tmem, uint8_t tile, UNUSED uint32_t palette, uint32_t cmt, uint32_t maskt, uint32_t shiftt, uint32_t cms, uint32_t masks, uint32_t shifts) {
-    _UNUSED(shiftt);
-    _UNUSED(shifts);
     int renderSlot;
 
     if (gfx_get_render_tile_slot(tile, &renderSlot)) {
@@ -3888,6 +3996,7 @@ static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t t
         bool descriptorChanged = (tileState->fmt != fmt) || (tileState->siz != siz) ||
                                  (tileState->cms != cms) || (tileState->cmt != cmt) ||
                                  (tileState->masks != masks) || (tileState->maskt != maskt) ||
+                                 (tileState->shifts != shifts) || (tileState->shiftt != shiftt) ||
                                  (tileState->line_size_bytes != lineSizeBytes);
         bool textureImportChanged = (tileState->fmt != fmt) || (tileState->siz != siz) ||
                                     (tileState->line_size_bytes != lineSizeBytes) ||
@@ -3902,6 +4011,8 @@ static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t t
         tileState->cmt = cmt;
         tileState->masks = masks;
         tileState->maskt = maskt;
+        tileState->shifts = shifts;
+        tileState->shiftt = shiftt;
         tileState->line_size_bytes = lineSizeBytes;
 #if defined(TARGET_PSP)
         if (renderSlot == 1 && tmem == 0 && rdp.loaded_texture[0].addr != NULL) {
@@ -4238,10 +4349,17 @@ static bool gfx_cc_is_two_cycle_texture_shade_prim_tint(uint32_t a0, uint32_t b0
 }
 
 static bool gfx_cc_is_two_cycle_texture_blend_mul_shade(uint32_t a0, uint32_t b0, uint32_t c0, uint32_t d0,
-                                                        uint32_t a1, uint32_t b1, uint32_t c1, uint32_t d1) {
-    return (a0 == G_CCMUX_TEXEL1) && (b0 == G_CCMUX_TEXEL0) && (c0 == G_CCMUX_ENV_ALPHA) &&
+                                                        uint32_t a1, uint32_t b1, uint32_t c1, uint32_t d1,
+                                                        uint32_t mixSource) {
+    return (a0 == G_CCMUX_TEXEL1) && (b0 == G_CCMUX_TEXEL0) && (c0 == mixSource) &&
            (d0 == G_CCMUX_TEXEL0) && (a1 == G_CCMUX_COMBINED) && (b1 == (G_CCMUX_0 & 0xF)) &&
            (c1 == G_CCMUX_SHADE) && (d1 == (G_CCMUX_0 & 0x7));
+}
+
+static bool gfx_cc_is_alpha_two_texture_blend(uint32_t a, uint32_t b, uint32_t c, uint32_t d,
+                                               uint32_t mixSource) {
+    return (a == G_ACMUX_TEXEL1) && (b == G_ACMUX_TEXEL0) && (c == mixSource) &&
+           (d == G_ACMUX_TEXEL0);
 }
 
 static bool gfx_cc_is_texture_prim_env_blend(uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
@@ -4263,9 +4381,15 @@ static bool gfx_cc_is_combined_mul_primitive(uint32_t a, uint32_t b, uint32_t c,
            (d == G_ACMUX_0);
 }
 
+static bool gfx_cc_is_combined_mul_environment(uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
+    return (a == G_ACMUX_COMBINED) && (b == G_ACMUX_0) && (c == G_ACMUX_ENVIRONMENT) &&
+           (d == G_ACMUX_0);
+}
+
 static void gfx_dp_set_combine_mode(uint32_t rgb, uint32_t alpha, bool color_mul_env, bool color_mul_prim,
                                     bool texture_blend, bool texture_blend_shade, bool two_texture_blend,
-                                    bool flame_texture_atlas) {
+                                    bool two_texture_blend_uses_prim_lod, bool two_texture_alpha_blend,
+                                    bool alpha_mul_env, bool flame_texture_atlas) {
     uint32_t combineMode = rgb | (alpha << 12);
 
     if (texture_blend) {
@@ -4274,6 +4398,9 @@ static void gfx_dp_set_combine_mode(uint32_t rgb, uint32_t alpha, bool color_mul
     if ((rdp.combine_mode == combineMode) && (rdp.combine_color_mul_env == color_mul_env) &&
         (rdp.combine_color_mul_prim == color_mul_prim) &&
         (rdp.combine_two_texture_blend == two_texture_blend) &&
+        (rdp.combine_two_texture_blend_uses_prim_lod == two_texture_blend_uses_prim_lod) &&
+        (rdp.combine_two_texture_alpha_blend == two_texture_alpha_blend) &&
+        (rdp.combine_alpha_mul_env == alpha_mul_env) &&
         (rdp.combine_flame_texture_atlas == flame_texture_atlas)) {
         return;
     }
@@ -4281,6 +4408,9 @@ static void gfx_dp_set_combine_mode(uint32_t rgb, uint32_t alpha, bool color_mul
     rdp.combine_color_mul_env = color_mul_env;
     rdp.combine_color_mul_prim = color_mul_prim;
     rdp.combine_two_texture_blend = two_texture_blend;
+    rdp.combine_two_texture_blend_uses_prim_lod = two_texture_blend_uses_prim_lod;
+    rdp.combine_two_texture_alpha_blend = two_texture_alpha_blend;
+    rdp.combine_alpha_mul_env = alpha_mul_env;
     rdp.combine_flame_texture_atlas = flame_texture_atlas;
     gfx_mark_tri_pipeline_dirty();
 }
@@ -4316,6 +4446,9 @@ static GFX_DL_HANDLER void gfx_dp_set_combine(uint32_t w0, uint32_t w1) {
     bool textureBlend = gfx_cc_is_texture_prim_env_blend(rgbA0, rgbB0, rgbC0, rgbD0);
     bool textureBlendShade = false;
     bool twoTextureBlend = false;
+    bool twoTextureBlendUsesPrimLod = false;
+    bool twoTextureAlphaBlend = false;
+    bool alphaMulEnv = false;
     bool flameTextureAtlas = false;
     uint32_t rgbComb = color_comb(rgbA0, rgbB0, rgbC0, rgbD0);
     uint32_t alphaComb = color_comb(alphaA0, alphaB0, alphaC0, alphaD0);
@@ -4347,12 +4480,34 @@ static GFX_DL_HANDLER void gfx_dp_set_combine(uint32_t w0, uint32_t w1) {
     }
 
     if (gfx_cc_is_two_cycle_texture_blend_mul_shade(rgbA0, rgbB0, rgbC0, rgbD0, rgbA1, rgbB1, rgbC1,
-                                                    rgbD1)) {
+                                                    rgbD1, G_CCMUX_ENV_ALPHA) ||
+        gfx_cc_is_two_cycle_texture_blend_mul_shade(rgbA0, rgbB0, rgbC0, rgbD0, rgbA1, rgbB1, rgbC1,
+                                                    rgbD1, G_CCMUX_LOD_FRACTION)) {
         twoTextureBlend = true;
+        /* The PSP has no RDP LOD/tile combiner. OoT's fixed two-tile materials
+         * program prim_lod_frac alongside LOD_FRACTION, so use that value as
+         * the blend factor for the two GU passes. */
+        twoTextureBlendUsesPrimLod = rgbC0 == G_CCMUX_LOD_FRACTION;
         rgbComb = color_comb(G_CCMUX_TEXEL0, G_CCMUX_0, G_CCMUX_SHADE, G_CCMUX_0);
         if (gfx_cc_is_combined_mul_primitive(alphaA1, alphaB1, alphaC1, alphaD1)) {
             alphaComb = color_comb(G_ACMUX_0, G_ACMUX_0, G_ACMUX_0, G_ACMUX_PRIMITIVE);
         }
+    }
+
+    if (twoTextureBlend &&
+        gfx_cc_is_combined_mul_environment(alphaA1, alphaB1, alphaC1, alphaD1)) {
+        alphaMulEnv = true;
+    }
+
+    if (twoTextureBlend &&
+        gfx_cc_is_alpha_two_texture_blend(alphaA0, alphaB0, alphaC0, alphaD0,
+                                          twoTextureBlendUsesPrimLod ? G_ACMUX_LOD_FRACTION
+                                                                     : G_ACMUX_ENVIRONMENT)) {
+        /* The GU pass samples TEXEL0 first and TEXEL1 second. Canonicalize the
+         * alpha combiner so each pass takes alpha from its currently-bound
+         * texture; the CPU supplies the cycle-2 ENVIRONMENT multiplier. */
+        alphaComb = color_comb(G_ACMUX_0, G_ACMUX_0, G_ACMUX_0, G_ACMUX_TEXEL0);
+        twoTextureAlphaBlend = true;
     }
 
     if (gfx_cc_is_two_cycle_texture_tint(rgbA0, rgbB0, rgbC0, rgbD0, rgbA1, rgbB1, rgbC1, rgbD1)) {
@@ -4385,7 +4540,8 @@ static GFX_DL_HANDLER void gfx_dp_set_combine(uint32_t w0, uint32_t w1) {
 #endif
 
     gfx_dp_set_combine_mode(rgbComb, alphaComb, colorMulEnv, colorMulPrim, textureBlend, textureBlendShade,
-                            twoTextureBlend, flameTextureAtlas);
+                            twoTextureBlend, twoTextureBlendUsesPrimLod, twoTextureAlphaBlend, alphaMulEnv,
+                            flameTextureAtlas);
 #undef COMB_FIELD
 }
 
@@ -4531,6 +4687,9 @@ static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int3
     bool saved_combine_color_mul_env = rdp.combine_color_mul_env;
     bool saved_combine_color_mul_prim = rdp.combine_color_mul_prim;
     bool saved_combine_two_texture_blend = rdp.combine_two_texture_blend;
+    bool saved_combine_two_texture_blend_uses_prim_lod = rdp.combine_two_texture_blend_uses_prim_lod;
+    bool saved_combine_two_texture_alpha_blend = rdp.combine_two_texture_alpha_blend;
+    bool saved_combine_alpha_mul_env = rdp.combine_alpha_mul_env;
     bool saved_combine_flame_texture_atlas = rdp.combine_flame_texture_atlas;
     if ((rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_COPY) {
         // Per RDP Command Summary Set Tile's shift s and this dsdx should be set to 4 texels
@@ -4539,7 +4698,7 @@ static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int3
         
         // Color combiner is turned off in copy mode
         gfx_dp_set_combine_mode(color_comb(0, 0, 0, G_CCMUX_TEXEL0), color_comb(0, 0, 0, G_ACMUX_TEXEL0),
-                                false, false, false, false, false, false);
+                                false, false, false, false, false, false, false, false, false);
         
         // Per documentation one extra pixel is added in this modes to each edge
         lrx += 1 << 2;
@@ -4585,6 +4744,9 @@ static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int3
     rdp.combine_color_mul_env = saved_combine_color_mul_env;
     rdp.combine_color_mul_prim = saved_combine_color_mul_prim;
     rdp.combine_two_texture_blend = saved_combine_two_texture_blend;
+    rdp.combine_two_texture_blend_uses_prim_lod = saved_combine_two_texture_blend_uses_prim_lod;
+    rdp.combine_two_texture_alpha_blend = saved_combine_two_texture_alpha_blend;
+    rdp.combine_alpha_mul_env = saved_combine_alpha_mul_env;
     rdp.combine_flame_texture_atlas = saved_combine_flame_texture_atlas;
     gfx_mark_tri_pipeline_dirty();
 }
@@ -4612,10 +4774,13 @@ static void gfx_dp_fill_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t
     bool saved_combine_color_mul_env = rdp.combine_color_mul_env;
     bool saved_combine_color_mul_prim = rdp.combine_color_mul_prim;
     bool saved_combine_two_texture_blend = rdp.combine_two_texture_blend;
+    bool saved_combine_two_texture_blend_uses_prim_lod = rdp.combine_two_texture_blend_uses_prim_lod;
+    bool saved_combine_two_texture_alpha_blend = rdp.combine_two_texture_alpha_blend;
+    bool saved_combine_alpha_mul_env = rdp.combine_alpha_mul_env;
     bool saved_combine_flame_texture_atlas = rdp.combine_flame_texture_atlas;
     if (use_fill_color) {
         gfx_dp_set_combine_mode(color_comb(0, 0, 0, G_CCMUX_SHADE), color_comb(0, 0, 0, G_ACMUX_SHADE), false, false,
-                                false, false, false, false);
+                                false, false, false, false, false, false, false);
     }
     gfx_draw_rectangle(ulx, uly, lrx, lry, gfx_rectangle_covers_screen(ulx, uly, lrx, lry),
                        gfx_rectangle_covers_width(ulx, lrx));
@@ -4624,6 +4789,9 @@ static void gfx_dp_fill_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t
         rdp.combine_color_mul_env = saved_combine_color_mul_env;
         rdp.combine_color_mul_prim = saved_combine_color_mul_prim;
         rdp.combine_two_texture_blend = saved_combine_two_texture_blend;
+        rdp.combine_two_texture_blend_uses_prim_lod = saved_combine_two_texture_blend_uses_prim_lod;
+        rdp.combine_two_texture_alpha_blend = saved_combine_two_texture_alpha_blend;
+        rdp.combine_alpha_mul_env = saved_combine_alpha_mul_env;
         rdp.combine_flame_texture_atlas = saved_combine_flame_texture_atlas;
         gfx_mark_tri_pipeline_dirty();
     }
@@ -5052,6 +5220,8 @@ static bool gfx_s2dex_bg_prepare_texture(const uint8_t* source, uint32_t width, 
     tileState->cmt = G_TX_CLAMP;
     tileState->masks = G_TX_NOMASK;
     tileState->maskt = G_TX_NOMASK;
+    tileState->shifts = G_TX_NOLOD;
+    tileState->shiftt = G_TX_NOLOD;
     tileState->line_size_bytes = rowBytes;
     tileState->uls = 0;
     tileState->ult = 0;
@@ -5109,6 +5279,9 @@ static GFX_DL_HANDLER void gfx_sp_s2dex_bg_rect(uint32_t opcode, const void* bgA
     bool savedColorMulEnv;
     bool savedColorMulPrim;
     bool savedTwoTextureBlend;
+    bool savedTwoTextureBlendUsesPrimLod;
+    bool savedTwoTextureAlphaBlend;
+    bool savedAlphaMulEnv;
     bool savedFlameTextureAtlas;
     const bool scaled = opcode == G_BG_1CYC;
 
@@ -5153,10 +5326,13 @@ static GFX_DL_HANDLER void gfx_sp_s2dex_bg_rect(uint32_t opcode, const void* bgA
     savedColorMulEnv = rdp.combine_color_mul_env;
     savedColorMulPrim = rdp.combine_color_mul_prim;
     savedTwoTextureBlend = rdp.combine_two_texture_blend;
+    savedTwoTextureBlendUsesPrimLod = rdp.combine_two_texture_blend_uses_prim_lod;
+    savedTwoTextureAlphaBlend = rdp.combine_two_texture_alpha_blend;
+    savedAlphaMulEnv = rdp.combine_alpha_mul_env;
     savedFlameTextureAtlas = rdp.combine_flame_texture_atlas;
     if ((rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_COPY) {
         gfx_dp_set_combine_mode(color_comb(0, 0, 0, G_CCMUX_TEXEL0), color_comb(0, 0, 0, G_ACMUX_TEXEL0), false,
-                                false, false, false, false, false);
+                                false, false, false, false, false, false, false, false);
     }
 
     gfx_draw_rectangle(frameX, frameY, frameX + frameW, frameY + frameH, false, false);
@@ -5165,6 +5341,9 @@ static GFX_DL_HANDLER void gfx_sp_s2dex_bg_rect(uint32_t opcode, const void* bgA
     rdp.combine_color_mul_env = savedColorMulEnv;
     rdp.combine_color_mul_prim = savedColorMulPrim;
     rdp.combine_two_texture_blend = savedTwoTextureBlend;
+    rdp.combine_two_texture_blend_uses_prim_lod = savedTwoTextureBlendUsesPrimLod;
+    rdp.combine_two_texture_alpha_blend = savedTwoTextureAlphaBlend;
+    rdp.combine_alpha_mul_env = savedAlphaMulEnv;
     rdp.combine_flame_texture_atlas = savedFlameTextureAtlas;
     gfx_mark_tri_pipeline_dirty();
 }
