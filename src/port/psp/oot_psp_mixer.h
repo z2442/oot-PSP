@@ -3,6 +3,34 @@
 
 #include "ultra64.h"
 
+#define OOT_PSP_MIXER_PROFILE_OPCODE_COUNT 32
+#define OOT_PSP_MIXER_PROFILE_OPCODE_IDLE 0xFFFFFFFFU
+
+/*
+ * Written by the Media Engine through an uncached pointer and sampled by the
+ * Allegrex diagnostic thread. Counter values are raw ME CP0 Count ticks; they
+ * are intended for relative cost comparisons rather than wall-clock timing.
+ */
+typedef struct OotPspMixerOpcodeProfile {
+    u32 sequence;
+    u32 jobs;
+    u32 commands;
+    u32 jobTicks;
+    u32 jobMaxTicks;
+    u32 lastJobTicks;
+    u32 lastJobCommands;
+    u32 lastJobSlowOpcode;
+    u32 lastJobSlowTicks;
+    u32 maxJobCommands;
+    u32 maxJobSlowOpcode;
+    u32 maxJobSlowTicks;
+    u32 currentOpcode;
+    u32 currentCommandIndex;
+    u32 opcodeCalls[OOT_PSP_MIXER_PROFILE_OPCODE_COUNT];
+    u32 opcodeTicks[OOT_PSP_MIXER_PROFILE_OPCODE_COUNT];
+    u32 opcodeMaxTicks[OOT_PSP_MIXER_PROFILE_OPCODE_COUNT];
+} OotPspMixerOpcodeProfile;
+
 void OotPspMixer_ClearBuffer(u16 dmem, s32 nbytes);
 void OotPspMixer_LoadBuffer(const void* source, u16 dmemDest, u16 nbytes);
 void OotPspMixer_SaveBuffer(u16 dmemSrc, void* dest, u16 nbytes);
@@ -31,7 +59,8 @@ void OotPspMixer_UnkCmd19(s32 arg1, s32 arg2, s32 size, s32 arg4);
 void OotPspMixer_InitVme(void);
 void OotPspMixer_ShutdownVme(void);
 void OotPspMixer_ExecuteCommandList(const Acmd* cmdList, s32 cmdCount);
-void OotPspMixer_ExecuteCommandListMe(const Acmd* cmdList, s32 cmdCount);
+void OotPspMixer_ExecuteCommandListMe(const Acmd* cmdList, s32 cmdCount,
+                                      volatile OotPspMixerOpcodeProfile* profile);
 void OotPspMixer_InvalidateStateCache(void);
 
 #if defined(OOT_PSP_MIXER_INLINE)

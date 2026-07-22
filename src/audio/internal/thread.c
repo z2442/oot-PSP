@@ -9,7 +9,7 @@
 #include "audio.h"
 #if defined(TARGET_PSP)
 #include "oot_psp_audio_backend.h"
-#if defined(OOTDEBUG)
+#if defined(OOTDEBUG) || OOT_PSP_AUDIO_DIAGNOSTICS
 #include <pspkernel.h>
 #endif
 #endif
@@ -59,7 +59,7 @@ AudioTask* AudioThread_UpdateImpl(void) {
     u32 sp4C;
     s32 sp48;
     s32 i;
-#if defined(TARGET_PSP) && defined(OOTDEBUG)
+#if defined(TARGET_PSP) && (defined(OOTDEBUG) || OOT_PSP_AUDIO_DIAGNOSTICS)
     u32 profileStartUsec;
     u32 profileAfterWaitUsec;
     u32 profileBeforeSynthUsec;
@@ -81,13 +81,15 @@ AudioTask* AudioThread_UpdateImpl(void) {
         }
     }
 
-#if defined(TARGET_PSP) && defined(OOTDEBUG)
+#if defined(TARGET_PSP) && (defined(OOTDEBUG) || OOT_PSP_AUDIO_DIAGNOSTICS)
     profileStartUsec = sceKernelGetSystemTimeLow();
 #endif
 #if defined(TARGET_PSP)
+    OotPspAudioBackend_SetDiagnosticProducerState(OOT_PSP_AUDIO_PRODUCER_STATE_WAIT_ME);
     OotPspAudioBackend_WaitForCommands();
+    OotPspAudioBackend_SetDiagnosticProducerState(OOT_PSP_AUDIO_PRODUCER_STATE_PREPARE);
 #endif
-#if defined(TARGET_PSP) && defined(OOTDEBUG)
+#if defined(TARGET_PSP) && (defined(OOTDEBUG) || OOT_PSP_AUDIO_DIAGNOSTICS)
     profileAfterWaitUsec = sceKernelGetSystemTimeLow();
 #endif
 
@@ -187,19 +189,23 @@ AudioTask* AudioThread_UpdateImpl(void) {
         }
     }
 
-#if defined(TARGET_PSP) && defined(OOTDEBUG)
+#if defined(TARGET_PSP) && (defined(OOTDEBUG) || OOT_PSP_AUDIO_DIAGNOSTICS)
     profileBeforeSynthUsec = sceKernelGetSystemTimeLow();
+#endif
+#if defined(TARGET_PSP)
+    OotPspAudioBackend_SetDiagnosticProducerState(OOT_PSP_AUDIO_PRODUCER_STATE_SYNTH);
 #endif
     gAudioCtx.curAbiCmdBuf =
         AudioSynth_Update(gAudioCtx.curAbiCmdBuf, &abiCmdCnt, curAiBuffer, gAudioCtx.aiBufLengths[index]);
-#if defined(TARGET_PSP) && defined(OOTDEBUG)
+#if defined(TARGET_PSP) && (defined(OOTDEBUG) || OOT_PSP_AUDIO_DIAGNOSTICS)
     profileAfterSynthUsec = sceKernelGetSystemTimeLow();
 #endif
 #if defined(TARGET_PSP)
+    OotPspAudioBackend_SetDiagnosticProducerState(OOT_PSP_AUDIO_PRODUCER_STATE_SUBMIT);
     OotPspAudioBackend_SubmitCommandsAndQueue(gAudioCtx.abiCmdBufs[gAudioCtx.rspTaskIndex], abiCmdCnt,
                                               curAiBuffer, gAudioCtx.aiBufLengths[index] * 4);
 #endif
-#if defined(TARGET_PSP) && defined(OOTDEBUG)
+#if defined(TARGET_PSP) && (defined(OOTDEBUG) || OOT_PSP_AUDIO_DIAGNOSTICS)
     profileEndUsec = sceKernelGetSystemTimeLow();
     OotPspAudioBackend_RecordUpdateProfile(
         profileAfterWaitUsec - profileStartUsec, profileBeforeSynthUsec - profileAfterWaitUsec,

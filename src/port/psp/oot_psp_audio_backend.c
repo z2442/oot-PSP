@@ -13,6 +13,7 @@
 #include <pspintrman.h>
 #include <pspkernel.h>
 #include <pspthreadman.h>
+#include <stdio.h>
 #include <string.h>
 
 #define OOT_PSP_AUDIO_CHANNELS 2
@@ -21,6 +22,9 @@
 #endif
 #ifndef OOT_PSP_AUDIO_HARDWARE_SRC
 #define OOT_PSP_AUDIO_HARDWARE_SRC 1
+#endif
+#ifndef OOT_PSP_AUDIO_DIAGNOSTICS
+#define OOT_PSP_AUDIO_DIAGNOSTICS 0
 #endif
 #define OOT_PSP_AUDIO_DEFAULT_SOURCE_FREQUENCY OOT_PSP_AUDIO_SOURCE_FREQUENCY
 #define OOT_PSP_AUDIO_OUTPUT_FREQUENCY 44100
@@ -70,6 +74,14 @@ static volatile s32 sOotPspAudioInitialized = false;
 #define OOT_PSP_AUDIO_DMA_COPY_MIN_BYTES 1024
 #define OOT_PSP_AUDIO_MAX_ME_WRITE_RANGES 512
 
+#if OOT_PSP_AUDIO_DIAGNOSTICS
+#define OOT_PSP_AUDIO_DIAGNOSTIC_THREAD_PRIORITY 0x40
+#define OOT_PSP_AUDIO_DIAGNOSTIC_POLL_USEC 100000
+#define OOT_PSP_AUDIO_DIAGNOSTIC_REPORT_USEC 1000000
+#define OOT_PSP_AUDIO_DIAGNOSTIC_SLOW_ME_WAIT_USEC 5000
+#define OOT_PSP_AUDIO_DIAGNOSTIC_LATE_USEC 1000
+#endif
+
 typedef enum {
     OOT_PSP_AUDIO_ME_STATE_BOOTING,
     OOT_PSP_AUDIO_ME_STATE_IDLE,
@@ -79,6 +91,17 @@ typedef enum {
     OOT_PSP_AUDIO_ME_STATE_HALTED,
     OOT_PSP_AUDIO_ME_STATE_FAULT,
 } OotPspAudioMeState;
+
+#if OOT_PSP_AUDIO_DIAGNOSTICS
+typedef enum {
+    OOT_PSP_AUDIO_OUTPUT_STATE_STOPPED,
+    OOT_PSP_AUDIO_OUTPUT_STATE_STARTING,
+    OOT_PSP_AUDIO_OUTPUT_STATE_PRIMING,
+    OOT_PSP_AUDIO_OUTPUT_STATE_PREPARE,
+    OOT_PSP_AUDIO_OUTPUT_STATE_WAIT_HARDWARE,
+    OOT_PSP_AUDIO_OUTPUT_STATE_ERROR_BACKOFF,
+} OotPspAudioOutputState;
+#endif
 
 enum {
     OOT_PSP_AUDIO_ME_SHARED_STATE,
@@ -108,6 +131,17 @@ static volatile u32 sAudioMeSharedStorage[OOT_PSP_AUDIO_ME_SHARED_COUNT] __attri
 #define sAudioMeQueueWritePos              sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_QUEUE_WRITE_POS]
 #define sAudioMeQueueResultWritePos        sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_QUEUE_RESULT_WRITE_POS]
 
+#if OOT_PSP_AUDIO_DIAGNOSTICS
+static volatile OotPspMixerOpcodeProfile sAudioMeOpcodeProfileStorage
+    __attribute__((aligned(64), section(".uncached")));
+#define sAudioMeOpcodeProfile                                                                    \
+    ((volatile OotPspMixerOpcodeProfile*)(UNCACHED_USER_MASK |                                    \
+                                           (u32)(uintptr_t)&sAudioMeOpcodeProfileStorage))
+#define OOT_PSP_AUDIO_ME_OPCODE_PROFILE sAudioMeOpcodeProfile
+#else
+#define OOT_PSP_AUDIO_ME_OPCODE_PROFILE NULL
+#endif
+
 #if (OOT_PSP_AUDIO_RING_FRAMES & (OOT_PSP_AUDIO_RING_FRAMES - 1)) != 0
 #error OOT_PSP_AUDIO_RING_FRAMES must be a power of two
 #endif
@@ -134,7 +168,30 @@ static volatile s32 sAudioMeInitialized;
 static volatile s32 sAudioMeCommandPending;
 static volatile u32 sAudioSourceFrequency = OOT_PSP_AUDIO_DEFAULT_SOURCE_FREQUENCY;
 static volatile u32 sAudioSourceChunkFrames;
-#if defined(OOTDEBUG)
+#if OOT_PSP_AUDIO_DIAGNOSTICS
+static volatile u32 sAudioDiagnosticProducerState = OOT_PSP_AUDIO_PRODUCER_STATE_STOPPED;
+static volatile u32 sAudioDiagnosticOutputState = OOT_PSP_AUDIO_OUTPUT_STATE_STOPPED;
+static volatile s32 sAudioDiagnosticMeWaiting;
+static volatile SceUID sAudioDiagnosticMeWaiterThreadId = -1;
+static volatile u32 sAudioDiagnosticMeWaitStartUsec;
+static volatile u32 sAudioDiagnosticUpdates;
+static volatile u32 sAudioDiagnosticMeSubmits;
+static volatile u32 sAudioDiagnosticCpuMixes;
+static volatile u32 sAudioDiagnosticMeFallbacks;
+static volatile u32 sAudioDiagnosticMeTimeouts;
+static volatile u32 sAudioDiagnosticMeWaits;
+static volatile u32 sAudioDiagnosticMeWaitTotalUsec;
+static volatile u32 sAudioDiagnosticMeWaitMaxUsec;
+static volatile u32 sAudioDiagnosticMeWaitLastUsec;
+static volatile u32 sAudioDiagnosticUnderruns;
+static volatile u32 sAudioDiagnosticOutputErrors;
+static volatile u32 sAudioDiagnosticIoBackoffs;
+static volatile u32 sAudioDiagnosticRingFull;
+static volatile u32 sAudioDiagnosticCatchups;
+static volatile u32 sAudioDiagnosticProducerLate;
+static volatile u32 sAudioDiagnosticProducerLateMaxUsec;
+#endif
+#if defined(OOTDEBUG) || OOT_PSP_AUDIO_DIAGNOSTICS
 static volatile u32 sAudioProfileUpdates;
 static volatile u32 sAudioProfileWaitUsec;
 static volatile u32 sAudioProfilePrepareUsec;
@@ -144,6 +201,8 @@ static volatile u32 sAudioProfileSequenceUsec;
 static volatile u32 sAudioProfileCommandBuildUsec;
 static volatile u32 sAudioProfileAbiCommands;
 static volatile u32 sAudioProfileSampleDmas;
+#endif
+#if defined(OOTDEBUG)
 static volatile u32 sAudioProfileMeSubmits;
 static volatile u32 sAudioProfileCpuMixes;
 static volatile u32 sAudioProfileMeFailures;
@@ -171,6 +230,10 @@ static s32 sAudioMeWriteRangeOverflow;
 
 static SceUID sAudioOutputThreadId = -1;
 static SceUID sAudioProducerThreadId = -1;
+#if OOT_PSP_AUDIO_DIAGNOSTICS
+static SceUID sAudioDiagnosticThreadId = -1;
+static volatile s32 sAudioDiagnosticThreadRunning;
+#endif
 static SceUID sAudioMeLockSema = -1;
 static SceUID sAudioMeCompletionSema = -1;
 static s32 sAudioMeCompletionInterruptReady;
@@ -187,6 +250,14 @@ static void OotPspAudioBackend_MeWritebackOutputs(const Acmd* cmdList, s32 cmdCo
 static void OotPspAudioBackend_MeQueueBuffer(s32 invalidateSource);
 static void OotPspAudioBackend_QueueCpuCopy(const s16* samples, u32 frames, u32 writePos);
 static u32 OotPspAudioBackend_FreeFrames(void);
+
+#if OOT_PSP_AUDIO_DIAGNOSTICS
+#define AUDIO_DIAG_SET(variable, value) ((variable) = (value))
+#define AUDIO_DIAG_INCREMENT(variable) ((variable)++)
+#else
+#define AUDIO_DIAG_SET(variable, value) ((void)0)
+#define AUDIO_DIAG_INCREMENT(variable) ((void)0)
+#endif
 
 __attribute__((noinline, aligned(4))) void meLibOnException(void) {
     sAudioMeState = OOT_PSP_AUDIO_ME_STATE_FAULT;
@@ -236,7 +307,7 @@ __attribute__((noinline, aligned(4))) void meLibOnProcess(void) {
             sAudioMeProgress = 1;
             OotPspAudioBackend_MeInvalidateInputs(cmdList, cmdCount, privateOutput, privateOutputBytes);
             sAudioMeProgress = 2;
-            OotPspMixer_ExecuteCommandListMe(cmdList, cmdCount);
+            OotPspMixer_ExecuteCommandListMe(cmdList, cmdCount, OOT_PSP_AUDIO_ME_OPCODE_PROFILE);
             if (sAudioMeQueueFrames != 0) {
                 sAudioMeProgress = 3;
                 /* A_SAVEBUFF just produced this PCM in the ME cache. Copy it
@@ -287,6 +358,12 @@ s32 OotPspAudioBackend_BootMe(void) {
     sAudioMeQueueFrames = 0;
     sAudioMeQueueWritePos = 0;
     sAudioMeQueueResultWritePos = 0;
+#if OOT_PSP_AUDIO_DIAGNOSTICS
+    memset((void*)sAudioMeOpcodeProfile, 0, sizeof(*sAudioMeOpcodeProfile));
+    sAudioMeOpcodeProfile->currentOpcode = OOT_PSP_MIXER_PROFILE_OPCODE_IDLE;
+    sAudioMeOpcodeProfile->lastJobSlowOpcode = OOT_PSP_MIXER_PROFILE_OPCODE_IDLE;
+    sAudioMeOpcodeProfile->maxJobSlowOpcode = OOT_PSP_MIXER_PROFILE_OPCODE_IDLE;
+#endif
     sAudioMeCompletionInterruptEnabled = false;
     sAudioMeState = OOT_PSP_AUDIO_ME_STATE_BOOTING;
     meLibSync();
@@ -330,6 +407,7 @@ static s32 OotPspAudioBackend_InitMe(void) {
         if ((sceKernelGetSystemTimeLow() - readyStart) >= OOT_PSP_AUDIO_ME_TIMEOUT_US) {
             sAudioMeState = OOT_PSP_AUDIO_ME_STATE_STOP;
             meLibSync();
+            AUDIO_DIAG_INCREMENT(sAudioDiagnosticMeTimeouts);
             return -1;
         }
         sceKernelDelayThread(OOT_PSP_AUDIO_ME_POLL_USEC);
@@ -744,6 +822,8 @@ static void OotPspAudioBackend_PublishPendingMeQueue(void) {
 static void OotPspAudioBackend_FallbackFromMe(const Acmd* cmdList, s32 cmdCount, const s16* queueSrc,
                                               u32 queueFrames, u32 queueWritePos) {
     sAudioMeInitialized = false;
+    AUDIO_DIAG_INCREMENT(sAudioDiagnosticCpuMixes);
+    AUDIO_DIAG_INCREMENT(sAudioDiagnosticMeFallbacks);
 #if defined(OOTDEBUG)
     sAudioProfileMeFailures++;
     sAudioProfileCpuMixes++;
@@ -848,10 +928,44 @@ static void OotPspAudioBackend_UnlockMe(void) {
     }
 }
 
+#if OOT_PSP_AUDIO_DIAGNOSTICS
+static void OotPspAudioBackend_EndDiagnosticMeWait(u32 startUsec, s32 waited) {
+    u32 elapsed;
+
+    if (!waited) {
+        return;
+    }
+
+    elapsed = sceKernelGetSystemTimeLow() - startUsec;
+    sAudioDiagnosticMeWaiting = false;
+    sAudioDiagnosticMeWaitLastUsec = elapsed;
+    sAudioDiagnosticMeWaitTotalUsec += elapsed;
+    sAudioDiagnosticMeWaits++;
+    if (elapsed > sAudioDiagnosticMeWaitMaxUsec) {
+        sAudioDiagnosticMeWaitMaxUsec = elapsed;
+    }
+}
+#endif
+
 static void OotPspAudioBackend_WaitForCommandsLocked(void) {
+#if OOT_PSP_AUDIO_DIAGNOSTICS
+    u32 diagnosticWaitStart = 0;
+    s32 diagnosticWaited = false;
+#endif
+
     if (!sAudioMeCommandPending) {
         return;
     }
+
+#if OOT_PSP_AUDIO_DIAGNOSTICS
+    if (sAudioMeState == OOT_PSP_AUDIO_ME_STATE_RUN) {
+        diagnosticWaitStart = sceKernelGetSystemTimeLow();
+        diagnosticWaited = true;
+        sAudioDiagnosticMeWaitStartUsec = diagnosticWaitStart;
+        sAudioDiagnosticMeWaiterThreadId = sceKernelGetThreadId();
+        sAudioDiagnosticMeWaiting = true;
+    }
+#endif
 
     while (sAudioMeState == OOT_PSP_AUDIO_ME_STATE_RUN) {
         if (sAudioMeCompletionInterruptReady) {
@@ -876,6 +990,7 @@ static void OotPspAudioBackend_WaitForCommandsLocked(void) {
     if (sAudioMeState == OOT_PSP_AUDIO_ME_STATE_RUN) {
         u32 interruptTime;
 
+        AUDIO_DIAG_INCREMENT(sAudioDiagnosticMeTimeouts);
         meLibEmitSoftwareInterrupt();
         interruptTime = sceKernelGetSystemTimeLow();
         while ((sAudioMeState == OOT_PSP_AUDIO_ME_STATE_RUN) &&
@@ -895,6 +1010,9 @@ static void OotPspAudioBackend_WaitForCommandsLocked(void) {
         }
 
         if (sAudioMeState == OOT_PSP_AUDIO_ME_STATE_RUN) {
+#if OOT_PSP_AUDIO_DIAGNOSTICS
+            OotPspAudioBackend_EndDiagnosticMeWait(diagnosticWaitStart, diagnosticWaited);
+#endif
             OotPspAudioBackend_FallbackFromMe(sAudioMePendingCmdList, sAudioMePendingCmdCount,
                                               sAudioMePendingQueueSrc, sAudioMePendingQueueFrames,
                                               sAudioMePendingQueueWritePos);
@@ -902,6 +1020,10 @@ static void OotPspAudioBackend_WaitForCommandsLocked(void) {
             return;
         }
     }
+
+#if OOT_PSP_AUDIO_DIAGNOSTICS
+    OotPspAudioBackend_EndDiagnosticMeWait(diagnosticWaitStart, diagnosticWaited);
+#endif
 
     if (sAudioMeState != OOT_PSP_AUDIO_ME_STATE_IDLE) {
         OotPspAudioBackend_FallbackFromMe(sAudioMePendingCmdList, sAudioMePendingCmdCount,
@@ -949,6 +1071,7 @@ static void OotPspAudioBackend_SubmitCommandsInternal(const Acmd* cmdList, s32 c
     }
 
     if (!sAudioMeInitialized) {
+        AUDIO_DIAG_INCREMENT(sAudioDiagnosticCpuMixes);
 #if defined(OOTDEBUG)
         sAudioProfileCpuMixes++;
 #endif
@@ -990,6 +1113,7 @@ static void OotPspAudioBackend_SubmitCommandsInternal(const Acmd* cmdList, s32 c
     sAudioMeCommandPending = true;
     meLibSync();
     sAudioMeState = OOT_PSP_AUDIO_ME_STATE_RUN;
+    AUDIO_DIAG_INCREMENT(sAudioDiagnosticMeSubmits);
 #if defined(OOTDEBUG)
     sAudioProfileMeSubmits++;
 #endif
@@ -1164,16 +1288,22 @@ static s32 OotPspAudioBackend_CanRunUpdate(void) {
 
 static s32 OotPspAudioBackend_TryRunUpdate(void) {
     if (!OotPspAudioBackend_CanRunUpdate()) {
+        AUDIO_DIAG_SET(sAudioDiagnosticProducerState, OOT_PSP_AUDIO_PRODUCER_STATE_RING_FULL);
+        AUDIO_DIAG_INCREMENT(sAudioDiagnosticRingFull);
         return false;
     }
 
     if ((OotPspAudioBackend_TotalBufferedFrames() >= OotPspAudioBackend_IoBackoffFrames()) &&
         OotPsp_AssetReadHasForegroundPressure()) {
+        AUDIO_DIAG_SET(sAudioDiagnosticProducerState, OOT_PSP_AUDIO_PRODUCER_STATE_IO_BACKOFF);
+        AUDIO_DIAG_INCREMENT(sAudioDiagnosticIoBackoffs);
         sceKernelDelayThread(OOT_PSP_AUDIO_PRODUCER_IO_BACKOFF_USEC);
         return false;
     }
 
+    AUDIO_DIAG_SET(sAudioDiagnosticProducerState, OOT_PSP_AUDIO_PRODUCER_STATE_UPDATE);
     AudioThread_Update();
+    AUDIO_DIAG_INCREMENT(sAudioDiagnosticUpdates);
     sceKernelRotateThreadReadyQueue(OOT_PSP_AUDIO_PRODUCER_THREAD_PRIORITY);
     return true;
 }
@@ -1336,6 +1466,7 @@ static u32 OotPspAudioBackend_RenderOutputChunkCpu(u32 buffered, s16* mix) {
     sAudioLastRight = lastRight;
     if (flags & OOT_PSP_AUDIO_RENDER_FLAG_UNDERRUN) {
         sAudioPlaybackPrimed = false;
+        AUDIO_DIAG_INCREMENT(sAudioDiagnosticUnderruns);
     }
 
     return sourceFrames;
@@ -1402,6 +1533,8 @@ static void OotPspAudioBackend_RunHardwareSrcOutput(void) {
     u32 heldFrames = 0;
     u32 mixIndex = 0;
 
+    AUDIO_DIAG_SET(sAudioDiagnosticOutputState, OOT_PSP_AUDIO_OUTPUT_STATE_STARTING);
+
     /*
      * A direct ring buffer remains owned by the audio driver until the next
      * blocking submission returns. Keeping heldFrames behind sAudioReadPos
@@ -1419,12 +1552,17 @@ static void OotPspAudioBackend_RunHardwareSrcOutput(void) {
         s32 usedMix = true;
         s32 ret;
 
+        AUDIO_DIAG_SET(sAudioDiagnosticOutputState, OOT_PSP_AUDIO_OUTPUT_STATE_PREPARE);
         if (!sAudioPlaybackPrimed && (available >= OotPspAudioBackend_TargetBufferFrames())) {
             sAudioPlaybackPrimed = true;
         }
 
         if (!sAudioPlaybackPrimed || (available < OotPspAudioBackend_SourceChunkFrames())) {
+            if (sAudioPlaybackPrimed) {
+                AUDIO_DIAG_INCREMENT(sAudioDiagnosticUnderruns);
+            }
             sAudioPlaybackPrimed = false;
+            AUDIO_DIAG_SET(sAudioDiagnosticOutputState, OOT_PSP_AUDIO_OUTPUT_STATE_PRIMING);
             OotPspAudioBackend_PrepareSilenceFrames(mix, OotPspAudioBackend_SourceChunkFrames());
         } else {
             sourceFrames = OotPspAudioBackend_SourceChunkFrames();
@@ -1440,6 +1578,7 @@ static void OotPspAudioBackend_RunHardwareSrcOutput(void) {
             }
         }
 
+        AUDIO_DIAG_SET(sAudioDiagnosticOutputState, OOT_PSP_AUDIO_OUTPUT_STATE_WAIT_HARDWARE);
         ret = OotPspAudioBackend_OutputHardwareSrc(output, OotPspAudioBackend_SourceChunkFrames(), usedMix);
         if (ret >= 0) {
             readPos = (readPos + heldFrames) & OOT_PSP_AUDIO_RING_MASK;
@@ -1454,16 +1593,21 @@ static void OotPspAudioBackend_RunHardwareSrcOutput(void) {
             }
             sAudioReadPos = readPos;
         } else {
+            AUDIO_DIAG_INCREMENT(sAudioDiagnosticOutputErrors);
+            AUDIO_DIAG_SET(sAudioDiagnosticOutputState, OOT_PSP_AUDIO_OUTPUT_STATE_ERROR_BACKOFF);
             sAudioOutputFrames = 0;
             sAudioPlaybackPrimed = false;
             sceKernelDelayThread(OOT_PSP_AUDIO_OUTPUT_ERROR_RETRY_USEC);
         }
     }
+
+    AUDIO_DIAG_SET(sAudioDiagnosticOutputState, OOT_PSP_AUDIO_OUTPUT_STATE_STOPPED);
 }
 
 static int OotPspAudioBackend_OutputThread(UNUSED SceSize args, UNUSED void* argp) {
     u32 mixIndex = 0;
 
+    AUDIO_DIAG_SET(sAudioDiagnosticOutputState, OOT_PSP_AUDIO_OUTPUT_STATE_STARTING);
     if (sAudioHardwareSrc) {
         OotPspAudioBackend_RunHardwareSrcOutput();
         goto exit;
@@ -1475,6 +1619,7 @@ static int OotPspAudioBackend_OutputThread(UNUSED SceSize args, UNUSED void* arg
         s16* mix = sAudioMix[mixIndex];
         s32 ret;
 
+        AUDIO_DIAG_SET(sAudioDiagnosticOutputState, OOT_PSP_AUDIO_OUTPUT_STATE_PREPARE);
         buffered = OotPspAudioBackend_BufferedFrames();
 
         if (!sAudioPlaybackPrimed && (buffered >= OotPspAudioBackend_TargetBufferFrames())) {
@@ -1482,7 +1627,11 @@ static int OotPspAudioBackend_OutputThread(UNUSED SceSize args, UNUSED void* arg
         }
 
         if (!sAudioPlaybackPrimed || (buffered < OotPspAudioBackend_SourceChunkFrames())) {
+            if (sAudioPlaybackPrimed) {
+                AUDIO_DIAG_INCREMENT(sAudioDiagnosticUnderruns);
+            }
             sAudioPlaybackPrimed = false;
+            AUDIO_DIAG_SET(sAudioDiagnosticOutputState, OOT_PSP_AUDIO_OUTPUT_STATE_PRIMING);
             OotPspAudioBackend_PrepareSilence(mix);
             sourceFrames = 0;
         } else {
@@ -1496,12 +1645,15 @@ static int OotPspAudioBackend_OutputThread(UNUSED SceSize args, UNUSED void* arg
         /* The driver blocks this thread until the current hardware buffer can
          * be replaced. The other mix buffer remains untouched while playing. */
         sAudioPendingOutputFrames = sourceFrames;
+        AUDIO_DIAG_SET(sAudioDiagnosticOutputState, OOT_PSP_AUDIO_OUTPUT_STATE_WAIT_HARDWARE);
         ret = OotPspAudioBackend_OutputMix(mix);
         if (ret >= 0) {
             sAudioOutputFrames = sourceFrames;
             sAudioPendingOutputFrames = 0;
             mixIndex ^= 1;
         } else {
+            AUDIO_DIAG_INCREMENT(sAudioDiagnosticOutputErrors);
+            AUDIO_DIAG_SET(sAudioDiagnosticOutputState, OOT_PSP_AUDIO_OUTPUT_STATE_ERROR_BACKOFF);
             sAudioOutputFrames = 0;
             sAudioPendingOutputFrames = 0;
             sAudioPlaybackPrimed = false;
@@ -1510,6 +1662,7 @@ static int OotPspAudioBackend_OutputThread(UNUSED SceSize args, UNUSED void* arg
     }
 
 exit:
+    AUDIO_DIAG_SET(sAudioDiagnosticOutputState, OOT_PSP_AUDIO_OUTPUT_STATE_STOPPED);
     sAudioOutputThreadRunning = false;
     sAudioOutputThreadId = -1;
 
@@ -1520,6 +1673,7 @@ exit:
 static int OotPspAudioBackend_ProducerThread(UNUSED SceSize args, UNUSED void* argp) {
     u32 nextUpdateUsec;
 
+    AUDIO_DIAG_SET(sAudioDiagnosticProducerState, OOT_PSP_AUDIO_PRODUCER_STATE_PRIMING);
     OotPspAudioBackend_RunUpdates(OOT_PSP_AUDIO_MAX_UPDATES_PRIME);
     nextUpdateUsec = sceKernelGetSystemTimeLow();
 
@@ -1532,9 +1686,22 @@ static int OotPspAudioBackend_ProducerThread(UNUSED SceSize args, UNUSED void* a
         now = sceKernelGetSystemTimeLow();
         delayUsec = (s32)(nextUpdateUsec - now);
         if (delayUsec > 0) {
+            AUDIO_DIAG_SET(sAudioDiagnosticProducerState, OOT_PSP_AUDIO_PRODUCER_STATE_TIMER_WAIT);
             sceKernelDelayThread(delayUsec);
-        } else if (delayUsec < -(s32)OOT_PSP_AUDIO_UPDATE_USEC) {
-            nextUpdateUsec = now;
+        } else if (delayUsec < 0) {
+#if OOT_PSP_AUDIO_DIAGNOSTICS
+            u32 lateUsec = (u32)-delayUsec;
+
+            if (lateUsec >= OOT_PSP_AUDIO_DIAGNOSTIC_LATE_USEC) {
+                sAudioDiagnosticProducerLate++;
+                if (lateUsec > sAudioDiagnosticProducerLateMaxUsec) {
+                    sAudioDiagnosticProducerLateMaxUsec = lateUsec;
+                }
+            }
+#endif
+            if (delayUsec < -(s32)OOT_PSP_AUDIO_UPDATE_USEC) {
+                nextUpdateUsec = now;
+            }
         }
 
         /* Keep generation at the game thread's priority. Raising it under
@@ -1542,12 +1709,16 @@ static int OotPspAudioBackend_ProducerThread(UNUSED SceSize args, UNUSED void* a
         isUrgent = OotPspAudioBackend_TotalBufferedFrames() < OotPspAudioBackend_UrgentBufferFrames();
 
         if (isUrgent) {
+            AUDIO_DIAG_SET(sAudioDiagnosticProducerState, OOT_PSP_AUDIO_PRODUCER_STATE_CATCHUP);
+            AUDIO_DIAG_INCREMENT(sAudioDiagnosticCatchups);
             OotPspAudioBackend_RunUpdates(OOT_PSP_AUDIO_MAX_UPDATES_CATCHUP);
         } else {
+            AUDIO_DIAG_SET(sAudioDiagnosticProducerState, OOT_PSP_AUDIO_PRODUCER_STATE_UPDATE);
             OotPspAudioBackend_TryRunUpdate();
         }
     }
 
+    AUDIO_DIAG_SET(sAudioDiagnosticProducerState, OOT_PSP_AUDIO_PRODUCER_STATE_STOPPED);
     sAudioProducerThreadRunning = false;
     sAudioProducerThreadId = -1;
 
@@ -1628,6 +1799,612 @@ s32 OotPspAudioBackend_Init(void) {
     return 0;
 }
 
+#if OOT_PSP_AUDIO_DIAGNOSTICS
+typedef struct {
+    s32 valid;
+    s32 status;
+    s32 priority;
+    s32 waitType;
+    u64 runClocks;
+} OotPspAudioDiagnosticThreadSample;
+
+typedef struct {
+    u32 updates;
+    u32 profileUpdates;
+    u32 profileWaitUsec;
+    u32 profilePrepareUsec;
+    u32 profileSynthUsec;
+    u32 profileSubmitUsec;
+    u32 profileSequenceUsec;
+    u32 profileCommandBuildUsec;
+    u32 profileAbiCommands;
+    u32 profileSampleDmas;
+    u32 meSubmits;
+    u32 cpuMixes;
+    u32 meFallbacks;
+    u32 meTimeouts;
+    u32 meWaits;
+    u32 meWaitTotalUsec;
+    u32 meWaitMaxUsec;
+    u32 meWaitLastUsec;
+    u32 underruns;
+    u32 outputErrors;
+    u32 ioBackoffs;
+    u32 ringFull;
+    u32 catchups;
+    u32 producerLate;
+    u32 producerLateMaxUsec;
+} OotPspAudioDiagnosticCounters;
+
+typedef struct {
+    u32 opcode;
+    u32 ticks;
+    u32 calls;
+    u32 maxTicks;
+} OotPspAudioOpcodeRank;
+
+static const char* OotPspAudioBackend_OpcodeName(u32 opcode) {
+    switch (opcode) {
+        case A_SPNOOP:
+            return "SPNOOP";
+        case A_ADPCM:
+            return "ADPCM";
+        case A_CLEARBUFF:
+            return "CLEAR";
+        case A_UNK3:
+            return "UNK3";
+        case A_ADDMIXER:
+            return "ADDMIX";
+        case A_RESAMPLE:
+            return "RESAMPLE";
+        case A_RESAMPLE_ZOH:
+            return "RESAMP_ZOH";
+        case A_FILTER:
+            return "FILTER";
+        case A_SETBUFF:
+            return "SETBUFF";
+        case A_DUPLICATE:
+            return "DUPLICATE";
+        case A_DMEMMOVE:
+            return "DMEMMOVE";
+        case A_LOADADPCM:
+            return "LOADADPCM";
+        case A_MIXER:
+            return "MIXER";
+        case A_INTERLEAVE:
+            return "INTERLEAVE";
+        case A_HILOGAIN:
+            return "HILOGAIN";
+        case A_SETLOOP:
+            return "SETLOOP";
+        case OOT_PSP_A_COPYBLOCKS:
+            return "COPYBLOCKS";
+        case A_INTERL:
+            return "INTERL";
+        case A_ENVSETUP1:
+            return "ENVSETUP1";
+        case A_ENVMIXER:
+            return "ENVMIXER";
+        case A_LOADBUFF:
+            return "LOADBUFF";
+        case A_SAVEBUFF:
+            return "SAVEBUFF";
+        case A_ENVSETUP2:
+            return "ENVSETUP2";
+        case A_S8DEC:
+            return "S8DEC";
+        case OOT_PSP_A_REVERB_DOWNSAMPLE:
+            return "RV_DOWN";
+        case A_UNK19:
+            return "UNK19";
+        case OOT_PSP_A_REVERB_SAVE:
+            return "RV_SAVE";
+        case OOT_PSP_A_REVERB_LOAD:
+            return "RV_LOAD";
+        case OOT_PSP_A_LOAD_SAMPLE_CACHED:
+            return "LD_SAMPLE";
+        case OOT_PSP_A_LOAD_ADPCM_CACHED:
+            return "LD_BOOK";
+        case OOT_PSP_MIXER_PROFILE_OPCODE_IDLE:
+            return "IDLE";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+static s32 OotPspAudioBackend_SnapshotMeOpcodeProfile(OotPspMixerOpcodeProfile* snapshot) {
+    volatile OotPspMixerOpcodeProfile* source = sAudioMeOpcodeProfile;
+    s32 attempt;
+
+    for (attempt = 0; attempt < 8; attempt++) {
+        u32 sequenceBefore = source->sequence;
+        u32 sequenceAfter;
+        s32 opcode;
+
+        if (sequenceBefore & 1) {
+            continue;
+        }
+
+        __asm__ volatile("sync" ::: "memory");
+        snapshot->sequence = sequenceBefore;
+        snapshot->jobs = source->jobs;
+        snapshot->commands = source->commands;
+        snapshot->jobTicks = source->jobTicks;
+        snapshot->jobMaxTicks = source->jobMaxTicks;
+        snapshot->lastJobTicks = source->lastJobTicks;
+        snapshot->lastJobCommands = source->lastJobCommands;
+        snapshot->lastJobSlowOpcode = source->lastJobSlowOpcode;
+        snapshot->lastJobSlowTicks = source->lastJobSlowTicks;
+        snapshot->maxJobCommands = source->maxJobCommands;
+        snapshot->maxJobSlowOpcode = source->maxJobSlowOpcode;
+        snapshot->maxJobSlowTicks = source->maxJobSlowTicks;
+        snapshot->currentOpcode = source->currentOpcode;
+        snapshot->currentCommandIndex = source->currentCommandIndex;
+        for (opcode = 0; opcode < OOT_PSP_MIXER_PROFILE_OPCODE_COUNT; opcode++) {
+            snapshot->opcodeCalls[opcode] = source->opcodeCalls[opcode];
+            snapshot->opcodeTicks[opcode] = source->opcodeTicks[opcode];
+            snapshot->opcodeMaxTicks[opcode] = source->opcodeMaxTicks[opcode];
+        }
+        __asm__ volatile("sync" ::: "memory");
+        sequenceAfter = source->sequence;
+        if ((sequenceBefore == sequenceAfter) && !(sequenceAfter & 1)) {
+            snapshot->sequence = sequenceAfter;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void OotPspAudioBackend_InsertOpcodeRank(OotPspAudioOpcodeRank ranks[3], u32 opcode,
+                                                u32 ticks, u32 calls, u32 maxTicks) {
+    s32 rank;
+
+    if ((ticks == 0) || (calls == 0)) {
+        return;
+    }
+
+    for (rank = 0; rank < 3; rank++) {
+        if (ticks > ranks[rank].ticks) {
+            s32 move;
+
+            for (move = 2; move > rank; move--) {
+                ranks[move] = ranks[move - 1];
+            }
+            ranks[rank].opcode = opcode;
+            ranks[rank].ticks = ticks;
+            ranks[rank].calls = calls;
+            ranks[rank].maxTicks = maxTicks;
+            return;
+        }
+    }
+}
+
+static u32 OotPspAudioBackend_OpcodePercentTenths(u32 ticks, u64 totalTicks) {
+    return totalTicks != 0 ? (u32)(((u64)ticks * 1000) / totalTicks) : 0;
+}
+
+static void OotPspAudioBackend_PrintMeOpcodeProfile(const OotPspMixerOpcodeProfile* current,
+                                                    const OotPspMixerOpcodeProfile* previous) {
+    OotPspAudioOpcodeRank ranks[3];
+    u32 jobs = current->jobs - previous->jobs;
+    u32 commands = current->commands - previous->commands;
+    u32 jobTicks = current->jobTicks - previous->jobTicks;
+    u64 totalOpcodeTicks = 0;
+    s32 opcode;
+    s32 rank;
+
+    memset(ranks, 0, sizeof(ranks));
+    for (rank = 0; rank < 3; rank++) {
+        ranks[rank].opcode = OOT_PSP_MIXER_PROFILE_OPCODE_IDLE;
+    }
+
+    for (opcode = 0; opcode < OOT_PSP_MIXER_PROFILE_OPCODE_COUNT; opcode++) {
+        u32 ticks = current->opcodeTicks[opcode] - previous->opcodeTicks[opcode];
+        u32 calls = current->opcodeCalls[opcode] - previous->opcodeCalls[opcode];
+
+        totalOpcodeTicks += ticks;
+        OotPspAudioBackend_InsertOpcodeRank(ranks, opcode, ticks, calls,
+                                            current->opcodeMaxTicks[opcode]);
+    }
+
+    printf("[audio] me-job 1s n=%lu cmd=%lu avg=%lutick last=%lutick/%lucmd "
+           "max_all=%lutick/%lucmd last_hot=%s/%lutick max_hot=%s/%lutick\n",
+           (unsigned long)jobs, (unsigned long)commands,
+           (unsigned long)(jobs != 0 ? jobTicks / jobs : 0),
+           (unsigned long)current->lastJobTicks, (unsigned long)current->lastJobCommands,
+           (unsigned long)current->jobMaxTicks, (unsigned long)current->maxJobCommands,
+           OotPspAudioBackend_OpcodeName(current->lastJobSlowOpcode),
+           (unsigned long)current->lastJobSlowTicks,
+           OotPspAudioBackend_OpcodeName(current->maxJobSlowOpcode),
+           (unsigned long)current->maxJobSlowTicks);
+    printf("[audio] me-op 1s total=%llutick top=%s %lu.%lu%% n=%lu avg=%lu max_all=%lu | "
+           "%s %lu.%lu%% n=%lu avg=%lu max_all=%lu | %s %lu.%lu%% n=%lu avg=%lu max_all=%lu\n",
+           (unsigned long long)totalOpcodeTicks,
+           OotPspAudioBackend_OpcodeName(ranks[0].opcode),
+           (unsigned long)(OotPspAudioBackend_OpcodePercentTenths(ranks[0].ticks, totalOpcodeTicks) / 10),
+           (unsigned long)(OotPspAudioBackend_OpcodePercentTenths(ranks[0].ticks, totalOpcodeTicks) % 10),
+           (unsigned long)ranks[0].calls,
+           (unsigned long)(ranks[0].calls != 0 ? ranks[0].ticks / ranks[0].calls : 0),
+           (unsigned long)ranks[0].maxTicks,
+           OotPspAudioBackend_OpcodeName(ranks[1].opcode),
+           (unsigned long)(OotPspAudioBackend_OpcodePercentTenths(ranks[1].ticks, totalOpcodeTicks) / 10),
+           (unsigned long)(OotPspAudioBackend_OpcodePercentTenths(ranks[1].ticks, totalOpcodeTicks) % 10),
+           (unsigned long)ranks[1].calls,
+           (unsigned long)(ranks[1].calls != 0 ? ranks[1].ticks / ranks[1].calls : 0),
+           (unsigned long)ranks[1].maxTicks,
+           OotPspAudioBackend_OpcodeName(ranks[2].opcode),
+           (unsigned long)(OotPspAudioBackend_OpcodePercentTenths(ranks[2].ticks, totalOpcodeTicks) / 10),
+           (unsigned long)(OotPspAudioBackend_OpcodePercentTenths(ranks[2].ticks, totalOpcodeTicks) % 10),
+           (unsigned long)ranks[2].calls,
+           (unsigned long)(ranks[2].calls != 0 ? ranks[2].ticks / ranks[2].calls : 0),
+           (unsigned long)ranks[2].maxTicks);
+}
+
+static const char* OotPspAudioBackend_MeStateName(u32 state) {
+    switch (state) {
+        case OOT_PSP_AUDIO_ME_STATE_BOOTING:
+            return "BOOT";
+        case OOT_PSP_AUDIO_ME_STATE_IDLE:
+            return "IDLE";
+        case OOT_PSP_AUDIO_ME_STATE_RUN:
+            return "RUN";
+        case OOT_PSP_AUDIO_ME_STATE_QUEUE_BUFFER:
+            return "QUEUE";
+        case OOT_PSP_AUDIO_ME_STATE_STOP:
+            return "STOP";
+        case OOT_PSP_AUDIO_ME_STATE_HALTED:
+            return "HALT";
+        case OOT_PSP_AUDIO_ME_STATE_FAULT:
+            return "FAULT";
+        default:
+            return "?";
+    }
+}
+
+static const char* OotPspAudioBackend_ProducerStateName(u32 state) {
+    switch (state) {
+        case OOT_PSP_AUDIO_PRODUCER_STATE_STOPPED:
+            return "STOP";
+        case OOT_PSP_AUDIO_PRODUCER_STATE_STARTING:
+            return "START";
+        case OOT_PSP_AUDIO_PRODUCER_STATE_PRIMING:
+            return "PRIME";
+        case OOT_PSP_AUDIO_PRODUCER_STATE_TIMER_WAIT:
+            return "TIMER";
+        case OOT_PSP_AUDIO_PRODUCER_STATE_UPDATE:
+            return "UPDATE";
+        case OOT_PSP_AUDIO_PRODUCER_STATE_CATCHUP:
+            return "CATCHUP";
+        case OOT_PSP_AUDIO_PRODUCER_STATE_IO_BACKOFF:
+            return "IO_BACKOFF";
+        case OOT_PSP_AUDIO_PRODUCER_STATE_RING_FULL:
+            return "RING_FULL";
+        case OOT_PSP_AUDIO_PRODUCER_STATE_WAIT_ME:
+            return "WAIT_ME";
+        case OOT_PSP_AUDIO_PRODUCER_STATE_PREPARE:
+            return "PREPARE";
+        case OOT_PSP_AUDIO_PRODUCER_STATE_SYNTH:
+            return "SYNTH";
+        case OOT_PSP_AUDIO_PRODUCER_STATE_SUBMIT:
+            return "SUBMIT";
+        default:
+            return "?";
+    }
+}
+
+void OotPspAudioBackend_SetDiagnosticProducerState(OotPspAudioProducerState state) {
+    sAudioDiagnosticProducerState = state;
+}
+
+static const char* OotPspAudioBackend_OutputStateName(u32 state) {
+    switch (state) {
+        case OOT_PSP_AUDIO_OUTPUT_STATE_STOPPED:
+            return "STOP";
+        case OOT_PSP_AUDIO_OUTPUT_STATE_STARTING:
+            return "START";
+        case OOT_PSP_AUDIO_OUTPUT_STATE_PRIMING:
+            return "PRIME";
+        case OOT_PSP_AUDIO_OUTPUT_STATE_PREPARE:
+            return "PREP";
+        case OOT_PSP_AUDIO_OUTPUT_STATE_WAIT_HARDWARE:
+            return "WAIT_HW";
+        case OOT_PSP_AUDIO_OUTPUT_STATE_ERROR_BACKOFF:
+            return "ERROR";
+        default:
+            return "?";
+    }
+}
+
+static const char* OotPspAudioBackend_KernelThreadStateName(s32 status) {
+    if (status & PSP_THREAD_RUNNING) {
+        return "RUN";
+    }
+    if (status & PSP_THREAD_READY) {
+        return "READY";
+    }
+    if (status & PSP_THREAD_WAITING) {
+        return "WAIT";
+    }
+    if (status & PSP_THREAD_SUSPEND) {
+        return "SUSP";
+    }
+    if (status & PSP_THREAD_STOPPED) {
+        return "STOP";
+    }
+    if (status & PSP_THREAD_KILLED) {
+        return "KILLED";
+    }
+    return "?";
+}
+
+static void OotPspAudioBackend_SampleThread(SceUID threadId, OotPspAudioDiagnosticThreadSample* sample) {
+    SceKernelThreadRunStatus status;
+
+    memset(sample, 0, sizeof(*sample));
+    sample->waitType = -1;
+    if (!OotPspAudioBackend_IsValidUid(threadId)) {
+        return;
+    }
+
+    memset(&status, 0, sizeof(status));
+    status.size = sizeof(status);
+    if (sceKernelReferThreadRunStatus(threadId, &status) < 0) {
+        return;
+    }
+
+    sample->valid = true;
+    sample->status = status.status;
+    sample->priority = status.currentPriority;
+    sample->waitType = status.waitType;
+    sample->runClocks = ((u64)status.runClocks.hi << 32) | status.runClocks.low;
+}
+
+static void OotPspAudioBackend_SnapshotDiagnosticCounters(OotPspAudioDiagnosticCounters* counters) {
+    counters->updates = sAudioDiagnosticUpdates;
+    counters->profileUpdates = sAudioProfileUpdates;
+    counters->profileWaitUsec = sAudioProfileWaitUsec;
+    counters->profilePrepareUsec = sAudioProfilePrepareUsec;
+    counters->profileSynthUsec = sAudioProfileSynthUsec;
+    counters->profileSubmitUsec = sAudioProfileSubmitUsec;
+    counters->profileSequenceUsec = sAudioProfileSequenceUsec;
+    counters->profileCommandBuildUsec = sAudioProfileCommandBuildUsec;
+    counters->profileAbiCommands = sAudioProfileAbiCommands;
+    counters->profileSampleDmas = sAudioProfileSampleDmas;
+    counters->meSubmits = sAudioDiagnosticMeSubmits;
+    counters->cpuMixes = sAudioDiagnosticCpuMixes;
+    counters->meFallbacks = sAudioDiagnosticMeFallbacks;
+    counters->meTimeouts = sAudioDiagnosticMeTimeouts;
+    counters->meWaits = sAudioDiagnosticMeWaits;
+    counters->meWaitTotalUsec = sAudioDiagnosticMeWaitTotalUsec;
+    counters->meWaitMaxUsec = sAudioDiagnosticMeWaitMaxUsec;
+    counters->meWaitLastUsec = sAudioDiagnosticMeWaitLastUsec;
+    counters->underruns = sAudioDiagnosticUnderruns;
+    counters->outputErrors = sAudioDiagnosticOutputErrors;
+    counters->ioBackoffs = sAudioDiagnosticIoBackoffs;
+    counters->ringFull = sAudioDiagnosticRingFull;
+    counters->catchups = sAudioDiagnosticCatchups;
+    counters->producerLate = sAudioDiagnosticProducerLate;
+    counters->producerLateMaxUsec = sAudioDiagnosticProducerLateMaxUsec;
+}
+
+static void OotPspAudioBackend_PrintDiagnosticEvent(const char* eventName, u32 amount, u32 total) {
+    printf("[audio!] %s +%lu total=%lu buf=%lu ring=%lu meq=%lu me=%s/%lu op=%s#%lu "
+           "pending=%ld wait=%ld\n",
+           eventName, (unsigned long)amount, (unsigned long)total,
+           (unsigned long)OotPspAudioBackend_TotalBufferedFrames(),
+           (unsigned long)OotPspAudioBackend_BufferedFrames(),
+           (unsigned long)OotPspAudioBackend_PendingMeQueueFrames(),
+           OotPspAudioBackend_MeStateName(sAudioMeState), (unsigned long)sAudioMeProgress,
+           OotPspAudioBackend_OpcodeName(sAudioMeOpcodeProfile->currentOpcode),
+           (unsigned long)sAudioMeOpcodeProfile->currentCommandIndex,
+           (long)sAudioMeCommandPending, (long)sAudioDiagnosticMeWaiting);
+}
+
+static int OotPspAudioBackend_DiagnosticThread(UNUSED SceSize args, UNUSED void* argp) {
+    OotPspAudioDiagnosticCounters previousWindow;
+    OotPspAudioDiagnosticCounters previousEvents;
+    OotPspAudioDiagnosticCounters current;
+    OotPspMixerOpcodeProfile previousOpcodeProfile;
+    OotPspAudioDiagnosticThreadSample producerPrevious;
+    OotPspAudioDiagnosticThreadSample outputPrevious;
+    u32 previousSlowWaitMax;
+    u32 lastReportUsec = sceKernelGetSystemTimeLow();
+
+    OotPspAudioBackend_SnapshotDiagnosticCounters(&previousWindow);
+    memset(&previousOpcodeProfile, 0, sizeof(previousOpcodeProfile));
+    previousOpcodeProfile.currentOpcode = OOT_PSP_MIXER_PROFILE_OPCODE_IDLE;
+    previousOpcodeProfile.lastJobSlowOpcode = OOT_PSP_MIXER_PROFILE_OPCODE_IDLE;
+    previousOpcodeProfile.maxJobSlowOpcode = OOT_PSP_MIXER_PROFILE_OPCODE_IDLE;
+    OotPspAudioBackend_SnapshotMeOpcodeProfile(&previousOpcodeProfile);
+    previousEvents = previousWindow;
+    previousSlowWaitMax = previousWindow.meWaitMaxUsec;
+    OotPspAudioBackend_SampleThread(sAudioProducerThreadId, &producerPrevious);
+    OotPspAudioBackend_SampleThread(sAudioOutputThreadId, &outputPrevious);
+    printf("[audio] diagnostics enabled poll=%luus report=%luus producer_id=%d output_id=%d\n",
+           (unsigned long)OOT_PSP_AUDIO_DIAGNOSTIC_POLL_USEC,
+           (unsigned long)OOT_PSP_AUDIO_DIAGNOSTIC_REPORT_USEC, (int)sAudioProducerThreadId,
+           (int)sAudioOutputThreadId);
+
+    while (sAudioDiagnosticThreadRunning) {
+        OotPspAudioDiagnosticThreadSample producer;
+        OotPspAudioDiagnosticThreadSample output;
+        OotPspMixerOpcodeProfile opcodeProfile;
+        s32 opcodeProfileValid;
+        u32 now;
+
+        sceKernelDelayThread(OOT_PSP_AUDIO_DIAGNOSTIC_POLL_USEC);
+        now = sceKernelGetSystemTimeLow();
+        OotPspAudioBackend_SnapshotDiagnosticCounters(&current);
+
+        if (current.underruns != previousEvents.underruns) {
+            OotPspAudioBackend_PrintDiagnosticEvent("UNDERRUN", current.underruns - previousEvents.underruns,
+                                                    current.underruns);
+        }
+        if (current.outputErrors != previousEvents.outputErrors) {
+            OotPspAudioBackend_PrintDiagnosticEvent("OUTPUT_ERROR",
+                                                    current.outputErrors - previousEvents.outputErrors,
+                                                    current.outputErrors);
+        }
+        if (current.meFallbacks != previousEvents.meFallbacks) {
+            OotPspAudioBackend_PrintDiagnosticEvent("ME_FALLBACK",
+                                                    current.meFallbacks - previousEvents.meFallbacks,
+                                                    current.meFallbacks);
+        }
+        if (current.meTimeouts != previousEvents.meTimeouts) {
+            OotPspAudioBackend_PrintDiagnosticEvent("ME_TIMEOUT", current.meTimeouts - previousEvents.meTimeouts,
+                                                    current.meTimeouts);
+        }
+        previousEvents = current;
+
+        if ((u32)(now - lastReportUsec) < OOT_PSP_AUDIO_DIAGNOSTIC_REPORT_USEC) {
+            continue;
+        }
+
+        OotPspAudioBackend_SampleThread(sAudioProducerThreadId, &producer);
+        OotPspAudioBackend_SampleThread(sAudioOutputThreadId, &output);
+        opcodeProfileValid = OotPspAudioBackend_SnapshotMeOpcodeProfile(&opcodeProfile);
+        {
+            u32 meWaitCount = current.meWaits - previousWindow.meWaits;
+            u32 meWaitUsec = current.meWaitTotalUsec - previousWindow.meWaitTotalUsec;
+            u32 meWaitAverageUsec = meWaitCount != 0 ? meWaitUsec / meWaitCount : 0;
+            u32 meWaitActiveUsec =
+                sAudioDiagnosticMeWaiting ? now - sAudioDiagnosticMeWaitStartUsec : 0;
+            u32 ringFrames = OotPspAudioBackend_BufferedFrames();
+            u32 meQueueFrames = OotPspAudioBackend_PendingMeQueueFrames();
+            u32 driverFrames = OotPspAudioBackend_RestFrames() + sAudioPendingOutputFrames;
+            u32 profileUpdates = current.profileUpdates - previousWindow.profileUpdates;
+            u32 profileDivisor = profileUpdates != 0 ? profileUpdates : 1;
+            u64 producerCpuUsec = producer.runClocks - producerPrevious.runClocks;
+            u64 outputCpuUsec = output.runClocks - outputPrevious.runClocks;
+
+            printf("[audio] t=%lu.%03lu prod=%s id=%d k=%s/w%d p=%d cpu=%lluus "
+                   "out=%s id=%d k=%s/w%d p=%d cpu=%lluus me=%s/%lu op=%s#%lu active=%ld "
+                   "pending=%ld wait=%ld waiter=%d age=%luus\n",
+                   (unsigned long)(now / 1000000), (unsigned long)((now / 1000) % 1000),
+                   OotPspAudioBackend_ProducerStateName(sAudioDiagnosticProducerState),
+                   (int)sAudioProducerThreadId,
+                   OotPspAudioBackend_KernelThreadStateName(producer.status), (int)producer.waitType,
+                   (int)producer.priority, (unsigned long long)producerCpuUsec,
+                   OotPspAudioBackend_OutputStateName(sAudioDiagnosticOutputState),
+                   (int)sAudioOutputThreadId,
+                   OotPspAudioBackend_KernelThreadStateName(output.status), (int)output.waitType,
+                   (int)output.priority, (unsigned long long)outputCpuUsec,
+                   OotPspAudioBackend_MeStateName(sAudioMeState), (unsigned long)sAudioMeProgress,
+                   OotPspAudioBackend_OpcodeName(sAudioMeOpcodeProfile->currentOpcode),
+                   (unsigned long)sAudioMeOpcodeProfile->currentCommandIndex,
+                   (long)sAudioMeInitialized, (long)sAudioMeCommandPending,
+                   (long)sAudioDiagnosticMeWaiting, (int)sAudioDiagnosticMeWaiterThreadId,
+                   (unsigned long)meWaitActiveUsec);
+            printf("[audio] buf=%lu/%lu ring=%lu meq=%lu driver=%lu free=%lu pos=%lu:%lu primed=%ld "
+                   "src=%luHz/%lu hw=%ld audio=spec%u reset%u task%lu | 1s upd=%lu me=%lu cpu=%lu "
+                   "wait=%lu avg=%luus last=%luus max_all=%luus underrun=%lu err=%lu io=%lu full=%lu "
+                   "catchup=%lu late=%lu maxlate_all=%luus fallback=%lu timeout=%lu\n",
+                   (unsigned long)OotPspAudioBackend_TotalBufferedFrames(),
+                   (unsigned long)OotPspAudioBackend_TargetBufferFrames(), (unsigned long)ringFrames,
+                   (unsigned long)meQueueFrames, (unsigned long)driverFrames,
+                   (unsigned long)OotPspAudioBackend_FreeFrames(), (unsigned long)sAudioReadPos,
+                   (unsigned long)sAudioWritePos, (long)sAudioPlaybackPrimed,
+                   (unsigned long)sAudioSourceFrequency, (unsigned long)OotPspAudioBackend_SourceChunkFrames(),
+                   (long)sAudioHardwareSrc, (unsigned int)gAudioCtx.specId,
+                   (unsigned int)gAudioCtx.resetStatus, (unsigned long)gAudioCtx.totalTaskCount,
+                   (unsigned long)(current.updates - previousWindow.updates),
+                   (unsigned long)(current.meSubmits - previousWindow.meSubmits),
+                   (unsigned long)(current.cpuMixes - previousWindow.cpuMixes),
+                   (unsigned long)meWaitCount, (unsigned long)meWaitAverageUsec,
+                   (unsigned long)current.meWaitLastUsec, (unsigned long)current.meWaitMaxUsec,
+                   (unsigned long)(current.underruns - previousWindow.underruns),
+                   (unsigned long)(current.outputErrors - previousWindow.outputErrors),
+                   (unsigned long)(current.ioBackoffs - previousWindow.ioBackoffs),
+                   (unsigned long)(current.ringFull - previousWindow.ringFull),
+                   (unsigned long)(current.catchups - previousWindow.catchups),
+                   (unsigned long)(current.producerLate - previousWindow.producerLate),
+                   (unsigned long)current.producerLateMaxUsec,
+                   (unsigned long)(current.meFallbacks - previousWindow.meFallbacks),
+                   (unsigned long)(current.meTimeouts - previousWindow.meTimeouts));
+            printf("[audio] phase 1s n=%lu wait_me=%luus prepare=%luus synth=%luus (seq=%luus cmd=%luus) "
+                   "submit=%luus abi=%lu dma=%lu\n",
+                   (unsigned long)profileUpdates,
+                   (unsigned long)((current.profileWaitUsec - previousWindow.profileWaitUsec) /
+                                   profileDivisor),
+                   (unsigned long)((current.profilePrepareUsec - previousWindow.profilePrepareUsec) /
+                                   profileDivisor),
+                   (unsigned long)((current.profileSynthUsec - previousWindow.profileSynthUsec) /
+                                   profileDivisor),
+                   (unsigned long)((current.profileSequenceUsec - previousWindow.profileSequenceUsec) /
+                                   profileDivisor),
+                   (unsigned long)((current.profileCommandBuildUsec - previousWindow.profileCommandBuildUsec) /
+                                   profileDivisor),
+                   (unsigned long)((current.profileSubmitUsec - previousWindow.profileSubmitUsec) /
+                                   profileDivisor),
+                   (unsigned long)((current.profileAbiCommands - previousWindow.profileAbiCommands) /
+                                   profileDivisor),
+                   (unsigned long)((current.profileSampleDmas - previousWindow.profileSampleDmas) /
+                                   profileDivisor));
+            if (opcodeProfileValid) {
+                OotPspAudioBackend_PrintMeOpcodeProfile(&opcodeProfile, &previousOpcodeProfile);
+            } else {
+                printf("[audio] me-op snapshot=BUSY current=%s#%lu\n",
+                       OotPspAudioBackend_OpcodeName(sAudioMeOpcodeProfile->currentOpcode),
+                       (unsigned long)sAudioMeOpcodeProfile->currentCommandIndex);
+            }
+        }
+
+        if ((current.meWaitMaxUsec > previousSlowWaitMax) &&
+            (current.meWaitMaxUsec >= OOT_PSP_AUDIO_DIAGNOSTIC_SLOW_ME_WAIT_USEC)) {
+            printf("[audio!] SLOW_ME_WAIT last=%luus max_all=%luus me=%s/%lu current_op=%s#%lu\n",
+                   (unsigned long)current.meWaitLastUsec, (unsigned long)current.meWaitMaxUsec,
+                   OotPspAudioBackend_MeStateName(sAudioMeState), (unsigned long)sAudioMeProgress,
+                   OotPspAudioBackend_OpcodeName(sAudioMeOpcodeProfile->currentOpcode),
+                   (unsigned long)sAudioMeOpcodeProfile->currentCommandIndex);
+        }
+
+        previousSlowWaitMax = current.meWaitMaxUsec;
+        previousWindow = current;
+        if (opcodeProfileValid) {
+            previousOpcodeProfile = opcodeProfile;
+        }
+        producerPrevious = producer;
+        outputPrevious = output;
+        lastReportUsec = now;
+    }
+
+    sAudioDiagnosticThreadId = -1;
+    sceKernelExitDeleteThread(0);
+    return 0;
+}
+
+static s32 OotPspAudioBackend_StartDiagnosticThread(void) {
+    SceUID threadId;
+    s32 ret;
+
+    if (OotPspAudioBackend_IsValidUid(sAudioDiagnosticThreadId) || sAudioDiagnosticThreadRunning) {
+        return 0;
+    }
+
+    sAudioDiagnosticThreadRunning = true;
+    threadId = sceKernelCreateThread("OOT PSP AudioDiag", OotPspAudioBackend_DiagnosticThread,
+                                     OOT_PSP_AUDIO_DIAGNOSTIC_THREAD_PRIORITY, 0x8000,
+                                     PSP_THREAD_ATTR_USER, NULL);
+    if (!OotPspAudioBackend_IsValidUid(threadId)) {
+        sAudioDiagnosticThreadRunning = false;
+        printf("[audio!] diagnostic thread create failed err=%d\n", (int)threadId);
+        return threadId;
+    }
+
+    ret = sceKernelStartThread(threadId, 0, NULL);
+    if (ret < 0) {
+        sceKernelDeleteThread(threadId);
+        sAudioDiagnosticThreadRunning = false;
+        printf("[audio!] diagnostic thread start failed err=%d\n", (int)ret);
+        return ret;
+    }
+
+    sAudioDiagnosticThreadId = threadId;
+    return 0;
+}
+#endif
+
 static s32 OotPspAudioBackend_StartThreads(void) {
     SceUID threadId;
     s32 ret;
@@ -1638,6 +2415,7 @@ static s32 OotPspAudioBackend_StartThreads(void) {
 
     if ((sAudioOutputThreadId < 0) && !sAudioOutputThreadRunning) {
         sAudioOutputThreadRunning = true;
+        AUDIO_DIAG_SET(sAudioDiagnosticOutputState, OOT_PSP_AUDIO_OUTPUT_STATE_STARTING);
         threadId = sceKernelCreateThread(
             "OOT PSP AudioOut",
             OotPspAudioBackend_OutputThread,
@@ -1662,6 +2440,7 @@ static s32 OotPspAudioBackend_StartThreads(void) {
 
     if ((sAudioProducerThreadId < 0) && !sAudioProducerThreadRunning) {
         sAudioProducerThreadRunning = true;
+        AUDIO_DIAG_SET(sAudioDiagnosticProducerState, OOT_PSP_AUDIO_PRODUCER_STATE_STARTING);
         threadId = sceKernelCreateThread(
             "OOT PSP AudioGen",
             OotPspAudioBackend_ProducerThread,
@@ -1683,6 +2462,10 @@ static s32 OotPspAudioBackend_StartThreads(void) {
         }
         sAudioProducerThreadId = threadId;
     }
+
+#if OOT_PSP_AUDIO_DIAGNOSTICS
+    OotPspAudioBackend_StartDiagnosticThread();
+#endif
 
     return 0;
 }
@@ -1825,7 +2608,9 @@ void OotPspAudioBackend_GetProfileCounters(OotPspAudioProfileCounters* counters)
     counters->meState = sAudioMeState;
     counters->meProgress = sAudioMeProgress;
 }
+#endif
 
+#if defined(OOTDEBUG) || OOT_PSP_AUDIO_DIAGNOSTICS
 void OotPspAudioBackend_RecordUpdateProfile(u32 waitUsec, u32 prepareUsec, u32 synthUsec, u32 submitUsec,
                                             u32 abiCommands, u32 sampleDmas) {
     sAudioProfileUpdates++;

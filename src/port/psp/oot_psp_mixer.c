@@ -16,6 +16,10 @@
 #define OOT_PSP_AUDIO_MIXER_VERIFY 0
 #endif
 
+#ifndef OOT_PSP_AUDIO_DIAGNOSTICS
+#define OOT_PSP_AUDIO_DIAGNOSTICS 0
+#endif
+
 #if defined(TARGET_PSP)
 #if OOT_PSP_AUDIO_MIXER_VME
 #include <me-core-mapper/me-core-mapper.h>
@@ -151,6 +155,10 @@ static volatile u32 sMixerMixVerifyMismatches;
 static volatile u32 sMixerEnvVerifyMismatches;
 #endif
 
+#if OOT_PSP_AUDIO_MIXER_VERIFY
+static volatile u32 sMixerResampleVerifyMismatches;
+#endif
+
 static s16 sResampleTable[64][4] = {
     { 0x0C39, 0x66AD, 0x0D46, 0xFFDF }, { 0x0B39, 0x6696, 0x0E5F, 0xFFD8 },
     { 0x0A44, 0x6669, 0x0F83, 0xFFD0 }, { 0x095A, 0x6626, 0x10B4, 0xFFC8 },
@@ -187,6 +195,17 @@ static s16 sResampleTable[64][4] = {
 };
 
 static s16 OotPspMixer_Clamp16(s32 value) {
+#if defined(TARGET_PSP)
+    const s32 minimum = -0x8000;
+    const s32 maximum = 0x7FFF;
+
+    __asm__ volatile(
+        "max %[value], %[value], %[minimum]\n\t"
+        "min %[value], %[value], %[maximum]"
+        : [value] "+r"(value)
+        : [minimum] "r"(minimum), [maximum] "r"(maximum));
+    return (s16)value;
+#else
     if (value < -0x8000) {
         return -0x8000;
     }
@@ -194,17 +213,57 @@ static s16 OotPspMixer_Clamp16(s32 value) {
         return 0x7FFF;
     }
     return value;
+#endif
 }
 
+#if OOT_PSP_AUDIO_MIXER_VERIFY
 static s16 OotPspMixer_Vmulf(s16 left, s16 right) {
     s32 product = (s32)left * right;
 
     return OotPspMixer_Clamp16((product + 0x4000) >> 15);
 }
+#endif
 
 static s16 OotPspMixer_Vadd(s16 left, s16 right) {
     return OotPspMixer_Clamp16((s32)left + right);
 }
+
+/*
+ * The resampler's fixed 64x4 coefficient table has tighter bounds than the
+ * general ABI VMULF/VADD helpers need to support.  For every table row and
+ * every signed 16-bit input:
+ *
+ *   rounded product:     [-26285, 26285]
+ *   either two-tap sum:  [-29414, 29413]
+ *   final four-tap sum:  [-34117, 34115]
+ *
+ * Consequently the four product clamps and two partial-sum clamps are no-ops;
+ * only the final saturation can affect a result.  Keeping the intermediates
+ * as s32 also avoids repeated sign-extension instructions on Allegrex/ME.
+ */
+static inline s32 OotPspMixer_ResampleProduct(s16 sample, s16 coefficient) {
+    return (((s32)sample * coefficient) + 0x4000) >> 15;
+}
+
+static inline s16 OotPspMixer_ResampleSample(const s16* in, const s16* table) {
+    s32 product01 = OotPspMixer_ResampleProduct(in[0], table[0]) +
+                    OotPspMixer_ResampleProduct(in[1], table[1]);
+    s32 product23 = OotPspMixer_ResampleProduct(in[2], table[2]) +
+                    OotPspMixer_ResampleProduct(in[3], table[3]);
+
+    return OotPspMixer_Clamp16(product01 + product23);
+}
+
+#if OOT_PSP_AUDIO_MIXER_VERIFY
+static inline s16 OotPspMixer_ResampleSampleReference(const s16* in, const s16* table) {
+    s16 product01 = OotPspMixer_Vadd(OotPspMixer_Vmulf(in[0], table[0]),
+                                     OotPspMixer_Vmulf(in[1], table[1]));
+    s16 product23 = OotPspMixer_Vadd(OotPspMixer_Vmulf(in[2], table[2]),
+                                     OotPspMixer_Vmulf(in[3], table[3]));
+
+    return OotPspMixer_Vadd(product01, product23);
+}
+#endif
 
 void OotPspMixer_InitVme(void) {
 #if defined(TARGET_PSP) && OOT_PSP_AUDIO_MIXER_VME
@@ -232,15 +291,16 @@ void OotPspMixer_ShutdownVme(void) {
 #endif
 }
 
-static s16 OotPspMixer_SignExtendShift2(u8 value, s32 shift) {
-    return (s16)((((s32)(value & 3) << 30) >> 30) << shift);
+static s32 OotPspMixer_SignExtendShift2(u8 value, s32 shift) {
+    return (s32)((u32)(value & 3) << 30) >> (30 - shift);
 }
 
-static s16 OotPspMixer_SignExtendShift4(u8 value, s32 shift) {
-    return (s16)((((s32)(value & 0xF) << 28) >> 28) << shift);
+static s32 OotPspMixer_SignExtendShift4(u8 value, s32 shift) {
+    return (s32)((u32)(value & 0xF) << 28) >> (28 - shift);
 }
 
-static void OotPspMixer_DecodeAdpcmHalf(s16** outPtr, const s16 table[2][8], const s16* ins) {
+#if !defined(TARGET_PSP) || OOT_PSP_AUDIO_MIXER_VERIFY
+static void OotPspMixer_DecodeAdpcmHalfReference(s16** outPtr, const s16 table[2][8], const s32* ins) {
     s16* out = *outPtr;
     s16 prev1 = out[-1];
     s16 prev2 = out[-2];
@@ -304,6 +364,132 @@ static void OotPspMixer_DecodeAdpcmHalf(s16** outPtr, const s16 table[2][8], con
     *out++ = OotPspMixer_Clamp16(acc >> 11);
 
     *outPtr = out;
+}
+#endif
+
+#if defined(TARGET_PSP)
+/*
+ * Allegrex and the Media Engine both provide MADD on the integer HI/LO
+ * accumulator.  The generic C decoder makes GCC emit one MULT/MFLO/ADDU
+ * sequence per predictor term.  The `l` constraint keeps each sample's whole
+ * triangular dot product resident in LO across the individual MADD steps, so
+ * there is only one MTLO/MFLO pair per output.  Only LO is initialized because
+ * the decoder intentionally uses 32-bit wrapping arithmetic; carries into HI
+ * cannot affect the 32-bit result.
+ */
+static inline s32 OotPspMixer_AdpcmMaddStep(s32 accumulator, s32 left, s32 right) {
+    __asm__ volatile("madd %[left], %[right]"
+                     : [accumulator] "+l"(accumulator)
+                     : [left] "r"(left), [right] "r"(right)
+                     : "hi");
+    return accumulator;
+}
+
+static void OotPspMixer_DecodeAdpcmHalfMadd(s16** outPtr, const s16 table[2][8], const s32* ins) {
+    s16* out = *outPtr;
+    s32 prev1 = out[-1];
+    s32 prev2 = out[-2];
+    const s16* table0 = table[0];
+    const s16* table1 = table[1];
+    s32 acc;
+
+    acc = ins[0] << 11;
+    acc = OotPspMixer_AdpcmMaddStep(acc, table0[0], prev2);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[0], prev1);
+    *out++ = OotPspMixer_Clamp16(acc >> 11);
+
+    acc = ins[1] << 11;
+    acc = OotPspMixer_AdpcmMaddStep(acc, table0[1], prev2);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[1], prev1);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[0], ins[0]);
+    *out++ = OotPspMixer_Clamp16(acc >> 11);
+
+    acc = ins[2] << 11;
+    acc = OotPspMixer_AdpcmMaddStep(acc, table0[2], prev2);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[2], prev1);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[1], ins[0]);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[0], ins[1]);
+    *out++ = OotPspMixer_Clamp16(acc >> 11);
+
+    acc = ins[3] << 11;
+    acc = OotPspMixer_AdpcmMaddStep(acc, table0[3], prev2);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[3], prev1);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[2], ins[0]);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[1], ins[1]);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[0], ins[2]);
+    *out++ = OotPspMixer_Clamp16(acc >> 11);
+
+    acc = ins[4] << 11;
+    acc = OotPspMixer_AdpcmMaddStep(acc, table0[4], prev2);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[4], prev1);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[3], ins[0]);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[2], ins[1]);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[1], ins[2]);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[0], ins[3]);
+    *out++ = OotPspMixer_Clamp16(acc >> 11);
+
+    acc = ins[5] << 11;
+    acc = OotPspMixer_AdpcmMaddStep(acc, table0[5], prev2);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[5], prev1);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[4], ins[0]);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[3], ins[1]);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[2], ins[2]);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[1], ins[3]);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[0], ins[4]);
+    *out++ = OotPspMixer_Clamp16(acc >> 11);
+
+    acc = ins[6] << 11;
+    acc = OotPspMixer_AdpcmMaddStep(acc, table0[6], prev2);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[6], prev1);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[5], ins[0]);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[4], ins[1]);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[3], ins[2]);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[2], ins[3]);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[1], ins[4]);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[0], ins[5]);
+    *out++ = OotPspMixer_Clamp16(acc >> 11);
+
+    acc = ins[7] << 11;
+    acc = OotPspMixer_AdpcmMaddStep(acc, table0[7], prev2);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[7], prev1);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[6], ins[0]);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[5], ins[1]);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[4], ins[2]);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[3], ins[3]);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[2], ins[4]);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[1], ins[5]);
+    acc = OotPspMixer_AdpcmMaddStep(acc, table1[0], ins[6]);
+    *out++ = OotPspMixer_Clamp16(acc >> 11);
+
+    *outPtr = out;
+}
+#endif
+
+static void OotPspMixer_DecodeAdpcmHalf(s16** outPtr, const s16 table[2][8], const s32* ins) {
+#if defined(TARGET_PSP)
+#if OOT_PSP_AUDIO_MIXER_VERIFY
+    s16 referenceSamples[10];
+    s16* referenceOut = &referenceSamples[2];
+    s16* out = *outPtr;
+    s32 i;
+
+    referenceSamples[0] = out[-2];
+    referenceSamples[1] = out[-1];
+    OotPspMixer_DecodeAdpcmHalfReference(&referenceOut, table, ins);
+    OotPspMixer_DecodeAdpcmHalfMadd(outPtr, table, ins);
+
+    for (i = 0; i < 8; i++) {
+        if (out[i] != referenceSamples[i + 2]) {
+            memcpy(out, &referenceSamples[2], 8 * sizeof(s16));
+            break;
+        }
+    }
+#else
+    OotPspMixer_DecodeAdpcmHalfMadd(outPtr, table, ins);
+#endif
+#else
+    OotPspMixer_DecodeAdpcmHalfReference(outPtr, table, ins);
+#endif
 }
 
 void OotPspMixer_ClearBuffer(u16 dmem, s32 nbytes) {
@@ -652,7 +838,7 @@ void OotPspMixer_ADPCMdec(u8 flags, ADPCM_STATE state) {
         }
 
         for (half = 0; half < 2; half++) {
-            s16 ins[8];
+            s32 ins[8];
             s32 j;
 
             if (flags & 4) {
@@ -733,12 +919,19 @@ void OotPspMixer_Resample(u8 flags, u16 pitch, RESAMPLE_STATE state) {
     while (nbytes > 0) {
         for (i = 0; i < 8; i++) {
             s16* tbl = sResampleTable[(pitchAccumulator * 64) >> 16];
-            s16 product01 = OotPspMixer_Vadd(OotPspMixer_Vmulf(in[0], tbl[0]),
-                                             OotPspMixer_Vmulf(in[1], tbl[1]));
-            s16 product23 = OotPspMixer_Vadd(OotPspMixer_Vmulf(in[2], tbl[2]),
-                                             OotPspMixer_Vmulf(in[3], tbl[3]));
+            s16 sample = OotPspMixer_ResampleSample(in, tbl);
 
-            *out++ = OotPspMixer_Vadd(product01, product23);
+#if OOT_PSP_AUDIO_MIXER_VERIFY
+            {
+                s16 reference = OotPspMixer_ResampleSampleReference(in, tbl);
+
+                if (sample != reference) {
+                    sMixerResampleVerifyMismatches++;
+                    sample = reference;
+                }
+            }
+#endif
+            *out++ = sample;
             pitchAccumulator += pitch << 1;
             in += pitchAccumulator >> 16;
             pitchAccumulator &= 0xFFFF;
@@ -790,20 +983,26 @@ static s16 OotPspMixer_MulHighSignedUnsigned(s16 sample, u16 volume) {
 }
 
 static void OotPspMixer_EnvMixerProducts(s16 sample, u16 volLeft, u16 volRight, u16 reverb, s16 dryLeftMask,
-                                         s16 dryRightMask, s16 wetLeftMask, s16 wetRightMask, s16* leftOut,
-                                         s16* rightOut, s16* wetLeftOut, s16* wetRightOut) {
+                                         s16 dryRightMask, s16 wetLeftMask, s16 wetRightMask, s32 applyMasks,
+                                         s16* leftOut, s16* rightOut, s16* wetLeftOut, s16* wetRightOut) {
     s16 left = OotPspMixer_MulHighSignedUnsigned(sample, volLeft);
     s16 right = OotPspMixer_MulHighSignedUnsigned(sample, volRight);
     s16 wetLeft;
     s16 wetRight;
 
-    left ^= dryLeftMask;
-    right ^= dryRightMask;
-
-    wetLeft = OotPspMixer_MulHighSignedUnsigned(left, reverb);
-    wetRight = OotPspMixer_MulHighSignedUnsigned(right, reverb);
-    wetLeft ^= wetLeftMask;
-    wetRight ^= wetRightMask;
+    if (__builtin_expect(applyMasks != 0, 0)) {
+        left ^= dryLeftMask;
+        right ^= dryRightMask;
+        wetLeft = OotPspMixer_MulHighSignedUnsigned(left, reverb);
+        wetRight = OotPspMixer_MulHighSignedUnsigned(right, reverb);
+        wetLeft ^= wetLeftMask;
+        wetRight ^= wetRightMask;
+    } else {
+        /* Headset/strong-stereo masks are normally all zero.  Keep that
+         * common path free of four no-op XORs per mixed sample. */
+        wetLeft = OotPspMixer_MulHighSignedUnsigned(left, reverb);
+        wetRight = OotPspMixer_MulHighSignedUnsigned(right, reverb);
+    }
 
     *leftOut = left;
     *rightOut = right;
@@ -1019,6 +1218,7 @@ static void OotPspMixer_EnvMixerCpu(u16 dmemSrc, s32 aiBufLen, s32 swapLR, s32 x
     s16 dryRightMask = x3 ? -1 : 0;
     s16 wetLeftMask = x0 ? -4 : 0;
     s16 wetRightMask = x1 ? -2 : 0;
+    s32 applyMasks = dryLeftMask | dryRightMask | wetLeftMask | wetRightMask;
     s32 remaining = ROUND_UP_16(aiBufLen);
 
     while (remaining > 0) {
@@ -1035,7 +1235,7 @@ static void OotPspMixer_EnvMixerCpu(u16 dmemSrc, s32 aiBufLen, s32 swapLR, s32 x
             s16 wetR;
 
             OotPspMixer_EnvMixerProducts(sample, volLeft, volRight, reverb, dryLeftMask, dryRightMask, wetLeftMask,
-                                         wetRightMask, &left, &right, &wetL, &wetR);
+                                         wetRightMask, applyMasks, &left, &right, &wetL, &wetR);
 
             *dryLeft = OotPspMixer_Clamp16(*dryLeft + left);
             dryLeft++;
@@ -1087,6 +1287,7 @@ static s32 OotPspMixer_EnvMixerVme(u16 dmemSrc, s32 aiBufLen, s32 swapLR, s32 x0
     s16 dryRightMask = x3 ? -1 : 0;
     s16 wetLeftMask = x0 ? -4 : 0;
     s16 wetRightMask = x1 ? -2 : 0;
+    s32 applyMasks = dryLeftMask | dryRightMask | wetLeftMask | wetRightMask;
     volatile s32* top0 = OotPspMixer_VmeTopLane(0);
     volatile s32* top1 = OotPspMixer_VmeTopLane(1);
     volatile s32* top2 = OotPspMixer_VmeTopLane(2);
@@ -1174,7 +1375,8 @@ static s32 OotPspMixer_EnvMixerVme(u16 dmemSrc, s32 aiBufLen, s32 swapLR, s32 x0
             s16 refWetR;
 
             OotPspMixer_EnvMixerProducts(samples[i], volLeft, volRight, reverb, dryLeftMask, dryRightMask,
-                                         wetLeftMask, wetRightMask, &refLeft, &refRight, &refWetL, &refWetR);
+                                         wetLeftMask, wetRightMask, applyMasks, &refLeft, &refRight, &refWetL,
+                                         &refWetR);
             if ((left[i] != refLeft) || (right[i] != refRight) || (wetL[i] != refWetL) || (wetR[i] != refWetR)) {
                 sMixerEnvVerifyMismatches++;
                 left[i] = refLeft;
@@ -1511,15 +1713,125 @@ void OotPspMixer_UnkCmd19(UNUSED s32 arg1, UNUSED s32 arg2, UNUSED s32 size, UNU
      */
 }
 
-static void OotPspMixer_ExecuteCommandListInternal(const Acmd* cmdList, s32 cmdCount) {
+#if defined(TARGET_PSP) && OOT_PSP_AUDIO_DIAGNOSTICS
+static inline void OotPspMixer_StartHardwareCount(void) {
+    u32 compare = 0xFFFFFFFFU;
+
+    /*
+     * The ME's CP0 Count register does not advance until it has been written.
+     * The optional me-core exception setup normally performs this init, but
+     * the audio backend deliberately does not install that handler on real
+     * hardware. Initialize only Count and Compare for polling-based profiling,
+     * without installing a handler or enabling timer interrupts.
+     */
+    __asm__ volatile(
+        ".set push\n"
+        ".set noreorder\n"
+        "mtc0 $zero, $9\n"
+        "mtc0 %0, $11\n"
+        "sync\n"
+        "nop\n"
+        "nop\n"
+        "nop\n"
+        ".set pop\n"
+        :
+        : "r"(compare)
+        : "memory");
+}
+
+static inline u32 OotPspMixer_ReadHardwareCount(void) {
+    u32 count;
+
+    __asm__ volatile("mfc0 %0, $9" : "=r"(count));
+    return count;
+}
+
+static void OotPspMixer_PublishOpcodeProfile(volatile OotPspMixerOpcodeProfile* profile, s32 cmdCount,
+                                             u32 jobTicks, const u32* calls, const u32* ticks,
+                                             const u32* maxTicks) {
+    u32 slowOpcode = OOT_PSP_MIXER_PROFILE_OPCODE_IDLE;
+    u32 slowTicks = 0;
+    u32 sequence;
+    s32 opcode;
+
+    for (opcode = 0; opcode < OOT_PSP_MIXER_PROFILE_OPCODE_COUNT; opcode++) {
+        if (ticks[opcode] > slowTicks) {
+            slowOpcode = opcode;
+            slowTicks = ticks[opcode];
+        }
+    }
+
+    sequence = profile->sequence;
+    profile->sequence = sequence + 1;
+    __asm__ volatile("sync" ::: "memory");
+
+    profile->jobs++;
+    profile->commands += cmdCount;
+    profile->jobTicks += jobTicks;
+    profile->lastJobTicks = jobTicks;
+    profile->lastJobCommands = cmdCount;
+    profile->lastJobSlowOpcode = slowOpcode;
+    profile->lastJobSlowTicks = slowTicks;
+    if (jobTicks > profile->jobMaxTicks) {
+        profile->jobMaxTicks = jobTicks;
+        profile->maxJobCommands = cmdCount;
+        profile->maxJobSlowOpcode = slowOpcode;
+        profile->maxJobSlowTicks = slowTicks;
+    }
+
+    for (opcode = 0; opcode < OOT_PSP_MIXER_PROFILE_OPCODE_COUNT; opcode++) {
+        profile->opcodeCalls[opcode] += calls[opcode];
+        profile->opcodeTicks[opcode] += ticks[opcode];
+        if (maxTicks[opcode] > profile->opcodeMaxTicks[opcode]) {
+            profile->opcodeMaxTicks[opcode] = maxTicks[opcode];
+        }
+    }
+
+    profile->currentOpcode = OOT_PSP_MIXER_PROFILE_OPCODE_IDLE;
+    profile->currentCommandIndex = cmdCount;
+    __asm__ volatile("sync" ::: "memory");
+    profile->sequence = sequence + 2;
+}
+#endif
+
+static void OotPspMixer_ExecuteCommandListInternal(const Acmd* cmdList, s32 cmdCount,
+                                                   volatile OotPspMixerOpcodeProfile* profile) {
     s32 i;
+#if defined(TARGET_PSP) && OOT_PSP_AUDIO_DIAGNOSTICS
+    u32 opcodeCalls[OOT_PSP_MIXER_PROFILE_OPCODE_COUNT];
+    u32 opcodeTicks[OOT_PSP_MIXER_PROFILE_OPCODE_COUNT];
+    u32 opcodeMaxTicks[OOT_PSP_MIXER_PROFILE_OPCODE_COUNT];
+    u32 jobStartTicks = 0;
+
+    if (profile != NULL) {
+        memset(opcodeCalls, 0, sizeof(opcodeCalls));
+        memset(opcodeTicks, 0, sizeof(opcodeTicks));
+        memset(opcodeMaxTicks, 0, sizeof(opcodeMaxTicks));
+        profile->currentOpcode = OOT_PSP_MIXER_PROFILE_OPCODE_IDLE;
+        profile->currentCommandIndex = 0;
+        OotPspMixer_StartHardwareCount();
+        jobStartTicks = OotPspMixer_ReadHardwareCount();
+    }
+#else
+    (void)profile;
+#endif
 
     for (i = 0; i < cmdCount; i++) {
         const Acmd* cmd = &cmdList[i];
         u32 w0 = cmd->words.w0;
         u32 w1 = cmd->words.w1;
+        u32 opcode = w0 >> 24;
+#if defined(TARGET_PSP) && OOT_PSP_AUDIO_DIAGNOSTICS
+        u32 commandStartTicks = 0;
 
-        switch (w0 >> 24) {
+        if (profile != NULL) {
+            profile->currentOpcode = opcode;
+            profile->currentCommandIndex = i;
+            commandStartTicks = OotPspMixer_ReadHardwareCount();
+        }
+#endif
+
+        switch (opcode) {
             case A_SPNOOP:
                 break;
 
@@ -1647,19 +1959,41 @@ static void OotPspMixer_ExecuteCommandListInternal(const Acmd* cmdList, s32 cmdC
             default:
                 break;
         }
+
+#if defined(TARGET_PSP) && OOT_PSP_AUDIO_DIAGNOSTICS
+        if ((profile != NULL) && (opcode < OOT_PSP_MIXER_PROFILE_OPCODE_COUNT)) {
+            u32 elapsedTicks = OotPspMixer_ReadHardwareCount() - commandStartTicks;
+
+            opcodeCalls[opcode]++;
+            opcodeTicks[opcode] += elapsedTicks;
+            if (elapsedTicks > opcodeMaxTicks[opcode]) {
+                opcodeMaxTicks[opcode] = elapsedTicks;
+            }
+        }
+#endif
     }
+
+#if defined(TARGET_PSP) && OOT_PSP_AUDIO_DIAGNOSTICS
+    if (profile != NULL) {
+        u32 jobTicks = OotPspMixer_ReadHardwareCount() - jobStartTicks;
+
+        OotPspMixer_PublishOpcodeProfile(profile, cmdCount, jobTicks, opcodeCalls, opcodeTicks,
+                                         opcodeMaxTicks);
+    }
+#endif
 }
 
 void OotPspMixer_ExecuteCommandList(const Acmd* cmdList, s32 cmdCount) {
     sCurrentMixer = &sCpuMixer;
     sExecutingOnMe = false;
-    OotPspMixer_ExecuteCommandListInternal(cmdList, cmdCount);
+    OotPspMixer_ExecuteCommandListInternal(cmdList, cmdCount, NULL);
 }
 
-void OotPspMixer_ExecuteCommandListMe(const Acmd* cmdList, s32 cmdCount) {
+void OotPspMixer_ExecuteCommandListMe(const Acmd* cmdList, s32 cmdCount,
+                                      volatile OotPspMixerOpcodeProfile* profile) {
     sCurrentMixer = (sMeStorage != NULL) ? &sMeStorage->mixer : &sCpuMixer;
     sExecutingOnMe = true;
-    OotPspMixer_ExecuteCommandListInternal(cmdList, cmdCount);
+    OotPspMixer_ExecuteCommandListInternal(cmdList, cmdCount, profile);
 }
 
 void OotPspMixer_InvalidateStateCache(void) {

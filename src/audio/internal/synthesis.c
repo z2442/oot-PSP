@@ -8,7 +8,7 @@
 #include "oot_psp_asset_loader.h"
 #include "oot_psp_audio_backend.h"
 #include "oot_psp_audio_commands.h"
-#if defined(OOTDEBUG)
+#if defined(OOTDEBUG) || OOT_PSP_AUDIO_DIAGNOSTICS
 #include <pspkernel.h>
 #endif
 #endif
@@ -276,7 +276,7 @@ Acmd* AudioSynth_Update(Acmd* cmdStart, s32* cmdCnt, s16* aiStart, s32 aiBufLen)
     s32 i;
     s32 j;
     SynthesisReverb* reverb;
-#if defined(TARGET_PSP) && defined(OOTDEBUG)
+#if defined(TARGET_PSP) && (defined(OOTDEBUG) || OOT_PSP_AUDIO_DIAGNOSTICS)
     u32 profileStartUsec = sceKernelGetSystemTimeLow();
     u32 profileAfterSequenceUsec;
 #endif
@@ -286,7 +286,7 @@ Acmd* AudioSynth_Update(Acmd* cmdStart, s32* cmdCnt, s16* aiStart, s32 aiBufLen)
         AudioSeq_ProcessSequences(i - 1);
         func_800DB03C(gAudioCtx.audioBufferParameters.ticksPerUpdate - i);
     }
-#if defined(TARGET_PSP) && defined(OOTDEBUG)
+#if defined(TARGET_PSP) && (defined(OOTDEBUG) || OOT_PSP_AUDIO_DIAGNOSTICS)
     profileAfterSequenceUsec = sceKernelGetSystemTimeLow();
 #endif
 
@@ -323,7 +323,7 @@ Acmd* AudioSynth_Update(Acmd* cmdStart, s32* cmdCnt, s16* aiStart, s32 aiBufLen)
     }
 
     *cmdCnt = cmdP - cmdStart;
-#if defined(TARGET_PSP) && defined(OOTDEBUG)
+#if defined(TARGET_PSP) && (defined(OOTDEBUG) || OOT_PSP_AUDIO_DIAGNOSTICS)
     OotPspAudioBackend_RecordSynthesisProfile(profileAfterSequenceUsec - profileStartUsec,
                                               sceKernelGetSystemTimeLow() - profileAfterSequenceUsec);
 #endif
