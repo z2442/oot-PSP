@@ -59,7 +59,7 @@ u32 sEnvMixerOp = _SHIFTL(A_ENVMIXER, 24, 8);
 #define OOT_PSP_AUDIO_REVERB_DESC_ITEMS2 1
 
 static u8 sOotPspAudioSynthBadSampleLogged;
-static u32 sOotPspAudioMeCacheEpoch = 1;
+static u32 sOotPspAudioMixerCacheEpoch = 1;
 static OotPspAudioReverbDownsampleCmd sOotPspAudioReverbDownsampleCmds[OOT_PSP_AUDIO_REVERB_COUNT]
                                                                              [OOT_PSP_AUDIO_REVERB_FRAMES]
                                                                              [OOT_PSP_AUDIO_REVERB_UPDATES]
@@ -101,7 +101,7 @@ static OotPspAudioReverbDownsampleCmd* OotPspAudioSynth_SetupReverbRingCmd(Synth
     pspCmd->lengthB = bufItem->lengthB;
     pspCmd->bufSizePerChan = reverb->bufSizePerChan;
     pspCmd->downsampleRate = reverb->downsampleRate;
-    pspCmd->cacheEpoch = sOotPspAudioMeCacheEpoch;
+    pspCmd->cacheEpoch = sOotPspAudioMixerCacheEpoch;
 
     return pspCmd;
 }
@@ -112,10 +112,10 @@ static OotPspAudioReverbDownsampleCmd* OotPspAudioSynth_SetupReverbDownsampleCmd
     return OotPspAudioSynth_SetupReverbRingCmd(reverb, bufItem, updateIndex, OOT_PSP_AUDIO_REVERB_DESC_ITEMS);
 }
 
-void OotPspAudioSynth_InvalidateMeCaches(void) {
-    sOotPspAudioMeCacheEpoch++;
-    if (sOotPspAudioMeCacheEpoch == 0) {
-        sOotPspAudioMeCacheEpoch = 1;
+void OotPspAudioSynth_InvalidateMixerCaches(void) {
+    sOotPspAudioMixerCacheEpoch++;
+    if (sOotPspAudioMixerCacheEpoch == 0) {
+        sOotPspAudioMixerCacheEpoch = 1;
     }
 }
 #endif

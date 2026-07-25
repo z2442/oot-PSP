@@ -1206,7 +1206,7 @@ void AudioHeap_Init(void) {
     osWritebackDCacheAll();
     osSetIntMask(intMask);
 #if defined(TARGET_PSP)
-    OotPspAudioSynth_InvalidateMeCaches();
+    OotPspAudioSynth_InvalidateMixerCaches();
 #endif
 }
 

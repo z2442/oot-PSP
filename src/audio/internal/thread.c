@@ -85,7 +85,6 @@ AudioTask* AudioThread_UpdateImpl(void) {
     profileStartUsec = sceKernelGetSystemTimeLow();
 #endif
 #if defined(TARGET_PSP)
-    OotPspAudioBackend_SetDiagnosticProducerState(OOT_PSP_AUDIO_PRODUCER_STATE_WAIT_ME);
     OotPspAudioBackend_WaitForCommands();
     OotPspAudioBackend_SetDiagnosticProducerState(OOT_PSP_AUDIO_PRODUCER_STATE_PREPARE);
 #endif
@@ -216,8 +215,8 @@ AudioTask* AudioThread_UpdateImpl(void) {
     // Update audioRandom to the next random number
     gAudioCtx.audioRandom = (gAudioCtx.audioRandom + gAudioCtx.totalTaskCount) * osGetCount();
 #if defined(TARGET_PSP)
-    /* The ME queues completed PCM directly from its cache. Keep the AI
-     * buffers private instead of synchronizing one back just for entropy. */
+    /* Avoid sampling generated PCM just to update entropy; doing so would add
+     * a dependency on the mixer output buffer's cache state. */
     gAudioCtx.audioRandom += ((u32)abiCmdCnt << 16) ^ (u16)gAudioCtx.aiBufLengths[index];
 #else
     gAudioCtx.audioRandom = gAudioCtx.audioRandom + gAudioCtx.aiBuffers[index][gAudioCtx.totalTaskCount & 0xFF];

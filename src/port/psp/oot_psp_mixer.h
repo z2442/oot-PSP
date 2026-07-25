@@ -6,11 +6,7 @@
 #define OOT_PSP_MIXER_PROFILE_OPCODE_COUNT 32
 #define OOT_PSP_MIXER_PROFILE_OPCODE_IDLE 0xFFFFFFFFU
 
-/*
- * Written by the Media Engine through an uncached pointer and sampled by the
- * Allegrex diagnostic thread. Counter values are raw ME CP0 Count ticks; they
- * are intended for relative cost comparisons rather than wall-clock timing.
- */
+/* Legacy opcode-profile layout kept for diagnostic-build compatibility. */
 typedef struct OotPspMixerOpcodeProfile {
     u32 sequence;
     u32 jobs;

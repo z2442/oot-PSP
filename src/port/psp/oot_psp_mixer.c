@@ -5,7 +5,11 @@
 #include "oot_psp_audio_commands.h"
 
 #ifndef OOT_PSP_AUDIO_MIXER_VME
-#define OOT_PSP_AUDIO_MIXER_VME 1
+#define OOT_PSP_AUDIO_MIXER_VME 0
+#endif
+
+#ifndef OOT_PSP_AUDIO_MIXER_VFPU
+#define OOT_PSP_AUDIO_MIXER_VFPU 1
 #endif
 
 #ifndef OOT_PSP_AUDIO_MIXER_FAST
@@ -119,19 +123,42 @@ typedef struct {
     OotPspMixerSampleCache sampleCache;
     OotPspMixerBookCache bookCache;
     OotPspMixerReverbCache reverbCache;
-} OotPspMixerMeStorage;
+} OotPspMixerStorage;
 
-static OotPspMixerState sCpuMixer __attribute__((aligned(64)));
-/*
- * Keep the ME mixer state in main RAM.  Allocating it from ME EDRAM and
- * enabling/wiping VME can hang during startup on real PSP hardware before
- * the ME reaches its command loop.  The scalar mixer still runs entirely on
- * the Media Engine, so it does not consume Allegrex CPU time.
- */
-static OotPspMixerMeStorage sMeScalarStorage __attribute__((aligned(64)));
-static OotPspMixerMeStorage* sMeStorage;
-static OotPspMixerState* sCurrentMixer = &sCpuMixer;
-static s32 sExecutingOnMe;
+static OotPspMixerStorage sCpuStorage __attribute__((aligned(64)));
+static OotPspMixerState* sCurrentMixer = &sCpuStorage.mixer;
+static s32 sCpuStorageReady;
+
+#if defined(TARGET_PSP) && OOT_PSP_AUDIO_MIXER_VFPU
+typedef struct {
+    const s16* in;
+    s16* dryLeft;
+    s16* dryRight;
+    s16* wetLeft;
+    s16* wetRight;
+    u32 volLeft0;
+    u32 volRight0;
+    u32 reverb0;
+    u32 volLeft1;
+    u32 volRight1;
+    u32 reverb1;
+} OotPspAudioVfpuEnvArgs;
+
+extern void OotPspAudioVfpu_Add(s16* out, const s16* in, s32 samples);
+extern void OotPspAudioVfpu_Mix(s16* out, const s16* in, s32 gain, s32 samples);
+extern void OotPspAudioVfpu_EnvMix16(const OotPspAudioVfpuEnvArgs* args);
+
+typedef char OotPspAudioVfpuEnvArgs_size_check[(sizeof(OotPspAudioVfpuEnvArgs) == 0x2C) ? 1 : -1];
+#endif
+
+static void OotPspMixer_InitCpuStorage(void) {
+    if (!sCpuStorageReady) {
+        sCpuStorage.mixer.sampleCache = &sCpuStorage.sampleCache;
+        sCpuStorage.mixer.bookCache = &sCpuStorage.bookCache;
+        sCpuStorage.mixer.reverbCache = &sCpuStorage.reverbCache;
+        sCpuStorageReady = true;
+    }
+}
 
 static OotPspMixerState* OotPspMixer_GetState(void) {
     return sCurrentMixer;
@@ -266,29 +293,11 @@ static inline s16 OotPspMixer_ResampleSampleReference(const s16* in, const s16* 
 #endif
 
 void OotPspMixer_InitVme(void) {
-#if defined(TARGET_PSP) && OOT_PSP_AUDIO_MIXER_VME
-    if (meLibGetCpuId() == 1) {
-        OotPspMixerMeStorage* storage = &sMeScalarStorage;
-
-        memset(storage, 0, sizeof(*storage));
-        storage->mixer.sampleCache = &storage->sampleCache;
-        storage->mixer.bookCache = &storage->bookCache;
-        storage->mixer.reverbCache = &storage->reverbCache;
-        sMeStorage = storage;
-        sMixerVmeReady = 0;
-        meLibSync();
-    }
-#endif
+    /* Compatibility no-op: audio no longer boots or runs on the ME. */
 }
 
 void OotPspMixer_ShutdownVme(void) {
-#if defined(TARGET_PSP) && OOT_PSP_AUDIO_MIXER_VME
-    if (meLibGetCpuId() == 1) {
-        sMixerVmeReady = 0;
-        meLibSync();
-        sMeStorage = NULL;
-    }
-#endif
+    /* Compatibility no-op: audio no longer boots or runs on the ME. */
 }
 
 static s32 OotPspMixer_SignExtendShift2(u8 value, s32 shift) {
@@ -369,8 +378,8 @@ static void OotPspMixer_DecodeAdpcmHalfReference(s16** outPtr, const s16 table[2
 
 #if defined(TARGET_PSP)
 /*
- * Allegrex and the Media Engine both provide MADD on the integer HI/LO
- * accumulator.  The generic C decoder makes GCC emit one MULT/MFLO/ADDU
+ * Allegrex provides MADD on the integer HI/LO accumulator.  The generic C
+ * decoder makes GCC emit one MULT/MFLO/ADDU
  * sequence per predictor term.  The `l` constraint keeps each sample's whole
  * triangular dot product resident in LO across the individual MADD steps, so
  * there is only one MTLO/MFLO pair per output.  Only LO is initialized because
@@ -1221,6 +1230,41 @@ static void OotPspMixer_EnvMixerCpu(u16 dmemSrc, s32 aiBufLen, s32 swapLR, s32 x
     s32 applyMasks = dryLeftMask | dryRightMask | wetLeftMask | wetRightMask;
     s32 remaining = ROUND_UP_16(aiBufLen);
 
+#if defined(TARGET_PSP) && OOT_PSP_AUDIO_MIXER_VFPU && !OOT_PSP_AUDIO_MIXER_VERIFY
+    if (applyMasks == 0) {
+        while (remaining > 0) {
+            OotPspAudioVfpuEnvArgs args;
+
+            args.in = in;
+            args.dryLeft = dryLeft;
+            args.dryRight = dryRight;
+            args.wetLeft = swapLR ? wetRight : wetLeft;
+            args.wetRight = swapLR ? wetLeft : wetRight;
+            args.volLeft0 = volLeft0;
+            args.volRight0 = volRight0;
+            args.reverb0 = reverb0;
+            args.volLeft1 = volLeft1;
+            args.volRight1 = volRight1;
+            args.reverb1 = reverb1;
+            OotPspAudioVfpu_EnvMix16(&args);
+
+            in += 16;
+            dryLeft += 16;
+            dryRight += 16;
+            wetLeft += 16;
+            wetRight += 16;
+            volLeft0 = (u16)(volLeft0 + rampLeft);
+            volLeft1 = (u16)(volLeft1 + rampLeft);
+            volRight0 = (u16)(volRight0 + rampRight);
+            volRight1 = (u16)(volRight1 + rampRight);
+            reverb0 = (u16)(reverb0 + rampReverb);
+            reverb1 = (u16)(reverb1 + rampReverb);
+            remaining -= 16;
+        }
+        return;
+    }
+#endif
+
     while (remaining > 0) {
         s32 block;
 
@@ -1443,6 +1487,11 @@ void OotPspMixer_Mix(s32 countQuads, s16 gain, u16 dmemIn, u16 dmemOut) {
     }
 #endif
 
+#if defined(TARGET_PSP) && OOT_PSP_AUDIO_MIXER_VFPU && !OOT_PSP_AUDIO_MIXER_VERIFY
+    OotPspAudioVfpu_Mix(out, in, gain, samples);
+    return;
+#endif
+
 #if OOT_PSP_AUDIO_MIXER_FAST
     s32 unrolledSamples = samples & ~7;
 
@@ -1493,6 +1542,11 @@ void OotPspMixer_AddMixer(s32 nbytes, u16 dmemIn, u16 dmemOut, UNUSED s16 gain) 
     if (encodedBytes == 0) {
         return;
     }
+
+#if defined(TARGET_PSP) && OOT_PSP_AUDIO_MIXER_VFPU
+    OotPspAudioVfpu_Add(out, in, samples);
+    return;
+#endif
 
     for (i = 0; i < samples; i++) {
         out[i] = OotPspMixer_Vadd(out[i], in[i]);
@@ -1984,18 +2038,18 @@ static void OotPspMixer_ExecuteCommandListInternal(const Acmd* cmdList, s32 cmdC
 }
 
 void OotPspMixer_ExecuteCommandList(const Acmd* cmdList, s32 cmdCount) {
-    sCurrentMixer = &sCpuMixer;
-    sExecutingOnMe = false;
+    OotPspMixer_InitCpuStorage();
+    sCurrentMixer = &sCpuStorage.mixer;
     OotPspMixer_ExecuteCommandListInternal(cmdList, cmdCount, NULL);
 }
 
 void OotPspMixer_ExecuteCommandListMe(const Acmd* cmdList, s32 cmdCount,
                                       volatile OotPspMixerOpcodeProfile* profile) {
-    sCurrentMixer = (sMeStorage != NULL) ? &sMeStorage->mixer : &sCpuMixer;
-    sExecutingOnMe = true;
+    OotPspMixer_InitCpuStorage();
+    sCurrentMixer = &sCpuStorage.mixer;
     OotPspMixer_ExecuteCommandListInternal(cmdList, cmdCount, profile);
 }
 
 void OotPspMixer_InvalidateStateCache(void) {
-    /* The CPU fallback state is no longer shared with the ME-local mixer state. */
+    /* Mixer state and its caches are permanently Allegrex-owned. */
 }

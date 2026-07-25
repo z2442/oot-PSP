@@ -119,7 +119,6 @@ static void OotPspSetupCallbacks(void) {
 int main(int argc, char** argv) {
 
     pspFpuSetEnable(0);
-    (void)OotPspAudioBackend_BootMe();
     OotPspHomeMenu_Init();
     OotPspSetupCallbacks();
 

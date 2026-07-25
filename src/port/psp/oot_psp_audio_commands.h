@@ -23,7 +23,7 @@ typedef struct {
     u32 cacheEpoch;
 } OotPspAudioReverbDownsampleCmd;
 
-void OotPspAudioSynth_InvalidateMeCaches(void);
+void OotPspAudioSynth_InvalidateMixerCaches(void);
 
 #define aOotPspAudioReverbDownsample(pkt, dmemLeft, desc)                           \
     {                                                                               \
@@ -49,7 +49,7 @@ void OotPspAudioSynth_InvalidateMeCaches(void);
         _a->words.w1 = (uintptr_t)(desc);                                           \
     }
 
-/* Load an immutable, resident sample span through the ME-local page cache. */
+/* Load an immutable, resident sample span through the mixer page cache. */
 #define aOotPspAudioLoadSampleCached(pkt, source, dmemDest, nbytes)                  \
     {                                                                               \
         Acmd* _a = (Acmd*)(pkt);                                                    \

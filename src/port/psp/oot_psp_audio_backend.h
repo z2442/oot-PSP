@@ -43,7 +43,6 @@ typedef struct OotPspAudioProfileCounters {
 #endif
 
 s32 OotPspAudioBackend_Init(void);
-s32 OotPspAudioBackend_BootMe(void);
 s32 OotPspAudioBackend_Queue(const void* buf, u32 size);
 s32 OotPspAudioBackend_SetFrequency(u32 frequency);
 u32 OotPspAudioBackend_GetLength(void);
