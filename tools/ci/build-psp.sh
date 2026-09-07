@@ -1,10 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # Run inside the official pspdev/pspdev container; no ROM is needed.
-# The PSP image does not include the MIPS binutils used by the ROM modules.
-apk add --no-cache binutils-mips-linux-gnu python3 py3-yaml build-base cmake xxd zlib-dev openssl-dev
+apk add --no-cache curl python3 py3-yaml build-base cmake xxd zlib-dev openssl-dev
 : "${PSPDEV:?PSPDEV must point to the PSP toolchain}"
 : "${JOBS:=4}"
+repo_root="$PWD"
+
+# Alpine does not package the MIPS GNU binutils target used by the ROM modules.
+: "${BINUTILS_VERSION:=2.46.0}"
+curl -fsSL "https://ftp.gnu.org/gnu/binutils/binutils-${BINUTILS_VERSION}.tar.xz" \
+	-o "/tmp/binutils-${BINUTILS_VERSION}.tar.xz"
+tar -xf "/tmp/binutils-${BINUTILS_VERSION}.tar.xz" -C /tmp
+mkdir "/tmp/binutils-${BINUTILS_VERSION}-build"
+cd "/tmp/binutils-${BINUTILS_VERSION}-build"
+/tmp/binutils-${BINUTILS_VERSION}/configure \
+	--target=mips-linux-gnu \
+	--prefix=/usr/local \
+	--with-system-zlib \
+	--disable-gprof \
+	--disable-gdb \
+	--disable-werror
+make -j"$JOBS"
+make install
+cd "$repo_root"
+export PATH="/usr/local/bin:${PATH}"
+command -v mips-linux-gnu-ld >/dev/null
 
 # Media Engine audio uses this library in addition to PSPSDK/psp-packages.
 # Pin this revision when updating the audio backend's API dependency.
