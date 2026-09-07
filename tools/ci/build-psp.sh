@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # Run inside the official pspdev/pspdev container; no ROM is needed.
-apk add --no-cache python3 py3-yaml build-base cmake xxd zlib-dev openssl-dev
+# The PSP image does not include the MIPS binutils used by the ROM modules.
+apk add --no-cache binutils-mips-linux-gnu python3 py3-yaml build-base cmake xxd zlib-dev openssl-dev
 : "${PSPDEV:?PSPDEV must point to the PSP toolchain}"
 : "${JOBS:=4}"
 
