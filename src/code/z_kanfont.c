@@ -7,8 +7,26 @@
 #include "dma.h"
 #include "font.h"
 #include "message.h"
+#include <string.h>
 #if PLATFORM_PSP
 #include "oot_psp_asset_loader.h"
+#include "oot_psp_rom_profiles.h"
+#endif
+
+#if PLATFORM_PSP && OOT_CHINESE
+static uintptr_t Font_ChineseGlyphVrom(s32 offset) {
+    static size_t assetIndex = (size_t)-1;
+
+    if (assetIndex == (size_t)-1) {
+        for (assetIndex = 0; assetIndex < gOotPspExternalAssetCount; assetIndex++) {
+            if (strcmp(gOotPspExternalAssets[assetIndex].name, "nes_font_static") == 0) {
+                break;
+            }
+        }
+    }
+    return (uintptr_t)_nes_font_staticSegmentRomStart +
+           OotPspRomProfiles_MapResourceOffset(assetIndex, offset, FONT_CHAR_TEX_SIZE);
+}
 #endif
 
 #if PLATFORM_PSP
@@ -42,16 +60,26 @@ void Font_LoadCharWide(Font* font, u16 character, u16 codePointIndex) {
 void Font_LoadChar(Font* font, u8 character, u16 codePointIndex) {
     s32 offset = character * FONT_CHAR_TEX_SIZE;
 
+#if PLATFORM_PSP && OOT_CHINESE
+    DMA_REQUEST_SYNC(&font->charTexBuf[codePointIndex], Font_ChineseGlyphVrom(offset), FONT_CHAR_TEX_SIZE,
+                     "../z_kanfont.c", 93);
+#else
     DMA_REQUEST_SYNC(&font->charTexBuf[codePointIndex], (uintptr_t)_nes_font_staticSegmentRomStart + offset,
                      FONT_CHAR_TEX_SIZE, "../z_kanfont.c", 93);
+#endif
 }
 
-#if PLATFORM_IQUE
+#if OOT_CHINESE
 void Font_LoadCharCHN(Font* font, u16 character, u16 codePointIndex) {
     s32 offset = character * FONT_CHAR_TEX_SIZE;
 
+#if PLATFORM_PSP
+    DMA_REQUEST_SYNC(&font->charTexBuf[codePointIndex], Font_ChineseGlyphVrom(offset), FONT_CHAR_TEX_SIZE,
+                     "../z_kanfont.c", UNK_LINE);
+#else
     DMA_REQUEST_SYNC(&font->charTexBuf[codePointIndex], (uintptr_t)_nes_font_staticSegmentRomStart + offset,
                      FONT_CHAR_TEX_SIZE, "../z_kanfont.c", UNK_LINE);
+#endif
 }
 #endif
 
@@ -83,7 +111,7 @@ void Font_LoadOrderedFont(Font* font) {
     const OotPspMessageEntry* pspMessageEntry;
 #endif
 
-#if OOT_NTSC && !PLATFORM_IQUE
+#if OOT_NTSC && !OOT_CHINESE
 #if PLATFORM_PSP
     pspMessageEntry = OotPsp_FindMessageEntry(gOotPspJpnMessageEntries, gOotPspJpnMessageEntriesCount, 0xFFFC);
     if (pspMessageEntry == NULL) {
@@ -160,7 +188,7 @@ void Font_LoadOrderedFont(Font* font) {
             fontBufIndex += FONT_CHAR_TEX_SIZE / 8;
         }
     }
-#elif PLATFORM_IQUE
+#elif OOT_CHINESE
 #if PLATFORM_PSP
     pspMessageEntry = OotPsp_FindMessageEntry(gOotPspJpnMessageEntries, gOotPspJpnMessageEntriesCount, 0xFFFC);
     if (pspMessageEntry == NULL) {

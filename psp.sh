@@ -77,13 +77,59 @@ case "$PSP_ENABLE_GPROF" in
         ;;
 esac
 
-echo "Removing build/..."
-rm -rf build
-
-if [[ "$PSP_ENABLE_GPROF" == "1" ]]; then
-    echo "Building psp-port gprof mode with $jobs job(s) using $make_cmd..."
-else
-    echo "Building psp-port with $jobs job(s) using $make_cmd..."
+# Query the effective configuration with exactly the same overrides as the build.
+make_args=(PSP_ENABLE_GPROF="$PSP_ENABLE_GPROF" "$@")
+read_make_variable() {
+    local value
+    value="$("$make_cmd" --no-print-directory "${make_args[@]}" "print-$1")"
+    value="${value#* set to [}"
+    printf '%s\n' "${value%]}"
+}
+read -r -a psp_version_list <<< "$(read_make_variable PSP_PORT_VERSIONS)"
+bundle_dir="$(read_make_variable PSP_PORT_INSTALL_DIR)"
+if [[ -z "$bundle_dir" || "${#psp_version_list[@]}" -eq 0 ]]; then
+    echo "error: the Makefile did not report a bundle directory and revisions" >&2
+    exit 1
 fi
 
-"$make_cmd" -j"$jobs" psp-port PSP_ENABLE_GPROF="$PSP_ENABLE_GPROF" "$@"
+if [[ "${CLEAN_BUILD:-0}" == "1" ]]; then
+    echo "Removing build/..."
+    rm -rf build
+fi
+
+if [[ "$PSP_ENABLE_GPROF" == "1" ]]; then
+    echo "Building complete PSP bundle in gprof mode with $jobs job(s) using $make_cmd..."
+else
+    echo "Building complete PSP bundle with $jobs job(s) using $make_cmd..."
+fi
+echo "Game modules: ${#psp_version_list[@]} (${psp_version_list[*]})"
+
+"$make_cmd" -j"$jobs" psp-port "${make_args[@]}"
+
+required_files=(
+    EBOOT.PBP
+    Modules/unpacker.prx
+    Plugins/dvemgr.prx
+)
+for version in "${psp_version_list[@]}"; do
+    required_files+=("Modules/$version.prx")
+done
+
+missing_files=()
+for relative_path in "${required_files[@]}"; do
+    if [[ ! -f "$bundle_dir/$relative_path" ]]; then
+        missing_files+=("$relative_path")
+    fi
+done
+
+if [[ "${#missing_files[@]}" -ne 0 ]]; then
+    echo "error: PSP bundle is incomplete in $bundle_dir" >&2
+    printf '  missing: %s\n' "${missing_files[@]}" >&2
+    exit 1
+fi
+
+echo "Complete PSP bundle written to $bundle_dir"
+echo "  launcher: EBOOT.PBP"
+echo "  runtime unpacker: Modules/unpacker.prx"
+echo "  game modules: ${#psp_version_list[@]}"
+echo "  DVE plugin: Plugins/dvemgr.prx"

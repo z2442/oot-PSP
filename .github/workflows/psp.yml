@@ -1,0 +1,68 @@
+name: PSP builds
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * *'
+
+permissions:
+  contents: read
+concurrency:
+  group: psp-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build all supported ROM modules
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work \
+            pspdev/pspdev:latest bash tools/ci/build-psp.sh
+      - name: Package installable bundle
+        run: python3 tools/psp_port_package.py build/psp-port/ntsc-1.0 dist/oot-psp-nightly.zip --revision "$GITHUB_SHA"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oot-psp-${{ github.sha }}
+          path: dist/oot-psp-nightly.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  nightly:
+    needs: build
+    if: >-
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+      github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: oot-psp-${{ github.sha }}
+          path: dist
+      - name: Publish nightly prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="nightly-$(date -u +%Y%m%d)-${GITHUB_SHA:0:7}"
+          cat > notes.md <<EOF_NOTES
+          Automated PSP build from commit $GITHUB_SHA.
+
+          Extract the ZIP into PSP/GAME. Put one supported Ocarina of Time ROM
+          with a .z64 extension in OOT_PSP/data/, then launch the game.
+          The bundle includes all 16 game modules and the first-boot unpacker.
+          ROMs and extracted game assets are not included.
+          EOF_NOTES
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/oot-psp-nightly.zip --clobber
+          else
+            gh release create "$tag" dist/oot-psp-nightly.zip --target "$GITHUB_SHA" \
+              --title "PSP nightly $(date -u +%Y-%m-%d)" --prerelease --notes-file notes.md
+          fi

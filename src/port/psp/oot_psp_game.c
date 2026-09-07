@@ -62,6 +62,7 @@
 #include "z_game_dlftbls.h"
 #include "z_lib.h"
 #include "oot_psp_asset_loader.h"
+#include "oot_psp_rom_profiles.h"
 #include "oot_psp_audio_backend.h"
 #include "oot_psp_memory.h"
 
@@ -445,14 +446,15 @@ static void* OotPsp_TranslateSegmentedAddress(uintptr_t addr, u32 segment) {
     return (void*)(base + offset);
 }
 
-static void OotPsp_LogUnmappedSegment(uintptr_t addr, u32 segment) {
+static void OotPsp_LogUnmappedSegment(uintptr_t addr, u32 segment, uintptr_t caller) {
     static s32 sUnmappedSegmentLogCount = 0;
 
     addr = OotPsp_StripKernelAlias(addr);
 
     if (sUnmappedSegmentLogCount < 16) {
-        printf("oot-psp cpu unmapped segment addr=%08lx segment=%lu offset=%06lx\n", (unsigned long)addr,
-               (unsigned long)segment, (unsigned long)SEGMENT_OFFSET(addr));
+        printf("oot-psp cpu unmapped segment addr=%08lx segment=%lu offset=%06lx caller=%08lx\n",
+               (unsigned long)addr, (unsigned long)segment, (unsigned long)SEGMENT_OFFSET(addr),
+               (unsigned long)caller);
     } else if (sUnmappedSegmentLogCount == 16) {
         printf("oot-psp cpu unmapped segment logs suppressed\n");
     }
@@ -477,7 +479,7 @@ void* SegmentedToVirtualCompat(uintptr_t addr) {
             return OotPsp_TranslateSegmentedAddress(addr, segment);
         }
 
-        OotPsp_LogUnmappedSegment(addr, segment);
+        OotPsp_LogUnmappedSegment(addr, segment, (uintptr_t)__builtin_return_address(0));
         return NULL;
     }
 
@@ -502,7 +504,7 @@ void* SegmentedToVirtualExplicit(uintptr_t addr) {
         return OotPsp_TranslateSegmentedAddress(addr, segment);
     }
 
-    OotPsp_LogUnmappedSegment(addr, segment);
+    OotPsp_LogUnmappedSegment(addr, segment, (uintptr_t)__builtin_return_address(0));
     return NULL;
 }
 
@@ -826,7 +828,7 @@ void OotPspGame_Init(void) {
     memset(&gIrqMgr, 0, sizeof(gIrqMgr));
     memset(gSegments, 0, sizeof(gSegments));
 
-    gCurrentRegion = REGION_US;
+    gCurrentRegion = OotPspRomProfiles_GetActiveRegion();
     SaveContext_Init();
     OotPsp_LoadSram();
     gAppNmiBufferPtr = &sPspPreNmiBuffer;

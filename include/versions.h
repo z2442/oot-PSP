@@ -35,6 +35,9 @@
 #define OOT_PAL_N64 0
 #endif
 
+// Chinese text encoding is a ROM property, including on the PSP port.
+#define OOT_CHINESE (OOT_VERSION == IQUE_CN)
+
 // Master Quest
 #if OOT_VERSION == GC_JP_MQ || OOT_VERSION == GC_US_MQ || OOT_VERSION == GC_EU_MQ || OOT_VERSION == GC_EU_MQ_DBG
 #define OOT_MQ 1

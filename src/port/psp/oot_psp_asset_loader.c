@@ -1,7 +1,10 @@
 #include "oot_psp_asset_loader.h"
 #include "oot_psp_asset_builder.h"
+#include "oot_psp_asset_identity.h"
 #include "oot_psp_audio_backend.h"
+#include "oot_psp_audio_tables.h"
 #include "oot_psp_memory.h"
+#include "oot_psp_message_tables.h"
 #include "segment_symbols.h"
 
 #include <pspdmac.h>
@@ -35,7 +38,6 @@
 #define OOT_PSP_NATIVE_BYTE_RANGE_CACHE_COUNT    256
 #define OOT_PSP_ASSET_RANGE_SERIAL_CACHE_SET_COUNT 128
 #define OOT_PSP_ASSET_RANGE_SERIAL_CACHE_WAYS      4
-#define OOT_PSP_PACKED_ASSET_PATH           "data/segments/oot_psp_assets.bin"
 #define OOT_PSP_AUDIOBANK_ASSET_NAME        "Audiobank"
 #define OOT_PSP_AUDIOSEQ_ASSET_NAME         "Audioseq"
 #define OOT_PSP_KANJI_ASSET_NAME            "kanji"
@@ -46,6 +48,10 @@
 #define OOT_PSP_ASSET_READ_ZERO_RETRY_USEC  1000
 #define OOT_PSP_AUDIO_READ_BACKOFF_USEC     1000
 #define OOT_PSP_AUDIO_READ_BACKOFF_MAX_USEC 2000
+#define OOT_PSP_RUNTIME_AUDIO_VROM_START     0x40000000U
+#define OOT_PSP_RUNTIME_AUDIO_VROM_STRIDE    0x01000000U
+#define OOT_PSP_RUNTIME_MESSAGE_VROM_START   0x44000000U
+#define OOT_PSP_RUNTIME_MESSAGE_VROM_STRIDE  0x01000000U
 #define OOT_PSP_ASSET_DMA_COPY_MIN_SIZE     0x1000
 #define OOT_PSP_ASSET_DMA_COPY_MAX_SIZE     OOT_PSP_PACKED_CACHE_BLOCK_SIZE
 #define OOT_PSP_ASSET_CACHE_LINE_SIZE       64
@@ -111,7 +117,6 @@ typedef struct OotPspCacheAllocation {
     size_t size;
 } OotPspCacheAllocation;
 
-static char sOotPspAssetRoot[256];
 static s32 sOotPspOriginalRangesSorted = -1;
 static SceUID sOotPspAssetSema = -1;
 static SceUID sOotPspPackedAssetFd = -1;
@@ -148,6 +153,12 @@ static u16 sOotPspLoadedAssetRangeFreeSlots[OOT_PSP_LOADED_ASSET_RANGE_COUNT];
 static size_t sOotPspLoadedAssetRangeFreeSlotCount;
 static u32 sOotPspLoadedAssetSerial = 1;
 static u32 sOotPspAssetCacheClock;
+static const OotPspExternalAsset* sOotPspCodeAsset;
+static uintptr_t sOotPspCodeAssetVromEnd;
+static OotPspExternalAsset sOotPspRuntimeAudioAssets[OOT_PSP_EXTERNAL_AUDIO_ASSET_COUNT];
+static s32 sOotPspRuntimeAudioLayoutValid;
+static OotPspExternalAsset sOotPspRuntimeMessageAssets[OOT_PSP_EXTERNAL_MESSAGE_ASSET_COUNT];
+static s32 sOotPspRuntimeMessageLayoutValid;
 static volatile s32 sOotPspForegroundAssetReadWaiters;
 static volatile s32 sOotPspForegroundAssetReadActive;
 static OotPspCacheAllocation sOotPspCacheAllocations[OOT_PSP_CACHE_ALLOCATION_COUNT];
@@ -411,40 +422,32 @@ static void OotPsp_RememberAssetRangeSerial(uintptr_t ramStart, uintptr_t ramEnd
 }
 
 s32 OotPsp_AssetInit(const char* executablePath) {
-    const char* slash;
-    const char* backslash;
-    size_t length;
-
     OotPsp_ClosePackedAssetFile();
     OotPsp_ClearPackedAssetCache();
     sOotPspPackedAssetUnavailable = false;
-    sOotPspAssetRoot[0] = '\0';
 
-    if ((executablePath == NULL) || (executablePath[0] == '\0')) {
-        printf("oot-psp asset root missing argv0\n");
+    if (!OotPsp_SetAssetRoot(executablePath)) {
         return false;
     }
-
-    slash = strrchr(executablePath, '/');
-    backslash = strrchr(executablePath, '\\');
-    if ((backslash != NULL) && ((slash == NULL) || (backslash > slash))) {
-        slash = backslash;
-    }
-
-    if (slash == NULL) {
-        printf("oot-psp asset root no directory argv0=%s\n", executablePath);
+#if defined(OOT_PSP_GAME_MODULE)
+    if (!OotPspAssetBuilder_ActivateExisting(OOT_PSP_COMPILED_PROFILE_NAME)) {
+        printf("oot-psp assets do not match game module %s\n", OOT_PSP_COMPILED_PROFILE_NAME);
+        sOotPspPackedAssetUnavailable = true;
         return false;
     }
-
-    length = (size_t)(slash - executablePath) + 1;
-    if (length >= sizeof(sOotPspAssetRoot)) {
-        length = sizeof(sOotPspAssetRoot) - 1;
-    }
-
-    memcpy(sOotPspAssetRoot, executablePath, length);
-    sOotPspAssetRoot[length] = '\0';
-    printf("oot-psp asset root=%s\n", sOotPspAssetRoot);
+#else
     if (!OotPspAssetBuilder_Ensure()) {
+        sOotPspPackedAssetUnavailable = true;
+        return false;
+    }
+#endif
+    if (!OotPspAudioTables_LoadActive()) {
+        printf("oot-psp runtime audio table setup failed\n");
+        sOotPspPackedAssetUnavailable = true;
+        return false;
+    }
+    if (!OotPspMessageTables_LoadActive()) {
+        printf("oot-psp runtime message table setup failed\n");
         sOotPspPackedAssetUnavailable = true;
         return false;
     }
@@ -466,39 +469,6 @@ void OotPsp_AssetNotifyResume(void) {
      * the tracked position unknown immediately in case audio runs first. */
     sOotPspPackedAssetPositionKnown = false;
     sOotPspAssetResumePending = true;
-}
-
-static s32 OotPsp_IsAbsolutePath(const char* path) {
-    const char* slash;
-    const char* colon;
-
-    if ((path == NULL) || (path[0] == '\0')) {
-        return false;
-    }
-
-    if ((path[0] == '/') || (path[0] == '\\')) {
-        return true;
-    }
-
-    colon = strchr(path, ':');
-    slash = strpbrk(path, "/\\");
-    return (colon != NULL) && ((slash == NULL) || (colon < slash));
-}
-
-const char* OotPsp_ResolveRootPath(const char* path, char* buffer, size_t bufferSize) {
-    int written;
-
-    if (OotPsp_IsAbsolutePath(path) || (sOotPspAssetRoot[0] == '\0')) {
-        return path;
-    }
-
-    written = snprintf(buffer, bufferSize, "%s%s", sOotPspAssetRoot, path);
-    if ((written < 0) || ((size_t)written >= bufferSize)) {
-        printf("oot-psp root path too long root=%s path=%s\n", sOotPspAssetRoot, path);
-        return path;
-    }
-
-    return buffer;
 }
 
 static void OotPsp_ClearPackedAssetCache(void) {
@@ -620,6 +590,309 @@ static const char* OotPsp_AssetName(const OotPspExternalAsset* asset) {
     }
 
     return asset->name;
+}
+
+static uintptr_t OotPsp_AssetVromEnd(const OotPspExternalAsset* asset) {
+    if ((asset == sOotPspCodeAsset) && (sOotPspCodeAssetVromEnd > asset->vromStart)) {
+        return sOotPspCodeAssetVromEnd;
+    }
+    return asset->vromEnd;
+}
+
+static const char* sOotPspRuntimeAudioAssetNames[OOT_PSP_EXTERNAL_AUDIO_ASSET_COUNT] = {
+    OOT_PSP_AUDIOBANK_ASSET_NAME,
+    OOT_PSP_AUDIOSEQ_ASSET_NAME,
+    OOT_PSP_AUDIOTABLE_ASSET_NAME,
+};
+
+static const char* sOotPspRuntimeMessageAssetNames[OOT_PSP_EXTERNAL_MESSAGE_ASSET_COUNT] = {
+    "jpn_message_data_static",
+    "nes_message_data_static",
+    "ger_message_data_static",
+    "fra_message_data_static",
+    "staff_message_data_static",
+};
+
+static const OotPspExternalAsset* OotPsp_FindRuntimeAudioAssetByName(const char* name) {
+    size_t i;
+
+    if (!sOotPspRuntimeAudioLayoutValid || (name == NULL)) {
+        return NULL;
+    }
+    for (i = 0; i < OOT_PSP_EXTERNAL_AUDIO_ASSET_COUNT; i++) {
+        if (strcmp(sOotPspRuntimeAudioAssets[i].name, name) == 0) {
+            return &sOotPspRuntimeAudioAssets[i];
+        }
+    }
+    return NULL;
+}
+
+static const OotPspExternalAsset* OotPsp_FindContainingRuntimeAudioAsset(uintptr_t vrom, size_t size) {
+    size_t i;
+    uintptr_t vromEnd;
+
+    if (!sOotPspRuntimeAudioLayoutValid || (vrom > (UINTPTR_MAX - size))) {
+        return NULL;
+    }
+    vromEnd = vrom + size;
+    for (i = 0; i < OOT_PSP_EXTERNAL_AUDIO_ASSET_COUNT; i++) {
+        const OotPspExternalAsset* asset = &sOotPspRuntimeAudioAssets[i];
+
+        if ((vrom >= asset->vromStart) && (vromEnd <= asset->vromEnd)) {
+            return asset;
+        }
+    }
+    return NULL;
+}
+
+static const OotPspExternalAsset* OotPsp_FindContainingRuntimeMessageAsset(uintptr_t vrom, size_t size) {
+    size_t i;
+    uintptr_t vromEnd;
+
+    if (!sOotPspRuntimeMessageLayoutValid || (vrom > (UINTPTR_MAX - size))) {
+        return NULL;
+    }
+    vromEnd = vrom + size;
+    for (i = 0; i < OOT_PSP_EXTERNAL_MESSAGE_ASSET_COUNT; i++) {
+        const OotPspExternalAsset* asset = &sOotPspRuntimeMessageAssets[i];
+
+        if ((asset->vromEnd > asset->vromStart) && (vrom >= asset->vromStart) &&
+            (vromEnd <= asset->vromEnd)) {
+            return asset;
+        }
+    }
+    return NULL;
+}
+
+static OotPspExternalAsset sOotPspRuntimeSceneAssets[OOT_PSP_SCENE_ASSET_MAX];
+static u32 sOotPspRuntimeSceneIndices[OOT_PSP_SCENE_ASSET_MAX];
+static size_t sOotPspRuntimeSceneCount;
+
+s32 OotPsp_SetExternalSceneAssetLayout(const OotPspExternalSceneAssetLayout* layouts) {
+    size_t i;
+    sOotPspRuntimeSceneCount = 0;
+    for (i = 0; i < OOT_PSP_SCENE_ASSET_MAX && layouts[i].size; i++) {
+        OotPspExternalAsset* asset = &sOotPspRuntimeSceneAssets[i];
+        if (layouts[i].assetIndex >= gOotPspExternalAssetCount || layouts[i].size > OOT_PSP_SCENE_VROM_STRIDE)
+            return false;
+        *asset = gOotPspExternalAssets[layouts[i].assetIndex];
+        if (strstr(asset->name, "_scene") == NULL && strstr(asset->name, "_room_") == NULL) return false;
+        asset->vromStart = OOT_PSP_SCENE_VROM_BASE + i * OOT_PSP_SCENE_VROM_STRIDE;
+        asset->vromEnd = asset->vromStart + layouts[i].size;
+        asset->originalVromStart = layouts[i].sourceVromStart;
+        asset->originalVromEnd = asset->originalVromStart + layouts[i].size;
+        asset->fileOffset = layouts[i].fileOffset;
+        asset->flags = OOT_PSP_EXTERNAL_ASSET_NATIVE | OOT_PSP_EXTERNAL_ASSET_SOURCE_TEXTURES;
+        sOotPspRuntimeSceneIndices[i] = layouts[i].assetIndex;
+    }
+    sOotPspRuntimeSceneCount = i;
+    return true;
+}
+
+static const OotPspExternalAsset* OotPsp_FindRuntimeSceneByIndex(size_t index) {
+    size_t i;
+    for (i = 0; i < sOotPspRuntimeSceneCount; i++)
+        if (sOotPspRuntimeSceneIndices[i] == index) return &sOotPspRuntimeSceneAssets[i];
+    return NULL;
+}
+
+static const OotPspExternalAsset* OotPsp_FindContainingRuntimeScene(uintptr_t vrom, size_t size) {
+    size_t index;
+    const OotPspExternalAsset* asset;
+    if (vrom < OOT_PSP_SCENE_VROM_BASE) return NULL;
+    index = (vrom - OOT_PSP_SCENE_VROM_BASE) / OOT_PSP_SCENE_VROM_STRIDE;
+    if (index >= sOotPspRuntimeSceneCount) return NULL;
+    asset = &sOotPspRuntimeSceneAssets[index];
+    return vrom <= asset->vromEnd && size <= asset->vromEnd - vrom ? asset : NULL;
+}
+
+static s32 OotPsp_NormalizeSceneFile(RomFile* file) {
+    size_t i;
+    for (i = 0; i < sOotPspRuntimeSceneCount; i++) {
+        const OotPspExternalAsset* asset = &sOotPspRuntimeSceneAssets[i];
+        const OotPspExternalAsset* canonical = &gOotPspExternalAssets[sOotPspRuntimeSceneIndices[i]];
+        if ((file->vromStart == canonical->vromStart && file->vromEnd == canonical->vromEnd) ||
+            (file->vromStart == asset->originalVromStart && file->vromEnd == asset->originalVromEnd)) {
+            file->vromStart = asset->vromStart;
+            file->vromEnd = asset->vromEnd;
+            return true;
+        }
+    }
+    return OotPsp_FindContainingRuntimeScene(file->vromStart, file->vromEnd - file->vromStart) != NULL;
+}
+
+static const OotPspExternalAsset* OotPsp_FindContainingRuntimeAsset(uintptr_t vrom, size_t size) {
+    const OotPspExternalAsset* asset = OotPsp_FindContainingRuntimeAudioAsset(vrom, size);
+
+    if (asset == NULL) asset = OotPsp_FindContainingRuntimeMessageAsset(vrom, size);
+    return asset != NULL ? asset : OotPsp_FindContainingRuntimeScene(vrom, size);
+}
+
+s32 OotPsp_SetExternalAudioAssetLayout(
+    const OotPspExternalAudioAssetLayout layouts[OOT_PSP_EXTERNAL_AUDIO_ASSET_COUNT]) {
+    OotPspExternalAsset resolved[OOT_PSP_EXTERNAL_AUDIO_ASSET_COUNT];
+    size_t audioIndex;
+
+    sOotPspRuntimeAudioLayoutValid = false;
+    if (layouts == NULL) {
+        return false;
+    }
+    for (audioIndex = 0; audioIndex < OOT_PSP_EXTERNAL_AUDIO_ASSET_COUNT; audioIndex++) {
+        const OotPspExternalAsset* source = NULL;
+        uintptr_t vromStart = OOT_PSP_RUNTIME_AUDIO_VROM_START +
+                              (audioIndex * OOT_PSP_RUNTIME_AUDIO_VROM_STRIDE);
+        size_t assetIndex;
+
+        if ((layouts[audioIndex].size == 0) ||
+            (layouts[audioIndex].size > OOT_PSP_RUNTIME_AUDIO_VROM_STRIDE) ||
+            (layouts[audioIndex].fileOffset > (UINTPTR_MAX - layouts[audioIndex].size))) {
+            return false;
+        }
+        for (assetIndex = 0; assetIndex < gOotPspExternalAssetCount; assetIndex++) {
+            if (strcmp(gOotPspExternalAssets[assetIndex].name,
+                       sOotPspRuntimeAudioAssetNames[audioIndex]) == 0) {
+                source = &gOotPspExternalAssets[assetIndex];
+                break;
+            }
+        }
+        if (source == NULL) {
+            return false;
+        }
+        resolved[audioIndex] = *source;
+        resolved[audioIndex].vromStart = vromStart;
+        resolved[audioIndex].vromEnd = vromStart + layouts[audioIndex].size;
+        resolved[audioIndex].originalVromStart = vromStart;
+        resolved[audioIndex].originalVromEnd = resolved[audioIndex].vromEnd;
+        resolved[audioIndex].fileOffset = layouts[audioIndex].fileOffset;
+    }
+    memcpy(sOotPspRuntimeAudioAssets, resolved, sizeof(resolved));
+    sOotPspRuntimeAudioLayoutValid = true;
+    return true;
+}
+
+uintptr_t OotPsp_GetExternalAudioAssetVromStart(size_t index) {
+    if (!sOotPspRuntimeAudioLayoutValid || (index >= OOT_PSP_EXTERNAL_AUDIO_ASSET_COUNT)) {
+        return 0;
+    }
+    return sOotPspRuntimeAudioAssets[index].vromStart;
+}
+
+size_t OotPsp_GetExternalAudioAssetSize(size_t index) {
+    if (!sOotPspRuntimeAudioLayoutValid || (index >= OOT_PSP_EXTERNAL_AUDIO_ASSET_COUNT)) {
+        return 0;
+    }
+    return sOotPspRuntimeAudioAssets[index].vromEnd - sOotPspRuntimeAudioAssets[index].vromStart;
+}
+
+s32 OotPsp_SetExternalMessageAssetLayout(
+    const OotPspExternalMessageAssetLayout layouts[OOT_PSP_EXTERNAL_MESSAGE_ASSET_COUNT]) {
+    OotPspExternalAsset resolved[OOT_PSP_EXTERNAL_MESSAGE_ASSET_COUNT];
+    size_t messageIndex;
+
+    sOotPspRuntimeMessageLayoutValid = false;
+    if (layouts == NULL) {
+        return false;
+    }
+    memset(resolved, 0, sizeof(resolved));
+    for (messageIndex = 0; messageIndex < OOT_PSP_EXTERNAL_MESSAGE_ASSET_COUNT; messageIndex++) {
+        const OotPspExternalAsset* source = NULL;
+        uintptr_t vromStart = OOT_PSP_RUNTIME_MESSAGE_VROM_START +
+                              (messageIndex * OOT_PSP_RUNTIME_MESSAGE_VROM_STRIDE);
+        size_t assetIndex;
+
+        if (layouts[messageIndex].size == 0) {
+            resolved[messageIndex].name = sOotPspRuntimeMessageAssetNames[messageIndex];
+            continue;
+        }
+        if ((layouts[messageIndex].size > OOT_PSP_RUNTIME_MESSAGE_VROM_STRIDE) ||
+            (layouts[messageIndex].fileOffset > (UINTPTR_MAX - layouts[messageIndex].size))) {
+            return false;
+        }
+        for (assetIndex = 0; assetIndex < gOotPspExternalAssetCount; assetIndex++) {
+            if (strcmp(gOotPspExternalAssets[assetIndex].name,
+                       sOotPspRuntimeMessageAssetNames[messageIndex]) == 0) {
+                source = &gOotPspExternalAssets[assetIndex];
+                break;
+            }
+        }
+        if (source != NULL) {
+            resolved[messageIndex] = *source;
+        } else {
+            resolved[messageIndex].name = sOotPspRuntimeMessageAssetNames[messageIndex];
+        }
+        resolved[messageIndex].vromStart = vromStart;
+        resolved[messageIndex].vromEnd = vromStart + layouts[messageIndex].size;
+        resolved[messageIndex].originalVromStart = vromStart;
+        resolved[messageIndex].originalVromEnd = resolved[messageIndex].vromEnd;
+        resolved[messageIndex].fileOffset = layouts[messageIndex].fileOffset;
+    }
+    memcpy(sOotPspRuntimeMessageAssets, resolved, sizeof(resolved));
+    sOotPspRuntimeMessageLayoutValid = true;
+    return true;
+}
+
+uintptr_t OotPsp_GetExternalMessageAssetVromStart(size_t index) {
+    if (!sOotPspRuntimeMessageLayoutValid || (index >= OOT_PSP_EXTERNAL_MESSAGE_ASSET_COUNT) ||
+        (sOotPspRuntimeMessageAssets[index].vromEnd <= sOotPspRuntimeMessageAssets[index].vromStart)) {
+        return 0;
+    }
+    return sOotPspRuntimeMessageAssets[index].vromStart;
+}
+
+size_t OotPsp_GetExternalMessageAssetSize(size_t index) {
+    if (OotPsp_GetExternalMessageAssetVromStart(index) == 0) {
+        return 0;
+    }
+    return sOotPspRuntimeMessageAssets[index].vromEnd - sOotPspRuntimeMessageAssets[index].vromStart;
+}
+
+uintptr_t OotPsp_GetExternalAssetVromStart(const char* name) {
+    size_t i;
+
+    if (name == NULL) {
+        return 0;
+    }
+    for (i = 0; i < gOotPspExternalAssetCount; i++) {
+        if (strcmp(gOotPspExternalAssets[i].name, name) == 0) {
+            const OotPspExternalAsset* scene = OotPsp_FindRuntimeSceneByIndex(i);
+            return scene != NULL ? scene->vromStart : gOotPspExternalAssets[i].vromStart;
+        }
+    }
+    return 0;
+}
+
+size_t OotPsp_GetExternalAssetSize(const char* name) {
+    size_t i;
+
+    if (name == NULL) {
+        return 0;
+    }
+    for (i = 0; i < gOotPspExternalAssetCount; i++) {
+        if (strcmp(gOotPspExternalAssets[i].name, name) == 0) {
+            const OotPspExternalAsset* scene = OotPsp_FindRuntimeSceneByIndex(i);
+            return scene != NULL ? scene->vromEnd - scene->vromStart :
+                OotPsp_AssetVromEnd(&gOotPspExternalAssets[i]) - gOotPspExternalAssets[i].vromStart;
+        }
+    }
+    return 0;
+}
+
+void OotPsp_SetExternalCodeAssetSize(size_t size) {
+    size_t i;
+
+    sOotPspCodeAsset = NULL;
+    sOotPspCodeAssetVromEnd = 0;
+    for (i = 0; i < gOotPspExternalAssetCount; i++) {
+        const OotPspExternalAsset* asset = &gOotPspExternalAssets[i];
+
+        if (strcmp(OotPsp_AssetName(asset), "code") == 0) {
+            if ((size != 0) && (size <= UINTPTR_MAX - asset->vromStart)) {
+                sOotPspCodeAsset = asset;
+                sOotPspCodeAssetVromEnd = asset->vromStart + size;
+            }
+            return;
+        }
+    }
 }
 
 static s32 OotPsp_AssetNameEquals(const OotPspExternalAsset* asset, const char* expectedName) {
@@ -984,8 +1257,10 @@ static size_t OotPsp_GetAssetCacheSizeLimit(const OotPspExternalAsset* asset) {
      */
     for (i = 0; i < OOT_PSP_PINNED_ASSET_CACHE_COUNT; i++) {
         if (OotPsp_AssetNameEquals(asset, sOotPspPinnedAssetCaches[i].name)) {
-            if (asset->vromEnd > asset->vromStart) {
-                return asset->vromEnd - asset->vromStart;
+            uintptr_t assetEnd = OotPsp_AssetVromEnd(asset);
+
+            if (assetEnd > asset->vromStart) {
+                return assetEnd - asset->vromStart;
             }
             return 0;
         }
@@ -1031,12 +1306,12 @@ static s32 OotPsp_EnsureAssetCacheRange(OotPspAssetWindowCache* cache, const Oot
         return false;
     }
 
-    if (asset->vromEnd <= asset->vromStart) {
+    if (OotPsp_AssetVromEnd(asset) <= asset->vromStart) {
         cache->failed = true;
         return false;
     }
 
-    fileSize = asset->vromEnd - asset->vromStart;
+    fileSize = OotPsp_AssetVromEnd(asset) - asset->vromStart;
     if ((offset > fileSize) || (size > (fileSize - offset))) {
         return false;
     }
@@ -1115,6 +1390,23 @@ static void OotPsp_PreloadPersistentAssets(void) {
                 continue;
             }
 
+            {
+                const OotPspExternalAsset* runtimeAsset =
+                    OotPsp_FindRuntimeAudioAssetByName(pinned->name);
+
+                if (runtimeAsset != NULL) {
+                    size_t fileSize = OotPsp_AssetVromEnd(runtimeAsset) - runtimeAsset->vromStart;
+
+                    if ((selectedAsset == NULL) || (fileSize > selectedFileSize)) {
+                        selectedAsset = runtimeAsset;
+                        selectedPinned = pinned;
+                        selectedCacheIndex = cacheIndex;
+                        selectedFileSize = fileSize;
+                    }
+                    continue;
+                }
+            }
+
             for (assetIndex = 0; assetIndex < gOotPspExternalAssetCount; assetIndex++) {
                 const OotPspExternalAsset* asset = &gOotPspExternalAssets[assetIndex];
                 size_t fileSize;
@@ -1123,7 +1415,7 @@ static void OotPsp_PreloadPersistentAssets(void) {
                     continue;
                 }
 
-                fileSize = asset->vromEnd - asset->vromStart;
+                fileSize = OotPsp_AssetVromEnd(asset) - asset->vromStart;
                 if ((selectedAsset == NULL) || (fileSize > selectedFileSize)) {
                     selectedAsset = asset;
                     selectedPinned = pinned;
@@ -1164,7 +1456,7 @@ static const OotPspExternalAsset* OotPsp_FindContainingExternalAsset(uintptr_t v
 
         if (vrom < asset->vromStart) {
             right = mid;
-        } else if (vrom >= asset->vromEnd) {
+        } else if (vrom >= OotPsp_AssetVromEnd(asset)) {
             left = mid + 1;
         } else {
             if (index != NULL) {
@@ -1196,11 +1488,11 @@ static s32 OotPsp_IsExternalAssetSpanContiguous(size_t index, uintptr_t vromStar
         }
 
         asset = &gOotPspExternalAssets[index];
-        if ((cursor < asset->vromStart) || (cursor >= asset->vromEnd)) {
+        if ((cursor < asset->vromStart) || (cursor >= OotPsp_AssetVromEnd(asset))) {
             return false;
         }
 
-        cursor = asset->vromEnd;
+        cursor = OotPsp_AssetVromEnd(asset);
         if ((cursor < vromEnd) &&
             (((index + 1) >= gOotPspExternalAssetCount) || (gOotPspExternalAssets[index + 1].vromStart != cursor))) {
             return false;
@@ -1221,13 +1513,18 @@ const void* OotPsp_GetCachedAssetPointer(uintptr_t vrom, size_t size) {
     size_t offset;
     size_t cacheOffset;
 
-    if ((vrom > (UINTPTR_MAX - size)) || !OotPsp_NormalizeVromRange(vrom, vrom + size, &normalizedVrom,
-                                                                    &normalizedEnd)) {
-        return NULL;
+    asset = OotPsp_FindContainingRuntimeAsset(vrom, size);
+    if (asset != NULL) {
+        normalizedVrom = vrom;
+        normalizedEnd = vrom + size;
+    } else {
+        if ((vrom > (UINTPTR_MAX - size)) || !OotPsp_NormalizeVromRange(vrom, vrom + size, &normalizedVrom,
+                                                                        &normalizedEnd)) {
+            return NULL;
+        }
+        asset = OotPsp_FindContainingExternalAsset(normalizedVrom, NULL);
     }
-
-    asset = OotPsp_FindContainingExternalAsset(normalizedVrom, NULL);
-    if ((asset == NULL) || (normalizedEnd > asset->vromEnd)) {
+    if ((asset == NULL) || (normalizedEnd > OotPsp_AssetVromEnd(asset))) {
         return NULL;
     }
 
@@ -1447,6 +1744,49 @@ OotPsp_FindLoadedAssetSerialRange(uintptr_t ramStart) {
 
     range = &sOotPspLoadedAssetSerialRanges[left - 1];
     return (ramStart < range->ramEnd) ? range : NULL;
+}
+
+static s32 OotPsp_FindLoadedAssetSerialSpan(uintptr_t ramStart, uintptr_t ramEnd, size_t* firstIndex,
+                                            size_t* lastIndex, u32* flags) {
+    uintptr_t cursor = ramStart;
+    size_t first = 0;
+    size_t last;
+    u32 combinedFlags = ~0U;
+
+    if (ramEnd <= ramStart) {
+        return false;
+    }
+
+    while ((first < sOotPspLoadedAssetSerialRangeCount) &&
+           (sOotPspLoadedAssetSerialRanges[first].ramEnd <= ramStart)) {
+        first++;
+    }
+    last = first;
+    while ((last < sOotPspLoadedAssetSerialRangeCount) && (cursor < ramEnd)) {
+        const OotPspLoadedAssetSerialRange* range = &sOotPspLoadedAssetSerialRanges[last];
+
+        if (range->ramStart > cursor) {
+            return false;
+        }
+        if (range->ramEnd > cursor) {
+            cursor = range->ramEnd;
+            combinedFlags &= range->flags;
+        }
+        last++;
+    }
+    if (cursor < ramEnd) {
+        return false;
+    }
+    if (firstIndex != NULL) {
+        *firstIndex = first;
+    }
+    if (lastIndex != NULL) {
+        *lastIndex = last;
+    }
+    if (flags != NULL) {
+        *flags = combinedFlags;
+    }
+    return true;
 }
 
 static void OotPsp_ClearLoadedAssetRange(void* ram, size_t size) {
@@ -1821,6 +2161,32 @@ static s32 OotPsp_TryTranslateAssetRange(const OotPspExternalAsset* asset, uintp
     return true;
 }
 
+static s32 OotPsp_TryNormalizeLegacyExternalRange(uintptr_t vromStart, uintptr_t vromEnd,
+                                                   uintptr_t* normalizedStart, uintptr_t* normalizedEnd) {
+    size_t left = 0;
+    size_t right = gOotPspExternalAssetLegacyRangeCount;
+
+    while (left < right) {
+        size_t mid = left + ((right - left) / 2);
+        const OotPspExternalAssetLegacyRange* range = &gOotPspExternalAssetLegacyRanges[mid];
+
+        if (vromStart < range->legacyVromStart) {
+            right = mid;
+        } else if ((vromStart > range->legacyVromEnd) ||
+                   ((vromStart == range->legacyVromEnd) && (vromEnd != vromStart))) {
+            left = mid + 1;
+        } else if (OotPsp_RangeContains(range->legacyVromStart, range->legacyVromEnd,
+                                        vromStart, vromEnd)) {
+            *normalizedStart = range->vromStart + (vromStart - range->legacyVromStart);
+            *normalizedEnd = range->vromStart + (vromEnd - range->legacyVromStart);
+            return true;
+        } else {
+            return false;
+        }
+    }
+    return false;
+}
+
 static s32 OotPsp_TryNormalizeExternalRange(uintptr_t vromStart, uintptr_t vromEnd, uintptr_t* normalizedStart,
                                             uintptr_t* normalizedEnd) {
     size_t assetIndex;
@@ -1872,7 +2238,15 @@ void OotPsp_NormalizeRomFile(RomFile* file) {
         return;
     }
 
-    if (OotPsp_NormalizeVromRange(file->vromStart, file->vromEnd, &normalizedStart, &normalizedEnd)) {
+    if (OotPsp_NormalizeSceneFile(file)) return;
+
+    /* Native scene assets were captured before the regional union expanded
+     * several earlier segments. Their embedded room lists therefore contain
+     * the old synthetic VROM layout, which can overlap unrelated assets in
+     * the expanded layout. Resolve that unambiguous scene-table form first. */
+    if (OotPsp_TryNormalizeLegacyExternalRange(file->vromStart, file->vromEnd,
+                                                &normalizedStart, &normalizedEnd) ||
+        OotPsp_NormalizeVromRange(file->vromStart, file->vromEnd, &normalizedStart, &normalizedEnd)) {
         file->vromStart = normalizedStart;
         file->vromEnd = normalizedEnd;
     }
@@ -1881,6 +2255,11 @@ void OotPsp_NormalizeRomFile(RomFile* file) {
 const OotPspMessageEntry* OotPsp_FindMessageEntry(const OotPspMessageEntry* entries, size_t count, u16 textId) {
     size_t left = 0;
     size_t right = count;
+
+    OotPspMessageTables_Resolve(&entries, &count);
+    if ((entries == NULL) || (count == 0)) {
+        return NULL;
+    }
 
     /* Generated message tables are ordered by text ID. They contain roughly
      * two thousand entries, so binary search avoids a noticeable scan when a
@@ -1922,6 +2301,9 @@ s32 OotPsp_GetLoadedExternalAssetRangeFlags(const void* ptr, size_t size, u32* f
         }
         return true;
     }
+    if (OotPsp_FindLoadedAssetSerialSpan(ramStart, ramEnd, NULL, NULL, flags)) {
+        return true;
+    }
 
     if (sOotPspLoadedAssetSerialRangeIndexComplete) {
         return false;
@@ -1947,27 +2329,31 @@ s32 OotPsp_GetLoadedExternalAssetRangeFlags(const void* ptr, size_t size, u32* f
 s32 OotPsp_MarkLoadedExternalAssetRangeFlags(const void* ptr, size_t size, u32 flags) {
     uintptr_t ramStart;
     uintptr_t ramEnd;
+    size_t firstSerialIndex;
+    size_t lastSerialIndex;
     size_t i;
     s32 marked = false;
+    s32 serialSpanFound;
 
     if ((flags == 0) || !OotPsp_RamRangeFromPtr(ptr, size, &ramStart, &ramEnd)) {
         return false;
     }
 
-    for (i = 0; i < sOotPspLoadedAssetSerialRangeCount; i++) {
-        OotPspLoadedAssetSerialRange* range = &sOotPspLoadedAssetSerialRanges[i];
-
-        if (OotPsp_RangeContains(range->ramStart, range->ramEnd, ramStart, ramEnd)) {
-            range->flags |= flags;
-            marked = true;
-            break;
+    serialSpanFound = OotPsp_FindLoadedAssetSerialSpan(ramStart, ramEnd, &firstSerialIndex,
+                                                        &lastSerialIndex, NULL);
+    if (serialSpanFound) {
+        for (i = firstSerialIndex; i < lastSerialIndex; i++) {
+            sOotPspLoadedAssetSerialRanges[i].flags |= flags;
         }
+        marked = true;
     }
 
     for (i = 0; i < sOotPspLoadedAssetRangeHighWater; i++) {
         OotPspLoadedAssetRange* range = &sOotPspLoadedAssetRanges[i];
 
-        if ((range->serial != 0) && OotPsp_RangeContains(range->ramStart, range->ramEnd, ramStart, ramEnd)) {
+        if ((range->serial != 0) &&
+            ((serialSpanFound && OotPsp_RangesOverlap(range->ramStart, range->ramEnd, ramStart, ramEnd)) ||
+             OotPsp_RangeContains(range->ramStart, range->ramEnd, ramStart, ramEnd))) {
             OotPsp_ForgetNativeTextureRangeCache(range);
             range->flags |= flags;
             marked = true;
@@ -2281,6 +2667,27 @@ static s32 OotPsp_AssetReadLocked(void* ram, uintptr_t vrom, size_t size, s32 us
 
     OotPsp_ClearLoadedAssetRange(ram, size);
 
+    {
+        const OotPspExternalAsset* runtimeAudio = OotPsp_FindContainingRuntimeAsset(vrom, size);
+
+        if (runtimeAudio != NULL) {
+            size_t offset = vrom - runtimeAudio->vromStart;
+            u32 serial;
+
+            if (OotPsp_TryReadAssetCache(runtimeAudio, ram, vrom, size, useVfpuCopy, allowAudioYield)) {
+                return OOT_PSP_ASSET_READ_OK;
+            }
+            if (!OotPsp_ReadPackedAssetFileRange(runtimeAudio, offset, ram, size,
+                                                 size < OOT_PSP_PACKED_DIRECT_READ_MIN_SIZE,
+                                                 useVfpuCopy, allowAudioYield)) {
+                return OOT_PSP_ASSET_READ_FAILED;
+            }
+            serial = OotPsp_NextLoadedAssetSerial();
+            OotPsp_RegisterLoadedAssetRanges(ram, size, vrom, runtimeAudio, serial);
+            return OOT_PSP_ASSET_READ_OK;
+        }
+    }
+
     if ((vrom > (UINTPTR_MAX - size)) ||
         !OotPsp_NormalizeVromRange(vrom, vrom + size, &normalizedVrom, &normalizedEnd)) {
         return OOT_PSP_ASSET_READ_NOT_EXTERNAL;
@@ -2307,13 +2714,13 @@ static s32 OotPsp_AssetReadLocked(void* ram, uintptr_t vrom, size_t size, s32 us
         u8* chunkOut;
         u32 chunkSerial;
 
-        if ((cursor < asset->vromStart) || (cursor >= asset->vromEnd)) {
+        if ((cursor < asset->vromStart) || (cursor >= OotPsp_AssetVromEnd(asset))) {
             return OOT_PSP_ASSET_READ_NOT_EXTERNAL;
         }
 
         offset = cursor - asset->vromStart;
         chunkVromStart = cursor;
-        chunkRemaining = asset->vromEnd - cursor;
+        chunkRemaining = OotPsp_AssetVromEnd(asset) - cursor;
         chunkSize = remaining < chunkRemaining ? remaining : chunkRemaining;
         chunkOut = out;
         chunkSerial = OotPsp_NextLoadedAssetSerial();

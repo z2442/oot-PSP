@@ -48,6 +48,7 @@
 #include "vis.h"
 #if PLATFORM_PSP
 #include "oot_psp_performance.h"
+#include "oot_psp_asset_loader.h"
 #include "oot_psp_renderer.h"
 #endif
 
@@ -1677,6 +1678,7 @@ f32 func_800BFCB8(PlayState* this, MtxF* mf, Vec3f* pos) {
 
 static u32 Play_GetRomFileSize(RomFile* file) {
 #if PLATFORM_PSP
+    OotPsp_NormalizeRomFile(file);
     if ((file->vromStart != 0) && (file->vromEnd == 0)) {
         return 0;
     }

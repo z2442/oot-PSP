@@ -39,6 +39,9 @@
 #include "assets/objects/object_mag/object_mag.h"
 #endif
 #include "assets/textures/title_static/title_static.h"
+#if PLATFORM_PSP
+#include "oot_psp_regional_assets.h"
+#endif
 #include "assets/textures/parameter_static/parameter_static.h"
 
 #if OOT_PAL_N64
@@ -2340,6 +2343,10 @@ void FileSelect_Init(GameState* thisx) {
     FileSelectState* this = (FileSelectState*)thisx;
     s32 pad;
     u32 size = (uintptr_t)_title_staticSegmentRomEnd - (uintptr_t)_title_staticSegmentRomStart;
+
+#if PLATFORM_PSP
+    OotPspFileSelect_LoadStaticData();
+#endif
 
 #if PLATFORM_N64
     if (D_80121212 != 0) {

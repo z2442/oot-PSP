@@ -1,8 +1,10 @@
 #include "oot_psp_runtime_patch.h"
 
 #include "oot_psp_asset_loader.h"
+#include "oot_psp_rom_profiles.h"
 
 #include <pspkernel.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <zlib.h>
@@ -15,17 +17,8 @@ extern const u8 gOotPspRuntimePatchBlob[] __attribute__((weak));
 extern const u8 gOotPspRuntimePatchBlobEnd[] __attribute__((weak));
 extern u8 _ftext[];
 
-#define OOT_PSP_CODE_NJPG_TEXT_OFFSET 0x000D5B20U
-#define OOT_PSP_CODE_NJPG_TEXT_SIZE   0x00000AF0U
-#define OOT_PSP_CODE_NJPG_DATA_OFFSET 0x00103CD0U
-#define OOT_PSP_CODE_NJPG_DATA_SIZE   0x00000060U
-
 static u32 OotPspRuntimePatch_ReadLe32(const u8* data) {
     return (u32)data[0] | ((u32)data[1] << 8) | ((u32)data[2] << 16) | ((u32)data[3] << 24);
-}
-
-static s32 OotPspRuntimePatch_ReadLeS32(const u8* data) {
-    return (s32)OotPspRuntimePatch_ReadLe32(data);
 }
 
 static s32 OotPspRuntimePatch_Transform(u8* data, size_t size, const u8* payload, size_t payloadSize,
@@ -110,18 +103,38 @@ cleanup:
 }
 
 s32 OotPspRuntimePatch_Apply(void) {
+    const OotPspRomProfile* profile = OotPspRomProfiles_GetActive();
     const u8* cursor = gOotPspRuntimePatchBlob;
     const u8* end = gOotPspRuntimePatchBlobEnd;
     const u8* permutations;
     u32 patchCount;
     u32 permutationCount;
     u32 patchIndex;
+    u32 profileCount = 0;
+    size_t activeProfileIndex = OotPspRomProfiles_GetActiveIndex();
     s32 hasPatchFlags;
+    s32 hasProfileSources = false;
+    s32 hasDirectRelocations = false;
 
-    if ((size_t)(end - cursor) < 12) {
+    if ((profile == NULL) || ((size_t)(end - cursor) < 12)) {
         return false;
     }
-    if (memcmp(cursor, "OPB2", 4) == 0) {
+    if (memcmp(cursor, "OPB4", 4) == 0) {
+        if ((size_t)(end - cursor) < 16) {
+            return false;
+        }
+        hasPatchFlags = true;
+        hasProfileSources = true;
+        hasDirectRelocations = true;
+        profileCount = OotPspRuntimePatch_ReadLe32(cursor + 12);
+    } else if (memcmp(cursor, "OPB3", 4) == 0) {
+        if ((size_t)(end - cursor) < 16) {
+            return false;
+        }
+        hasPatchFlags = true;
+        hasProfileSources = true;
+        profileCount = OotPspRuntimePatch_ReadLe32(cursor + 12);
+    } else if (memcmp(cursor, "OPB2", 4) == 0) {
         hasPatchFlags = true;
     } else if (memcmp(cursor, "OPB1", 4) == 0) {
         /* Retain compatibility with old generated blobs. They carry no range
@@ -132,7 +145,10 @@ s32 OotPspRuntimePatch_Apply(void) {
     }
     patchCount = OotPspRuntimePatch_ReadLe32(cursor + 4);
     permutationCount = OotPspRuntimePatch_ReadLe32(cursor + 8);
-    cursor += 12;
+    cursor += hasProfileSources ? 16 : 12;
+    if (hasProfileSources && ((profileCount != gOotPspRomProfileCount) || (activeProfileIndex >= profileCount))) {
+        return false;
+    }
     if ((permutationCount != OOT_PSP_PATCH_ZERO_SELECTOR) ||
         ((size_t)(end - cursor) < permutationCount * 8)) {
         return false;
@@ -152,18 +168,37 @@ s32 OotPspRuntimePatch_Apply(void) {
         u8* destination;
         u8* payload;
         u32 relocationIndex;
+        s32 inflateResult;
+        s32 readResult;
 
-        if ((size_t)(end - cursor) < (hasPatchFlags ? 28 : 24)) {
-            return false;
+        if (hasProfileSources) {
+            size_t sourceTableSize = (size_t)profileCount * 4;
+
+            if (((size_t)(end - cursor) < 24) || ((size_t)(end - cursor - 24) < sourceTableSize)) {
+                return false;
+            }
+            destinationOffset = OotPspRuntimePatch_ReadLe32(cursor + 0);
+            size = OotPspRuntimePatch_ReadLe32(cursor + 4);
+            payloadSize = OotPspRuntimePatch_ReadLe32(cursor + 8);
+            compressedSize = OotPspRuntimePatch_ReadLe32(cursor + 12);
+            relocationCount = OotPspRuntimePatch_ReadLe32(cursor + 16);
+            patchFlags = OotPspRuntimePatch_ReadLe32(cursor + 20);
+            cursor += 24;
+            sourceVrom = OotPspRuntimePatch_ReadLe32(cursor + activeProfileIndex * 4);
+            cursor += sourceTableSize;
+        } else {
+            if ((size_t)(end - cursor) < (hasPatchFlags ? 28 : 24)) {
+                return false;
+            }
+            destinationOffset = OotPspRuntimePatch_ReadLe32(cursor + 0);
+            sourceVrom = OotPspRuntimePatch_ReadLe32(cursor + 4);
+            size = OotPspRuntimePatch_ReadLe32(cursor + 8);
+            payloadSize = OotPspRuntimePatch_ReadLe32(cursor + 12);
+            compressedSize = OotPspRuntimePatch_ReadLe32(cursor + 16);
+            relocationCount = OotPspRuntimePatch_ReadLe32(cursor + 20);
+            patchFlags = hasPatchFlags ? OotPspRuntimePatch_ReadLe32(cursor + 24) : 0;
+            cursor += hasPatchFlags ? 28 : 24;
         }
-        destinationOffset = OotPspRuntimePatch_ReadLe32(cursor + 0);
-        sourceVrom = OotPspRuntimePatch_ReadLe32(cursor + 4);
-        size = OotPspRuntimePatch_ReadLe32(cursor + 8);
-        payloadSize = OotPspRuntimePatch_ReadLe32(cursor + 12);
-        compressedSize = OotPspRuntimePatch_ReadLe32(cursor + 16);
-        relocationCount = OotPspRuntimePatch_ReadLe32(cursor + 20);
-        patchFlags = hasPatchFlags ? OotPspRuntimePatch_ReadLe32(cursor + 24) : 0;
-        cursor += hasPatchFlags ? 28 : 24;
         if (((size_t)(end - cursor) < compressedSize) ||
             ((size_t)(end - cursor - compressedSize) < relocationCount * 8)) {
             return false;
@@ -172,13 +207,32 @@ s32 OotPspRuntimePatch_Apply(void) {
         destination = _ftext + destinationOffset;
         payload = malloc(payloadSize);
         if (payload == NULL) {
+            printf("oot-psp runtime patch %lu allocation failed size=%lu\n",
+                   (unsigned long)patchIndex, (unsigned long)payloadSize);
             return false;
         }
         inflatedSize = payloadSize;
-        if ((uncompress(payload, &inflatedSize, cursor, compressedSize) != Z_OK) ||
-            (inflatedSize != payloadSize) ||
-            (OotPsp_AssetRead(destination, sourceVrom, size) != OOT_PSP_ASSET_READ_OK) ||
-            !OotPspRuntimePatch_Transform(destination, size, payload, payloadSize, permutations, permutationCount)) {
+        inflateResult = uncompress(payload, &inflatedSize, cursor, compressedSize);
+        if ((inflateResult != Z_OK) || (inflatedSize != payloadSize)) {
+            printf("oot-psp runtime patch %lu inflate failed result=%ld got=%lu expected=%lu\n",
+                   (unsigned long)patchIndex, (long)inflateResult, (unsigned long)inflatedSize,
+                   (unsigned long)payloadSize);
+            free(payload);
+            return false;
+        }
+        readResult = OotPsp_AssetRead(destination, sourceVrom, size);
+        if (readResult != OOT_PSP_ASSET_READ_OK) {
+            printf("oot-psp runtime patch %lu read failed status=%ld vrom=%08lx size=%lu\n",
+                   (unsigned long)patchIndex, (long)readResult, (unsigned long)sourceVrom,
+                   (unsigned long)size);
+            free(payload);
+            return false;
+        }
+        if (!OotPspRuntimePatch_Transform(destination, size, payload, payloadSize,
+                                          permutations, permutationCount)) {
+            printf("oot-psp runtime patch %lu transform failed vrom=%08lx size=%lu payload=%lu\n",
+                   (unsigned long)patchIndex, (unsigned long)sourceVrom, (unsigned long)size,
+                   (unsigned long)payloadSize);
             free(payload);
             return false;
         }
@@ -188,23 +242,34 @@ s32 OotPspRuntimePatch_Apply(void) {
         if ((patchFlags & OOT_PSP_PATCH_TEXTURE_WORDS) &&
             !OotPsp_MarkLoadedExternalAssetRangeFlags(
                 destination, size, OOT_PSP_EXTERNAL_ASSET_NATIVE | OOT_PSP_EXTERNAL_ASSET_TEXTURE_WORDS)) {
+            printf("oot-psp runtime patch %lu native texture range failed dst=%08lx size=%lu\n",
+                   (unsigned long)patchIndex, (unsigned long)(uintptr_t)destination,
+                   (unsigned long)size);
             return false;
         }
 
         for (relocationIndex = 0; relocationIndex < relocationCount; relocationIndex++) {
             u32 relocationOffset = OotPspRuntimePatch_ReadLe32(cursor);
-            s32 linkAdjustment = OotPspRuntimePatch_ReadLeS32(cursor + 4);
+            u32 relocationValue = OotPspRuntimePatch_ReadLe32(cursor + 4);
             u32* value;
 
             cursor += 8;
             if ((relocationOffset > size) || (size - relocationOffset < sizeof(*value))) {
+                printf("oot-psp runtime patch %lu relocation failed offset=%lu size=%lu\n",
+                       (unsigned long)patchIndex, (unsigned long)relocationOffset,
+                       (unsigned long)size);
                 return false;
             }
             value = (u32*)(destination + relocationOffset);
-            *value += (uintptr_t)_ftext + linkAdjustment;
+            if (hasDirectRelocations) {
+                *value = (uintptr_t)_ftext + relocationValue;
+            } else {
+                *value += (uintptr_t)_ftext + (s32)relocationValue;
+            }
         }
     }
     if (cursor != end) {
+        printf("oot-psp runtime patch blob has trailing data size=%lu\n", (unsigned long)(end - cursor));
         return false;
     }
     for (patchIndex = 0; patchIndex < gOotPspExternalAssetCount; patchIndex++) {
@@ -212,17 +277,20 @@ s32 OotPspRuntimePatch_Apply(void) {
 
         if (strcmp(asset->name, "code") == 0) {
             if ((OotPsp_AssetRead((void*)njpgdspMainTextStart,
-                                  asset->vromStart + OOT_PSP_CODE_NJPG_TEXT_OFFSET,
-                                  OOT_PSP_CODE_NJPG_TEXT_SIZE) != OOT_PSP_ASSET_READ_OK) ||
+                                  asset->vromStart + profile->njpgTextOffset,
+                                  profile->njpgTextSize) != OOT_PSP_ASSET_READ_OK) ||
                 (OotPsp_AssetRead((void*)njpgdspMainDataStart,
-                                  asset->vromStart + OOT_PSP_CODE_NJPG_DATA_OFFSET,
-                                  OOT_PSP_CODE_NJPG_DATA_SIZE) != OOT_PSP_ASSET_READ_OK)) {
+                                  asset->vromStart + profile->njpgDataOffset,
+                                  profile->njpgDataSize) != OOT_PSP_ASSET_READ_OK)) {
+                printf("oot-psp runtime JPEG microcode read failed profile=%s code=%08lx\n",
+                       profile->name, (unsigned long)asset->vromStart);
                 return false;
             }
             break;
         }
     }
     if (patchIndex == gOotPspExternalAssetCount) {
+        printf("oot-psp runtime patch code asset is missing\n");
         return false;
     }
     sceKernelDcacheWritebackInvalidateAll();

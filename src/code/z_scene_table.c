@@ -18,7 +18,6 @@
 #include "line_numbers.h"
 
 #if !PLATFORM_PSP
-
 #include "assets/scenes/indoors/miharigoya/miharigoya_scene.h"
 #include "assets/scenes/indoors/souko/souko_scene.h"
 
@@ -41,6 +40,8 @@
 #include "assets/scenes/dungeons/men/men_scene.h"
 #include "assets/scenes/dungeons/ydan/ydan_scene.h"
 
+#else
+#include "oot_psp_scene_symbols.h"
 #endif
 
 #include "overlays/actors/ovl_Bg_Dodoago/z_bg_dodoago.h"
@@ -141,20 +142,12 @@ SceneTableEntry gSceneTable[] = {
 
 #undef DEFINE_SCENE
 
-#else
-
-#define OOT_PSP_SCENE_ADDR(offset) ((void*)(uintptr_t)(0x02000000U | (offset)))
-#define OOT_PSP_ROOM_ADDR(offset) ((void*)(uintptr_t)(0x03000000U | (offset)))
-
 #endif
 
-#if PLATFORM_PSP
-#define OOT_PSP_SCENE_ASSET(name, offset) OOT_PSP_SCENE_ADDR(offset)
-#define OOT_PSP_ROOM_ASSET(name, offset) ((Gfx*)OOT_PSP_ROOM_ADDR(offset))
-#else
+/* Scene symbols are generated for the selected ROM; object symbols keep the
+ * canonical layout used by the PSP gameplay fixes. */
 #define OOT_PSP_SCENE_ASSET(name, offset) (name)
-#define OOT_PSP_ROOM_ASSET(name, offset) (name)
-#endif
+#define OOT_PSP_ROOM_ASSET(name, offset) ((Gfx*)(name))
 
 Gfx sDefaultDisplayList[] = {
     gsSPSegment(0x08, gEmptyDL),

@@ -237,14 +237,18 @@ extern s16 gCharPageHira[];
 extern s16 gCharPageKata[];
 extern s16 gNextCharPage[];
 #endif
-#if OOT_PAL && PLATFORM_N64
+#if OOT_PAL_N64
 extern Vtx gOptionsMenuBrightnessVtx[];
 extern Vtx gOptionsMenuLanguageVtx[];
 extern Vtx gOptionsDividerLanguageVtx[];
 #endif
-#if OOT_PAL && PLATFORM_GC
+#if OOT_PAL && (PLATFORM_GC || (PLATFORM_PSP && !OOT_PAL_N64))
 extern Vtx gOptionsMenuHeadersGERVtx[];
 extern Vtx gOptionsMenuSettingsGERVtx[];
+#endif
+
+#if PLATFORM_PSP
+void OotPspFileSelect_LoadStaticData(void);
 #endif
 
 #endif

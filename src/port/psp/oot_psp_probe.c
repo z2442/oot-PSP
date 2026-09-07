@@ -31,7 +31,10 @@
 #include <pspprof.h>
 #endif
 
-PSP_MODULE_INFO("OOT PSP Port", 0, 1, 0);
+#ifndef OOT_PSP_MODULE_NAME
+#define OOT_PSP_MODULE_NAME "OOT PSP Port"
+#endif
+PSP_MODULE_INFO(OOT_PSP_MODULE_NAME, 0, 1, 0);
 #define OOT_PSP_MAIN_THREAD_PRIORITY 0x20
 PSP_MAIN_THREAD_PRIORITY(OOT_PSP_MAIN_THREAD_PRIORITY);
 PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER | PSP_THREAD_ATTR_VFPU);
@@ -139,7 +142,9 @@ static void OotPspSetupCallbacks(void) {
 }
 
 int main(int argc, char** argv) {
-    const char* executablePath = ((argc > 0) && (argv != NULL)) ? argv[0] : NULL;
+    const char* executablePath =
+        ((argc > 1) && (argv != NULL) && (argv[1] != NULL)) ? argv[1] :
+        (((argc > 0) && (argv != NULL)) ? argv[0] : NULL);
 
     /* Keep Daedalus's startup order through DVE detection. */
     scePowerSetClockFrequency(333, 333, 166);

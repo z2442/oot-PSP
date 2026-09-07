@@ -32,6 +32,33 @@ ENCODED_RESOURCE_RE = re.compile(
     r"^(?P<segment>.+)_(?P<offset>[0-9A-Fa-f]{8})_(?P<kind>Tex|CITex|TLUT)$"
 )
 TEXTURE_WORD_SYMBOL_RE = re.compile(r"(?:Tex|CITex|TLUT)$")
+LEGACY_RANGE_RE = re.compile(
+    r"\{ (0x[0-9A-F]+), (0x[0-9A-F]+), (0x[0-9A-F]+) \}"
+)
+
+# File select is deliberately loaded from its native per-revision layout when
+# the state starts. Keeping those records in the generic manifest caused PAL
+# modules either to omit required data silently or to apply an NTSC-sized
+# recipe to a differently sized destination.
+RUNTIME_LOADED_SYMBOLS = frozenset(
+    {
+        "gNameEntryVtx",
+        "gCharPageHira",
+        "gCharPageKata",
+        "gCharPageEng",
+        "gNextCharPage",
+        "gOptionsMenuHeadersVtx",
+        "gOptionsMenuHeadersGERVtx",
+        "gOptionsMenuSettingsVtx",
+        "gOptionsMenuSettingsGERVtx",
+        "gOptionsMenuBrightnessVtx",
+        "gOptionsMenuLanguageVtx",
+        "gOptionsDividerSoundVtx",
+        "gOptionsDividerZTargetVtx",
+        "gOptionsDividerBrightnessVtx",
+        "gOptionsDividerLanguageVtx",
+    }
+)
 
 
 @dataclass
@@ -57,6 +84,26 @@ def symbol_type(info: int) -> int:
 
 def external_vrom_starts(table: Path) -> dict[str, int]:
     return {match[6]: int(match[0], 16) for match in TABLE_RE.findall(table.read_text())}
+
+
+def external_vrom_ranges(table: Path) -> list[tuple[int, int, str]]:
+    return [(int(match[0], 16), int(match[1], 16), match[6]) for match in TABLE_RE.findall(table.read_text())]
+
+
+def normalize_external_vrom(table: Path, vrom: int) -> int:
+    text = table.read_text()
+    marker = "const OotPspExternalAssetLegacyRange gOotPspExternalAssetLegacyRanges[] = {"
+    end_marker = "const OotPspExternalAssetTextureRange gOotPspExternalAssetTextureRanges[] = {"
+
+    if marker in text and end_marker in text:
+        legacy_text = text[text.index(marker) : text.index(end_marker)]
+        for old_start, old_end, new_start in LEGACY_RANGE_RE.findall(legacy_text):
+            old_start_value = int(old_start, 16)
+            old_end_value = int(old_end, 16)
+
+            if old_start_value <= vrom < old_end_value:
+                return int(new_start, 16) + vrom - old_start_value
+    return vrom
 
 
 def resource_map(version: str) -> tuple[dict[tuple[str, str], Resource], dict[str, str], dict[str, int]]:
@@ -97,6 +144,39 @@ def segment_for_source(source_file: str, source_segments: dict[str, str]) -> str
     stem = Path(source_file).stem
     if stem in source_segments:
         return source_segments[stem]
+    return None
+
+
+def find_patch_resource(
+    source_file: str,
+    symbol_name: str,
+    expected_segment: str,
+    resources: dict[tuple[str, str], Resource],
+    source_segments: dict[str, str],
+    segment_bases: dict[str, int],
+) -> Resource | None:
+    segment = segment_for_source(source_file, source_segments) or expected_segment
+    resource = resources.get((segment, symbol_name))
+    if resource is not None:
+        return resource
+
+    candidates = [
+        resource
+        for (candidate_segment, name), resource in resources.items()
+        if name == symbol_name and candidate_segment == expected_segment
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+
+    match = ENCODED_RESOURCE_RE.fullmatch(symbol_name)
+    if match is not None:
+        encoded_segment = match.group("segment")
+        if (encoded_segment == expected_segment) and (encoded_segment in segment_bases):
+            return Resource(
+                encoded_segment,
+                segment_bases[encoded_segment] + int(match.group("offset"), 16),
+                match.group("kind"),
+            )
     return None
 
 
@@ -347,11 +427,17 @@ def relocation_targets(elf: ElfObject, symbol) -> dict[int, object]:
     return result
 
 
-def resolve_manifest(elf_path: Path, manifest_path: Path, output: Path, base_elf_path: Path | None = None) -> None:
+def resolve_manifest(
+    elf_path: Path,
+    manifest_path: Path,
+    output: Path,
+    base_elf_path: Path | None = None,
+    asset_table_path: Path | None = None,
+) -> None:
     elf = ElfObject(elf_path)
     # The runtime adds its loaded _ftext address to every encoded destination
-    # and relocated pointer. PRX links are already zero-based, but gprof links
-    # are fixed-address executables and must be normalized here.
+    # and relocated pointer. Normalize the linked address so both relocatable
+    # PRXs and older fixed-address reference ELFs preserve pointer addends.
     image_base = linked_image_base(elf)
     objects = linked_objects_by_file(elf)
     objects_by_name: dict[str, list[object]] = {}
@@ -369,6 +455,21 @@ def resolve_manifest(elf_path: Path, manifest_path: Path, output: Path, base_elf
     cursor += len(permutation_data)
     records: list[bytes] = []
     texture_symbols_by_source: dict[str, set[str]] = {}
+    profile_versions: list[str] = []
+    profile_resource_maps: dict[
+        str,
+        tuple[dict[tuple[str, str], Resource], dict[str, str], dict[str, int]],
+    ] = {}
+    vrom_ranges: list[tuple[int, int, str]] = []
+    omitted_count = 0
+
+    if asset_table_path is not None:
+        vrom_ranges = external_vrom_ranges(asset_table_path)
+        profile_versions = sorted(
+            path.name
+            for path in (ROOT / "baseroms").iterdir()
+            if (path / "config.yml").is_file() and (path / "segments.csv").is_file()
+        )
 
     for _ in range(count):
         source_len, symbol_len, source_vrom, size, payload_size, compressed_size, reloc_count = struct.unpack_from(
@@ -383,15 +484,21 @@ def resolve_manifest(elf_path: Path, manifest_path: Path, output: Path, base_elf
         cursor += compressed_size
         relocation_data = data[cursor : cursor + reloc_count * 8]
         cursor += len(relocation_data)
+        if symbol_name in RUNTIME_LOADED_SYMBOLS:
+            omitted_count += 1
+            continue
         symbol = objects.get((source_file, symbol_name))
         if symbol is None:
             candidates = [candidate for candidate in objects_by_name.get(symbol_name, []) if candidate.size == size]
             if len(candidates) == 1:
                 symbol = candidates[0]
         if symbol is None:
-            raise ValueError(f"clean ELF is missing {source_file}:{symbol_name}")
+            raise ValueError(f"clean ELF is missing required runtime patch {source_file}:{symbol_name}")
         if symbol.size != size:
-            raise ValueError(f"clean ELF size mismatch for {source_file}:{symbol_name}")
+            raise ValueError(
+                f"clean ELF size mismatch for required runtime patch {source_file}:{symbol_name}: "
+                f"got {symbol.size}, expected {size}"
+            )
         texture_symbols = texture_symbols_by_source.get(source_file)
         if texture_symbols is None:
             source_path = ROOT / source_file
@@ -410,21 +517,80 @@ def resolve_manifest(elf_path: Path, manifest_path: Path, output: Path, base_elf
         targets = relocation_targets(elf, symbol)
         if set(relocation_offsets_list) != set(targets):
             raise ValueError(f"clean ELF relocation mismatch for {source_file}:{symbol_name}")
-        clean_symbol_data = linked_symbol_bytes(elf, symbol)
-        adjustments: list[int] = []
+        relocation_values: list[int] = []
+        clean_bytes = linked_symbol_bytes(elf, symbol)
         for offset, reference_pointer_value in reference_relocations:
-            clean_pointer_value = struct.unpack_from("<I", clean_symbol_data, offset)[0]
-            adjustment = (clean_pointer_value - image_base) - reference_pointer_value
-            if not -(1 << 31) <= adjustment < (1 << 31):
-                raise ValueError(f"runtime relocation adjustment is too large for {source_file}:{symbol_name}")
-            adjustments.append(adjustment)
+            clean_pointer_value = struct.unpack_from("<I", clean_bytes, offset)[0]
+            if asset_table_path is not None:
+                # R_MIPS_32 includes an addend in the linked word. The target
+                # may be a section symbol or an array interior; using only its
+                # symbol value discards that offset and corrupts the pointer.
+                target_offset = clean_pointer_value - image_base
+                if not 0 <= target_offset < (1 << 32):
+                    raise ValueError(f"runtime relocation target is outside the linked image for {source_file}:{symbol_name}")
+                relocation_values.append(target_offset)
+            else:
+                adjustment = (clean_pointer_value - image_base) - reference_pointer_value
+                if not -(1 << 31) <= adjustment < (1 << 31):
+                    raise ValueError(f"runtime relocation adjustment is too large for {source_file}:{symbol_name}")
+                relocation_values.append(adjustment)
 
         destination_offset = symbol.value - image_base
         if not 0 <= destination_offset < (1 << 32):
             raise ValueError(f"runtime patch destination is outside the linked image for {source_file}:{symbol_name}")
 
-        records.append(
-            struct.pack(
+        if profile_versions:
+            source_vrom = normalize_external_vrom(asset_table_path, source_vrom)
+            source_segment = next(
+                (name for start, end, name in vrom_ranges if start <= source_vrom < end),
+                None,
+            )
+            if source_segment is None:
+                raise ValueError(f"runtime patch source 0x{source_vrom:08X} is not an external asset")
+            if source_segment == "code":
+                # Code intentionally stays in each ROM's native layout so its
+                # audio and message metadata remain at the offsets recorded in
+                # OotPspRomProfile. Resolve the small set of code-backed patch
+                # resources independently for every profile.
+                code_vrom_start = next(
+                    start for start, _end, name in vrom_ranges if name == "code"
+                )
+                profile_source_vroms = []
+                for version in profile_versions:
+                    maps = profile_resource_maps.get(version)
+                    if maps is None:
+                        maps = resource_map(version)
+                        profile_resource_maps[version] = maps
+                    resource = find_patch_resource(
+                        source_file,
+                        symbol_name,
+                        "code",
+                        maps[0],
+                        maps[1],
+                        maps[2],
+                    )
+                    if resource is None:
+                        raise ValueError(
+                            f"{version} is missing code-backed runtime patch source "
+                            f"{source_file}:{symbol_name}"
+                        )
+                    profile_source_vroms.append(code_vrom_start + resource.offset)
+            else:
+                # The unpacker adapts ordinary assets to the canonical union
+                # layout, so all profiles read those sources at the same VROM.
+                profile_source_vroms = [source_vrom] * len(profile_versions)
+
+            record_header = struct.pack(
+                "<IIIIII",
+                destination_offset,
+                size,
+                payload_size,
+                compressed_size,
+                reloc_count,
+                patch_flags,
+            ) + b"".join(struct.pack("<I", value) for value in profile_source_vroms)
+        else:
+            record_header = struct.pack(
                 "<IIIIIII",
                 destination_offset,
                 source_vrom,
@@ -434,23 +600,35 @@ def resolve_manifest(elf_path: Path, manifest_path: Path, output: Path, base_elf
                 reloc_count,
                 patch_flags,
             )
+
+        records.append(
+            record_header
             + compressed
             + b"".join(
-                struct.pack("<Ii", offset, adjustment)
-                for offset, adjustment in zip(relocation_offsets_list, adjustments)
+                struct.pack("<II" if profile_versions else "<Ii", offset, value)
+                for offset, value in zip(relocation_offsets_list, relocation_values)
             )
         )
 
     if cursor != len(data):
         raise ValueError("trailing runtime patch manifest data")
 
-    output_data = bytearray(b"OPB2" + struct.pack("<II", count, permutation_count))
+    resolved_count = len(records)
+    if profile_versions:
+        output_data = bytearray(
+            b"OPB4" + struct.pack("<III", resolved_count, permutation_count, len(profile_versions))
+        )
+    else:
+        output_data = bytearray(b"OPB2" + struct.pack("<II", resolved_count, permutation_count))
     output_data.extend(permutation_data)
     for record in records:
         output_data.extend(record)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_bytes(output_data)
-    print(f"resolved {count} runtime patch destinations into {output} ({len(output_data)} bytes)")
+    print(
+        f"resolved all {resolved_count} required runtime patch destinations "
+        f"({omitted_count} dedicated runtime-loaded) into {output} ({len(output_data)} bytes)"
+    )
 
 
 def main() -> None:
@@ -469,12 +647,13 @@ def main() -> None:
     resolve.add_argument("manifest", type=Path)
     resolve.add_argument("output", type=Path)
     resolve.add_argument("--base-elf", type=Path)
+    resolve.add_argument("--asset-table", type=Path)
 
     args = parser.parse_args()
     if args.command == "create":
         create_manifest(args.version, args.elf, args.asset_table, args.extracted_dir, args.output)
     else:
-        resolve_manifest(args.elf, args.manifest, args.output, args.base_elf)
+        resolve_manifest(args.elf, args.manifest, args.output, args.base_elf, args.asset_table)
 
 
 if __name__ == "__main__":

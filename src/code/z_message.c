@@ -32,7 +32,7 @@
 #pragma increment_block_number "gc-eu:128 gc-eu-mq:128 gc-jp:0 gc-jp-ce:0 gc-jp-mq:0 gc-us:0 gc-us-mq:0 ntsc-1.0:16" \
                                "ntsc-1.1:16 ntsc-1.2:16 pal-1.0:0 pal-1.1:0"
 
-#if !PLATFORM_IQUE
+#if !OOT_CHINESE
 #define MSG_BUF_DECODED (msgCtx->msgBufDecoded)
 #define MSG_BUF_DECODED_WIDE (msgCtx->msgBufDecodedWide)
 #define MSG_BUF (font->msgBuf)
@@ -904,7 +904,7 @@ void Message_DrawTextboxIcon(PlayState* play, Gfx** p, s16 x, s16 y) {
                            G_TX_NOMIRROR | G_TX_CLAMP, G_TX_NOMIRROR | G_TX_CLAMP, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD,
                            G_TX_NOLOD);
 
-#if PLATFORM_IQUE
+#if OOT_CHINESE
     R_TEXT_CHAR_SCALE = 80;
 #endif
 
@@ -1759,7 +1759,7 @@ void Message_DrawText(PlayState* play, Gfx** gfxP) {
                     SFX_PLAY_CENTERED(NA_SE_NONE);
                 }
 
-#if PLATFORM_IQUE
+#if OOT_CHINESE
                 if (!sTextIsCredits) {
                     R_TEXT_CHAR_SCALE = 100;
                 }
@@ -2016,7 +2016,7 @@ void Message_Decode(PlayState* play) {
                 value = HIGH_SCORE(MSG_BUF_WIDE[++msgCtx->msgBufPos] & 0xFF);
                 if ((MSG_BUF_WIDE[msgCtx->msgBufPos] & 0xFF) == HS_FISHING) {
                     if (LINK_AGE_IN_YEARS == YEARS_CHILD) {
-#if !PLATFORM_IQUE
+#if !OOT_CHINESE
                         PRINTF("HI_SCORE(kanfont->mbuff.message_buf[message->rdp]) = %x\n",
                                HIGH_SCORE(MSG_BUF_WIDE[msgCtx->msgBufPos]));
 #else
@@ -2025,7 +2025,7 @@ void Message_Decode(PlayState* play) {
 #endif
                         value &= 0x7F;
                     } else {
-#if !PLATFORM_IQUE
+#if !OOT_CHINESE
                         PRINTF("HI_SCORE( kanfont->mbuff.message_buf[message->rdp]) = %x\n",
                                HIGH_SCORE(MSG_BUF_WIDE[msgCtx->msgBufPos]));
 #else
@@ -2205,7 +2205,7 @@ void Message_Decode(PlayState* play) {
                 msgCtx->msgMode = MSGMODE_TEXT_DISPLAYING;
                 msgCtx->textDrawPos = 1;
 
-#if !PLATFORM_IQUE
+#if !OOT_CHINESE
                 R_TEXT_INIT_YPOS = R_TEXTBOX_Y + 8;
                 PRINTF("ＪＪ＝%d\n", numLines);
                 if (msgCtx->textBoxType != TEXTBOX_TYPE_NONE_BOTTOM) {
@@ -2418,7 +2418,7 @@ void Message_Decode(PlayState* play) {
                         //! @bug Should use msgBuf instead of msgBufWide (copy-paste error from Japanese text
                         //! handling?), and the mask is applied to the high score index instead of the high score value
                         //! so this always shows HIGH_SCORE(0). Only the PRINTF is wrong, the following line is correct.
-#if !PLATFORM_IQUE
+#if !OOT_CHINESE
                         PRINTF("HI_SCORE( kanfont->mbuff.nes_mes_buf[message->rdp] & 0xff000000 ) = %x\n",
                                HIGH_SCORE(MSG_BUF_WIDE[msgCtx->msgBufPos] & 0xFF000000));
 #else
@@ -2590,7 +2590,7 @@ void Message_Decode(PlayState* play) {
                 } else if (curChar == MESSAGE_THREE_CHOICE) {
                     msgCtx->choiceNum = 3;
                 } else if (curChar != MESSAGE_CHAR_SPACE) {
-#if !PLATFORM_IQUE
+#if !OOT_CHINESE
                     Font_LoadChar(font, curChar - ' ', charTexIdx);
 #else
                     u8 nextChar;
@@ -2644,7 +2644,7 @@ void Message_OpenText(PlayState* play, u16 textId) {
 #endif
     } else {
         R_TEXT_CHAR_SCALE = 75;
-#if !PLATFORM_IQUE
+#if !OOT_CHINESE
         R_TEXT_LINE_SPACING = 12;
         R_TEXT_INIT_XPOS = 65;
 #else
@@ -3055,7 +3055,7 @@ void Message_DrawTextBox(PlayState* play, Gfx** p) {
                                G_TX_NOLOD, G_TX_NOLOD);
     }
 
-#if PLATFORM_IQUE
+#if OOT_CHINESE
     R_TEXTBOX_TEXHEIGHT = 442;
 #endif
 
@@ -4178,7 +4178,7 @@ void Message_Update(PlayState* play) {
     };
 #if OOT_VERSION < GC_US
     static s32 sUnknown = 0;
-#elif PLATFORM_IQUE
+#elif OOT_CHINESE
     static u16 sUnknown = 0;
 #endif
     static char D_80153D74 = 0;
@@ -4209,6 +4209,17 @@ void Message_Update(PlayState* play) {
         }
         if (R_MESSAGE_DEBUGGER_SELECT != 0) {
             while (R_MESSAGE_DEBUGGER_TEXTID != 0x8000) {
+#if PLATFORM_PSP
+                if (OotPsp_FindMessageEntry(gOotPspNesMessageEntries, gOotPspNesMessageEntriesCount,
+                                            R_MESSAGE_DEBUGGER_TEXTID) != NULL) {
+                    PRINTF(T(" メッセージが,見つかった！！！ = %x\n", "The message was found!!! = %x\n"),
+                           R_MESSAGE_DEBUGGER_TEXTID);
+                    Message_StartTextbox(play, R_MESSAGE_DEBUGGER_TEXTID, NULL);
+                    R_MESSAGE_DEBUGGER_TEXTID++;
+                    R_MESSAGE_DEBUGGER_SELECT = 0;
+                    return;
+                }
+#else
                 MessageTableEntry* entry = &sNesMessageEntryTablePtr[0];
 
                 while (entry->textId != 0xFFFD) {
@@ -4222,6 +4233,7 @@ void Message_Update(PlayState* play) {
                     }
                     entry++;
                 }
+#endif
                 R_MESSAGE_DEBUGGER_TEXTID++;
             }
         }
@@ -4295,7 +4307,7 @@ void Message_Update(PlayState* play) {
                         R_TEXTBOX_Y_TARGET = sTextboxLowerYPositions[var];
                     }
 
-#if OOT_NTSC && !PLATFORM_IQUE
+#if OOT_NTSC && !OOT_CHINESE
                     R_TEXTBOX_X_TARGET = sTextboxXPositions[var];
                     R_TEXTBOX_END_YPOS = sTextboxEndIconYOffset[var] + R_TEXTBOX_Y_TARGET;
                     if (gSaveContext.language == LANGUAGE_JPN && !sTextIsCredits) {
@@ -4314,7 +4326,7 @@ void Message_Update(PlayState* play) {
                     R_TEXT_CHOICE_YPOS(0) = R_TEXTBOX_Y_TARGET + 20;
                     R_TEXT_CHOICE_YPOS(1) = R_TEXTBOX_Y_TARGET + 32;
                     R_TEXT_CHOICE_YPOS(2) = R_TEXTBOX_Y_TARGET + 44;
-#elif PLATFORM_IQUE
+#elif OOT_CHINESE
                     R_TEXTBOX_END_YPOS = sTextboxEndIconYOffset[var] + R_TEXTBOX_Y_TARGET;
                     R_TEXTBOX_Y_TARGET -= 10;
                     R_TEXTBOX_X_TARGET = sTextboxXPositions[var];

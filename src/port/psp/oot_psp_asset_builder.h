@@ -4,5 +4,6 @@
 #include "ultra64.h"
 
 s32 OotPspAssetBuilder_Ensure(void);
+s32 OotPspAssetBuilder_ActivateExisting(const char* expectedProfileName);
 
 #endif

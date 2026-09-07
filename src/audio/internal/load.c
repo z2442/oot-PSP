@@ -11,6 +11,7 @@
 #include "versions.h"
 #include "audio.h"
 #if defined(TARGET_PSP)
+#include "oot_psp_audio_tables.h"
 #include "oot_psp_asset_loader.h"
 #endif
 
@@ -1713,9 +1714,15 @@ void AudioLoad_Init(void* heap, u32 heapSize) {
     AudioHeap_ResetStep();
 
     // Initialize audio tables
+#if defined(TARGET_PSP)
+    AudioLoad_InitTable(gAudioCtx.sequenceTable, OotPspAudioTables_GetSequenceVromStart(), 0);
+    AudioLoad_InitTable(gAudioCtx.soundFontTable, OotPspAudioTables_GetSoundFontVromStart(), 0);
+    AudioLoad_InitTable(gAudioCtx.sampleBankTable, OotPspAudioTables_GetSampleBankVromStart(), 0);
+#else
     AudioLoad_InitTable(gAudioCtx.sequenceTable, (u32)_AudioseqSegmentRomStart, 0);
     AudioLoad_InitTable(gAudioCtx.soundFontTable, (u32)_AudiobankSegmentRomStart, 0);
     AudioLoad_InitTable(gAudioCtx.sampleBankTable, (u32)_AudiotableSegmentRomStart, 0);
+#endif
     numFonts = gAudioCtx.soundFontTable->header.numEntries;
     gAudioCtx.soundFontList = AudioHeap_Alloc(&gAudioCtx.initPool, numFonts * sizeof(SoundFont));
 

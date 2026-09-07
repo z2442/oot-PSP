@@ -34,7 +34,7 @@ ActorProfile End_Title_Profile = {
     /**/ EndTitle_DrawFull,
 };
 
-#if OOT_VERSION != IQUE_CN
+#if (OOT_VERSION != IQUE_CN) || PLATFORM_PSP
 
 #define sTheLegendOfZeldaTex_WIDTH 120
 #define sTheLegendOfZeldaTex_HEIGHT 24
@@ -84,7 +84,7 @@ static u64 sNintendoLeftTex[TEX_LEN(u64, sNintendoLeftTex_WIDTH, sNintendoLeftTe
 #include "assets/overlays/ovl_End_Title/sNintendoLeftTex.ia8.inc.c"
 };
 
-#if OOT_VERSION == IQUE_CN
+#if (OOT_VERSION == IQUE_CN) && !PLATFORM_PSP
 static Gfx sEmptyDL3[1] = {
 #include "assets/overlays/ovl_End_Title/sEmptyDL3.inc.c"
 };
@@ -96,7 +96,7 @@ static u64 sNintendoRightTex[TEX_LEN(u64, sNintendoRightTex_WIDTH, sNintendoRigh
 #include "assets/overlays/ovl_End_Title/sNintendoRightTex.ia8.inc.c"
 };
 
-#if OOT_VERSION == IQUE_CN
+#if (OOT_VERSION == IQUE_CN) && !PLATFORM_PSP
 static Gfx sEmptyDL4[1] = {
 #include "assets/overlays/ovl_End_Title/sEmptyDL4.inc.c"
 };
@@ -108,7 +108,7 @@ static u64 sPresentedByTex[TEX_LEN(u64, sPresentedByTex_WIDTH, sPresentedByTex_H
 #include "assets/overlays/ovl_End_Title/sPresentedByTex.ia8.inc.c"
 };
 
-#if OOT_VERSION == IQUE_CN
+#if (OOT_VERSION == IQUE_CN) && !PLATFORM_PSP
 
 static Gfx sEmptyDL5[1] = {
 #include "assets/overlays/ovl_End_Title/sEmptyDL5.inc.c"

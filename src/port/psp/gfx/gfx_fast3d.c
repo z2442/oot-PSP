@@ -812,7 +812,8 @@ static GfxTextureSwapState gfx_texture_source_swap_state(const uint8_t* addr, ui
 
     if (OotPsp_GetLoadedExternalAssetRangeFlags(addr, sizeBytes, &loadedFlags) ||
         OotPsp_GetLoadedExternalAssetRangeFlags(addr, 1, &loadedFlags)) {
-        state.mode = ((loadedFlags & OOT_PSP_EXTERNAL_ASSET_NATIVE) != 0) ? GFX_TEXTURE_SWAP_MAPPED
+        state.mode = ((loadedFlags & (OOT_PSP_EXTERNAL_ASSET_NATIVE | OOT_PSP_EXTERNAL_ASSET_SOURCE_TEXTURES)) ==
+                      OOT_PSP_EXTERNAL_ASSET_NATIVE) ? GFX_TEXTURE_SWAP_MAPPED
                                                                           : GFX_TEXTURE_SWAP_NONE;
         if (state.mode == GFX_TEXTURE_SWAP_MAPPED) {
             OotPsp_GetNativeExternalTextureMappingRange(addr, &state.rangeStart, &state.rangeEnd);
@@ -6518,6 +6519,9 @@ static void gfx_run_dl(Gfx* cmd) {
     Gfx* returnStack[GFX_DL_RETURN_STACK_SIZE];
     uint32_t returnDepth = 0;
 
+    if (cmd == NULL) {
+        return;
+    }
     if (!gfx_translate_dl_cursor(&cmd)) {
         return;
     }
@@ -6640,6 +6644,12 @@ static void gfx_run_dl(Gfx* cmd) {
             }
             case G_DL:
             {
+                /* Optional limb and material display lists are represented by
+                 * a null segmented pointer. Treat that as an empty child list
+                 * without abandoning the caller's remaining commands. */
+                if (cmd->words.w1 == 0) {
+                    break;
+                }
                 Gfx* target = (Gfx*)seg_addr(cmd->words.w1);
 
                 if (!gfx_translate_dl_cursor(&target)) {

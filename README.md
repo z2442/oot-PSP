@@ -1,3 +1,8 @@
+<!-- PSP build and download entry points -->
+[PSP build instructions](docs/psp-first-boot-assets.md) ·
+[Nightly downloads](https://github.com/z2442/oot-PSP/releases) ·
+[Build status](https://github.com/z2442/oot-PSP/actions/workflows/psp.yml)
+
 # The Legend of Zelda: Ocarina of Time
 
 [![Build Status][jenkins-badge]][jenkins] [![Decompilation Progress][progress-badge]][progress] [![Contributors][contributors-badge]][contributors] [![Discord Channel][discord-badge]][discord]

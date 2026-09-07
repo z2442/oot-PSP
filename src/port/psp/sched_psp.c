@@ -3,13 +3,20 @@
 #include "array_count.h"
 #include "oot_psp_performance.h"
 #include "oot_psp_renderer.h"
+#include "versions.h"
 
 #include <pspkernel.h>
 #include <string.h>
 
+#if OOT_PAL_N64
+#define OOT_PSP_VI_RATE_HZ          50U
+#define OOT_PSP_FRAME_BASE_USEC     20000U
+#define OOT_PSP_FRAME_REMAINDER     0U
+#else
 #define OOT_PSP_VI_RATE_HZ          60U
 #define OOT_PSP_FRAME_BASE_USEC     16666U
 #define OOT_PSP_FRAME_REMAINDER     40U
+#endif
 
 /*
  * Graphics pacing state.
@@ -44,11 +51,11 @@ static inline s32 SchedPsp_TimeDiff(u32 a, u32 b) {
  *
  * Normally this is 1:
  *
- *     60 / 1 = 60 Hz
+ *     VI rate / 1 = 60 Hz NTSC or 50 Hz PAL N64
  *
  * updateRate == 2:
  *
- *     60 / 2 = 30 Hz
+ *     VI rate / 2 = 30 Hz NTSC or 25 Hz PAL N64
  */
 static inline u32 SchedPsp_GetUpdateRate(const OSScTask* task) {
     if (task != NULL &&
@@ -64,7 +71,7 @@ static inline u32 SchedPsp_GetUpdateRate(const OSScTask* task) {
 /*
  * Calculate the duration of this VI interval.
  *
- * 1,000,000 / 60 is:
+ * NTSC's 1,000,000 / 60 is:
  *
  *     16666 remainder 40
  *
@@ -84,7 +91,8 @@ static inline u32 SchedPsp_GetUpdateRate(const OSScTask* task) {
  *     16667
  *     ...
  *
- * which averages exactly 60 Hz over time.
+ * which averages exactly 60 Hz over time. PAL N64 divides evenly into
+ * 20,000 us intervals and therefore has no fractional remainder.
  */
 static inline u32 SchedPsp_GetFrameUsec(const OSScTask* task) {
     const u32 updateRate = SchedPsp_GetUpdateRate(task);

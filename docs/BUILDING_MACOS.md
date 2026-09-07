@@ -110,8 +110,8 @@ From the repository root, build the PSP package with:
 
 The script automatically uses `gmake` on macOS and determines the available
 CPU count without requiring Linux's `nproc`. The finished package is written to
-`build/psp-port/ntsc-1.0/EBOOT.PBP`; copy the accompanying `Plugins` directory
-beside the EBOOT as well.
+`build/psp-port/ntsc-1.0/EBOOT.PBP`; copy the accompanying `Modules` and
+`Plugins` directories beside the EBOOT as well.
 
 
 ## 5. Building GCC (optional)

@@ -2,6 +2,7 @@
 #define FONT_H
 
 #include "ultra64.h"
+#include "versions.h"
 
 // TODO get these properties from the textures themselves
 #define FONT_CHAR_TEX_WIDTH  16
@@ -30,7 +31,7 @@ typedef struct Font {
     };
 } Font; // size = 0xE188
 
-#if PLATFORM_IQUE
+#if OOT_CHINESE
 void Font_LoadCharCHN(Font* font, u16 character, u16 codePointIndex);
 #endif
 void Font_LoadCharWide(Font* font, u16 character, u16 codePointIndex);

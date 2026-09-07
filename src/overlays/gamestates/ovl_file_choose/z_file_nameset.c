@@ -18,6 +18,9 @@
 #include "save.h"
 
 #include "assets/textures/title_static/title_static.h"
+#if PLATFORM_PSP
+#include "oot_psp_regional_assets.h"
+#endif
 
 void FileSelect_DrawCharacter(GraphicsContext* gfxCtx, void* texture, s16 vtx) {
     OPEN_DISPS(gfxCtx, "../z_file_nameset_PAL.c", 110);

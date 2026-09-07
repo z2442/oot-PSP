@@ -288,6 +288,26 @@ BAD_RETURN(s32) Scene_CommandUnused2(PlayState* play, SceneCmd* cmd) {
 BAD_RETURN(s32) Scene_CommandCollisionHeader(PlayState* play, SceneCmd* cmd) {
     CollisionHeader* colHeader = SEGMENTED_TO_VIRTUAL(cmd->colHeader.data);
 
+#if PLATFORM_PSP
+    if (colHeader == NULL) {
+        uintptr_t sceneStart = (uintptr_t)play->sceneSegment;
+        uintptr_t command = (uintptr_t)cmd;
+        uintptr_t commandOffset = (command >= sceneStart) ? command - sceneStart : UINTPTR_MAX;
+        uintptr_t sceneSize = 0;
+
+        if (play->loadedScene != NULL) {
+            sceneSize = (uintptr_t)play->loadedScene->sceneFile.vromEnd -
+                        (uintptr_t)play->loadedScene->sceneFile.vromStart;
+        }
+        osSyncPrintf("oot-psp scene collision header invalid scene=%d layer=%d cmd_off=%08lx raw=%08lx "
+                     "scene_base=%p scene_size=%lu segment2=%08lx\n",
+                     play->sceneId, gSaveContext.sceneLayer, (unsigned long)commandOffset,
+                     (unsigned long)(uintptr_t)cmd->colHeader.data, play->sceneSegment,
+                     (unsigned long)sceneSize, (unsigned long)gSegments[2]);
+        return;
+    }
+#endif
+
     colHeader->vtxList = SEGMENTED_TO_VIRTUAL(colHeader->vtxList);
     colHeader->polyList = SEGMENTED_TO_VIRTUAL(colHeader->polyList);
     colHeader->surfaceTypeList = SEGMENTED_TO_VIRTUAL(colHeader->surfaceTypeList);

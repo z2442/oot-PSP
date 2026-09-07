@@ -1,4 +1,5 @@
 MAKEFLAGS += --no-builtin-rules
+.DELETE_ON_ERROR:
 
 # Ensure the build fails if a piped command fails
 SHELL = /usr/bin/env bash
@@ -1242,7 +1243,7 @@ PSP_PORT_PREFIX := $(shell psp-config -P 2>/dev/null)
 PSP_PORT_CC := psp-gcc
 PSP_PORT_AR := psp-ar
 PSP_PORT_INTRAFONT_LIB := $(firstword $(wildcard $(PSP_PORT_PREFIX)/lib/libintrafont.a))
-PSP_PORT_GPROF_LINKER_SOURCE := $(PSP_PORT_PREFIX)/lib/ldscripts/elf_mipsallegrexel_psp.x
+PSP_PORT_GPROF_LINKER_SOURCE := $(PSP_PORT_PSPSDK)/lib/linkfile.prx
 PSP_PORT_GPROF_LINKER_SCRIPT := $(PSP_PORT_BUILD_DIR)/linkfile.gprof
 
 PSP_PORT_ACTOR_SOURCES := $(sort $(filter-out %.inc.c,$(wildcard src/overlays/actors/*/*.c)))
@@ -1272,6 +1273,7 @@ PSP_PORT_RUNTIME_SOURCES := \
 	src/buffers/audio_heap.c \
 	src/buffers/gfxbuffers.c \
 	src/buffers/zbuffer.c \
+	src/port/psp/oot_psp_vi_config.c \
 	src/audio/game/data.c \
 	src/audio/game/general.c \
 	src/audio/game/sequence.c \
@@ -1431,7 +1433,11 @@ PSP_PORT_RUNTIME_SOURCES := \
 	src/port/psp/gfx/gfx_window_psp.c \
 	src/port/psp/gfx/psp_texture_manager.c \
 	src/port/psp/oot_psp_asset_builder.c \
+	src/port/psp/oot_psp_asset_root.c \
 	src/port/psp/oot_psp_asset_loader.c \
+	src/port/psp/oot_psp_rom_profiles.c \
+	src/port/psp/oot_psp_audio_tables.c \
+	src/port/psp/oot_psp_message_tables.c \
 	src/port/psp/oot_psp_audio_backend.c \
 	src/port/psp/oot_psp_audiomgr.c \
 	src/port/psp/oot_psp_controls.c \
@@ -1461,10 +1467,20 @@ PSP_PORT_LINKED_ASSET_SOURCES := \
 	$(EMPTY)
 
 PSP_PORT_PROBE_SOURCE := src/port/psp/oot_psp_probe.c
+PSP_PORT_UNPACKER_SOURCE := src/port/psp/oot_psp_unpacker_main.c
+PSP_PORT_LAUNCHER_SOURCE := src/port/psp/oot_psp_launcher.c
+PSP_PORT_VERSIONS := \
+	ntsc-1.0 ntsc-1.1 pal-1.0 ntsc-1.2 pal-1.1 \
+	gc-jp gc-jp-mq gc-us gc-us-mq \
+	gc-eu-dbg-2 gc-eu-mq-dbg gc-eu-dbg gc-eu gc-eu-mq \
+	gc-jp-ce ique-cn
+PSP_PORT_CANONICAL_BUILD_DIR := build/ntsc-1.0
+PSP_PORT_CANONICAL_EXTRACTED_DIR := extracted/ntsc-1.0
 
 PSP_PORT_SETUP_STAMP := $(PSP_PORT_BUILD_DIR)/setup.stamp
 PSP_PORT_ASSET_SNAPSHOT := assets/psp/ntsc-1.0/generated.zip
-PSP_PORT_ASSET_TRANSFORM := assets/psp/ntsc-1.0/asset_transform.z
+PSP_PORT_BASE_ASSET_TRANSFORM := assets/psp/ntsc-1.0/asset_transform.z
+PSP_PORT_ASSET_TRANSFORM := $(PSP_PORT_BUILD_DIR)/oot_psp_asset_transform.z
 PSP_PORT_RUNTIME_PATCH_MANIFEST := assets/psp/ntsc-1.0/runtime_patches.z
 PSP_PORT_ROMINFO_SOURCE := $(PSP_PORT_BUILD_DIR)/oot_psp_rominfo.c
 PSP_PORT_ROMINFO_OBJECT := $(PSP_PORT_BUILD_DIR)/oot_psp_rominfo.o
@@ -1479,11 +1495,23 @@ PSP_PORT_ASSET_SEGMENT_DATA_DIR := $(PSP_PORT_BUILD_DIR)/data/segments
 PSP_PORT_ASSET_SEGMENT_DATA_STAMP := $(PSP_PORT_ASSET_SEGMENT_DATA_DIR)/.stamp
 PSP_PORT_ASSET_SEGMENT_OBJECT := $(PSP_PORT_BUILD_DIR)/oot_psp_asset_segments.o
 PSP_PORT_ASSET_SEGMENT_TABLE_OBJECT := $(PSP_PORT_BUILD_DIR)/oot_psp_asset_segments_table.o
+PSP_PORT_ROM_PROFILE_SOURCE := $(PSP_PORT_BUILD_DIR)/oot_psp_rom_profiles_data.c
+PSP_PORT_ROM_PROFILE_OBJECT := $(PSP_PORT_BUILD_DIR)/oot_psp_rom_profiles_data.o
+PSP_PORT_ROM_PROFILE_INPUTS := README.md \
+	$(wildcard baseroms/*/config.yml baseroms/*/segments.csv baseroms/*/checksum*.md5) \
+	$(wildcard assets/xml/*/*.xml assets/xml/*/*/*.xml)
 PSP_PORT_RUNTIME_OBJECTS := $(patsubst %.c,$(PSP_PORT_BUILD_DIR)/%.o,$(PSP_PORT_RUNTIME_SOURCES))
 PSP_PORT_RUNTIME_ASM_OBJECTS := $(patsubst %.s,$(PSP_PORT_BUILD_DIR)/%.o,$(PSP_PORT_RUNTIME_ASM_SOURCES))
 PSP_PORT_ASSET_OBJECTS := $(patsubst %.c,$(PSP_PORT_BUILD_DIR)/%.o,$(PSP_PORT_LINKED_ASSET_SOURCES))
 PSP_PORT_NATIVE_SEGMENT_OBJECTS := $(patsubst %.c,$(PSP_PORT_BUILD_DIR)/%.o,$(PSP_PORT_ASSET_SOURCES))
 PSP_PORT_PROBE_OBJECT := $(PSP_PORT_BUILD_DIR)/$(PSP_PORT_PROBE_SOURCE:.c=.o)
+PSP_PORT_UNPACKER_OBJECT := $(PSP_PORT_BUILD_DIR)/$(PSP_PORT_UNPACKER_SOURCE:.c=.o)
+PSP_PORT_UNPACKER_UI_OBJECT := $(PSP_PORT_BUILD_DIR)/src/port/psp/oot_psp_unpacker_ui.o
+PSP_PORT_UNPACKER_BUILDER_OBJECT := $(PSP_PORT_BUILD_DIR)/unpacker/oot_psp_asset_builder.o
+PSP_PORT_LAUNCHER_BUILD_DIR := $(PSP_PORT_BUILD_DIR)/launcher
+PSP_PORT_LAUNCHER_OBJECT := $(PSP_PORT_LAUNCHER_BUILD_DIR)/oot_psp_launcher.o
+PSP_PORT_LAUNCHER_ELF := $(PSP_PORT_LAUNCHER_BUILD_DIR)/oot-psp-launcher.elf
+PSP_PORT_LAUNCHER_PRX := $(PSP_PORT_BUILD_DIR)/oot-psp-launcher.prx
 PSP_PORT_LIBRARY := $(PSP_PORT_BUILD_DIR)/liboot_psp_platform.a
 PSP_PORT_ELF := $(PSP_PORT_BUILD_DIR)/oot-psp-port.elf
 PSP_PORT_BASE_ELF := $(PSP_PORT_BUILD_DIR)/oot-psp-port.base.elf
@@ -1493,7 +1521,13 @@ PSP_PORT_RUNTIME_PATCH_OBJECT := $(PSP_PORT_BUILD_DIR)/oot_psp_runtime_patches.o
 PSP_PORT_PRX_ELF := $(PSP_PORT_BUILD_DIR)/oot-psp-port.prx.elf
 PSP_PORT_STRIPPED_ELF := $(PSP_PORT_BUILD_DIR)/oot-psp-port.stripped.elf
 PSP_PORT_PRX := $(PSP_PORT_BUILD_DIR)/oot-psp-port.prx
-PSP_PORT_PBP := $(PSP_PORT_BUILD_DIR)/EBOOT.PBP
+PSP_PORT_UNPACKER_ELF := $(PSP_PORT_BUILD_DIR)/oot-psp-unpacker.elf
+PSP_PORT_UNPACKER_PRX_ELF := $(PSP_PORT_BUILD_DIR)/oot-psp-unpacker.prx.elf
+PSP_PORT_UNPACKER_PRX := $(PSP_PORT_BUILD_DIR)/oot-psp-unpacker.prx
+PSP_PORT_INSTALL_DIR ?= $(patsubst %/$(VERSION),%/ntsc-1.0,$(PSP_PORT_DEFAULT_BUILD_DIR))
+PSP_PORT_PBP := $(PSP_PORT_INSTALL_DIR)/EBOOT.PBP
+PSP_PORT_INSTALLED_GAME_PRX := $(PSP_PORT_INSTALL_DIR)/Modules/$(VERSION).prx
+PSP_PORT_INSTALLED_UNPACKER_PRX := $(PSP_PORT_INSTALL_DIR)/Modules/unpacker.prx
 PSP_PORT_DVEMGR_SOURCE_DIR := src/port/psp/dvemgr
 PSP_PORT_DVEMGR_BUILD_DIR := $(PSP_PORT_BUILD_DIR)/dvemgr
 PSP_PORT_DVEMGR_OBJECTS := \
@@ -1501,15 +1535,19 @@ PSP_PORT_DVEMGR_OBJECTS := \
 	$(PSP_PORT_DVEMGR_BUILD_DIR)/exports.o \
 	$(PSP_PORT_DVEMGR_BUILD_DIR)/imports.o
 PSP_PORT_DVEMGR_ELF := $(PSP_PORT_DVEMGR_BUILD_DIR)/dvemgr.elf
-PSP_PORT_DVEMGR_PRX := $(PSP_PORT_BUILD_DIR)/Plugins/dvemgr.prx
+PSP_PORT_DVEMGR_PRX := $(PSP_PORT_INSTALL_DIR)/Plugins/dvemgr.prx
 PSP_PORT_BUILD_MODE := $(if $(filter 1,$(PSP_PORT_NO_ASSET_REGEN)),no-asset-regen,full-assets)
+PSP_PORT_BUILD_CONFIG = $(PSP_PORT_CFLAGS)
 PSP_PORT_BUILD_MODE_STAMP := $(PSP_PORT_BUILD_DIR)/.build-mode
 PSP_PORT_DEP_FILES := $(PSP_PORT_RUNTIME_OBJECTS:.o=.d) $(PSP_PORT_RUNTIME_ASM_OBJECTS:.o=.d) \
 	$(PSP_PORT_ASSET_OBJECTS:.o=.d) \
 	$(PSP_PORT_ROMINFO_OBJECT:.o=.d) $(PSP_PORT_ASSET_TABLE_OBJECT:.o=.d) \
 	$(PSP_PORT_AUDIO_TABLE_OBJECT:.o=.d) \
 	$(PSP_PORT_ASSET_SEGMENT_OBJECT:.o=.d) $(PSP_PORT_ASSET_SEGMENT_TABLE_OBJECT:.o=.d) \
-	$(PSP_PORT_PROBE_OBJECT:.o=.d)
+	$(PSP_PORT_ROM_PROFILE_OBJECT:.o=.d) \
+	$(PSP_PORT_PROBE_OBJECT:.o=.d) $(PSP_PORT_UNPACKER_OBJECT:.o=.d) \
+	$(PSP_PORT_UNPACKER_BUILDER_OBJECT:.o=.d) \
+	$(PSP_PORT_LAUNCHER_OBJECT:.o=.d)
 PSP_PORT_DEP_FILES += $(PSP_PORT_DVEMGR_OBJECTS:.o=.d)
 ifneq ($(PSP_PORT_NO_ASSET_REGEN),1)
 PSP_PORT_DEP_FILES += $(PSP_PORT_NATIVE_SEGMENT_OBJECTS:.o=.d)
@@ -1573,21 +1611,35 @@ PSP_PORT_NATIVE_GENERATED_ASSET_DIRS := \
 
 PSP_PORT_RUNTIME_GENERATED_ASSET_STAMP := $(BUILD_DIR)/assets/psp_generated_runtime_assets.stamp
 PSP_PORT_NATIVE_GENERATED_ASSET_STAMP := $(BUILD_DIR)/assets/psp_generated_native_assets.stamp
+PSP_PORT_DEBUG_FEATURES ?= 0
+# .make_options.mk can select a region for an N64 NTSC ROM. Fixed-region
+# releases must not inherit that preference when the bundle builds them.
+PSP_PORT_REGION := $(REGION)
+ifneq ($(filter pal-% gc-eu%,$(VERSION)),)
+PSP_PORT_REGION := EU
+else ifneq ($(filter gc-jp%,$(VERSION)),)
+PSP_PORT_REGION := JP
+else ifneq ($(filter gc-us% ique-cn,$(VERSION)),)
+PSP_PORT_REGION := US
+endif
 
 PSP_PORT_DEFINES := \
 	-D_LANGUAGE_C \
 	-DNON_MATCHING \
 	-DAVOID_UB \
-	-DDEBUG_FEATURES=$(DEBUG_FEATURES) \
+	-DDEBUG_FEATURES=$(PSP_PORT_DEBUG_FEATURES) \
 	-DOOT_VERSION=$(VERSION_MACRO) \
 	-DOOT_REVISION=$(REVISION) \
-	-DOOT_REGION=REGION_$(REGION) \
+	-DOOT_REGION=REGION_$(PSP_PORT_REGION) \
 	-DLIBULTRA_VERSION=LIBULTRA_VERSION_L \
 	-DLIBULTRA_PATCH=0 \
 	-DPLATFORM_PSP=1 \
 	-DPLATFORM_N64=0 \
 	-DPLATFORM_GC=0 \
 	-DPLATFORM_IQUE=0 \
+	-DOOT_PSP_GAME_MODULE=1 \
+	-DOOT_PSP_COMPILED_PROFILE_NAME=\"$(VERSION)\" \
+	-DOOT_PSP_MODULE_NAME=\"OOT\ PSP\ $(VERSION)\" \
 	-DF3DEX_GBI_2 \
 	-DF3DEX_GBI_PL \
 	-DGBI_DOWHILE \
@@ -1614,14 +1666,16 @@ else
 PSP_PORT_DEFINES += -DOOT_PSP_USE_INTRAFONT=0
 endif
 PSP_PORT_ASM_DEFINES := $(filter-out -D_LANGUAGE_C,$(PSP_PORT_DEFINES))
+PSP_PORT_ASM_DEFINES += -DOOT_PSP_ASSET_TRANSFORM_PATH=\"$(PSP_PORT_ASSET_TRANSFORM)\"
 
 PSP_PORT_INCLUDES := \
+	-I$(PSP_PORT_BUILD_DIR) \
 	-Iinclude \
 	-Iinclude/libc \
 	-Isrc \
-	-isystem $(BUILD_DIR) \
+	-isystem $(PSP_PORT_CANONICAL_BUILD_DIR) \
 	-I. \
-	-I$(EXTRACTED_DIR) \
+	-I$(PSP_PORT_CANONICAL_EXTRACTED_DIR) \
 	-Isrc/port/psp \
 	-Isrc/port/psp/gfx \
 	-I$(PSP_PORT_PSPSDK)/include \
@@ -1632,7 +1686,7 @@ PSP_PORT_CFLAGS := -G0 -O2 -g3 -Wall -Wextra -Wno-format-security -Wno-unused-pa
 	-Wno-int-to-pointer-cast -Wno-pointer-to-int-cast -fno-strict-aliasing -fwrapv -fno-common -fsigned-char \
 	-ffunction-sections -fdata-sections \
 	-fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-ident \
-	-include src/port/psp/oot_psp_compat.h \
+	-include src/port/psp/oot_psp_compat.h -include $(PSP_PORT_BUILD_DIR)/oot_psp_regional_assets.h \
 	$(PSP_PORT_DEFINES) $(PSP_PORT_INCLUDES)
 
 ifneq ($(PSP_PORT_GPROF_ENABLED),)
@@ -1648,26 +1702,58 @@ ifneq ($(PSP_PORT_INTRAFONT_LIB),)
 PSP_PORT_LIBS += -lintrafont
 endif
 
+PSP_PORT_GAME_REQUIRED_SYMBOL_FLAGS := \
+	-Wl,-u,sceKernelChangeThreadPriority -Wl,-u,ootPspDveImport -Wl,-u,ootPspMeKcallImport \
+	-Wl,-u,sceIoRemove -Wl,-u,sceIoMkdir -Wl,-u,sceIoRename \
+	-Wl,-u,sceKernelUtilsMd5BlockInit -Wl,-u,sceKernelUtilsMd5BlockUpdate \
+	-Wl,-u,sceKernelUtilsMd5BlockResult
+
 ifneq ($(PSP_PORT_GPROF_ENABLED),)
 PSP_PORT_LINKER_DEPS := $(PSP_PORT_GPROF_LINKER_SCRIPT)
-PSP_PORT_EXTRA_LINK_OBJECTS := $(PSP_PORT_ASSET_SEGMENT_OBJECT)
-PSP_PORT_LDFLAGS := -pg -g -Wl,-T$(PSP_PORT_GPROF_LINKER_SCRIPT) -Wl,-q -Wl,-zmax-page-size=128 -Wl,--gc-sections \
-	-Wl,-u,module_info -Wl,-u,sceKernelChangeThreadPriority -Wl,-u,ootPspDveImport -Wl,-u,ootPspMeKcallImport \
-	$(PSP_PORT_LIBS)
+PSP_PORT_EXTRA_LINK_OBJECTS :=
+PSP_PORT_LDFLAGS := -pg -g -specs=$(PSP_PORT_PSPSDK)/lib/prxspecs \
+	-Wl,-T$(PSP_PORT_GPROF_LINKER_SCRIPT) -Wl,-q -Wl,-zmax-page-size=128 -Wl,--gc-sections \
+	-Wl,-u,module_info -Wl,-u,__library_exports $(PSP_PORT_GAME_REQUIRED_SYMBOL_FLAGS) \
+	$(PSP_PORT_PSPSDK)/lib/prxexports.o $(PSP_PORT_LIBS)
 else
 PSP_PORT_LINKER_DEPS :=
 PSP_PORT_EXTRA_LINK_OBJECTS :=
 PSP_PORT_LDFLAGS := -specs=$(PSP_PORT_PSPSDK)/lib/prxspecs -Wl,-q,-T$(PSP_PORT_PSPSDK)/lib/linkfile.prx \
-	-Wl,-zmax-page-size=128 -Wl,--gc-sections -Wl,-u,module_info -Wl,-u,sceKernelChangeThreadPriority \
-	-Wl,-u,ootPspDveImport -Wl,-u,ootPspMeKcallImport \
+	-Wl,-zmax-page-size=128 -Wl,--gc-sections -Wl,-u,module_info -Wl,-u,__library_exports $(PSP_PORT_GAME_REQUIRED_SYMBOL_FLAGS) \
 	$(PSP_PORT_PSPSDK)/lib/prxexports.o $(PSP_PORT_LIBS)
 endif
+PSP_PORT_UNPACKER_EXPORTS_OBJECT := $(PSP_PORT_BUILD_DIR)/unpacker/exports.o
+PSP_PORT_UNPACKER_LDFLAGS := $(filter-out $(PSP_PORT_GAME_REQUIRED_SYMBOL_FLAGS) $(PSP_PORT_PSPSDK)/lib/prxexports.o,$(PSP_PORT_LDFLAGS))
 
-psp-port: $(PSP_PORT_PBP) $(PSP_PORT_DVEMGR_PRX)
-	@echo "PSP port is up to date: $(PSP_PORT_PBP) and $(PSP_PORT_DVEMGR_PRX)"
+# Each recursive make gets its own object directory, including when callers
+# override PSP_PORT_BUILD_DIR. Packaging always uses a single install root.
+PSP_PORT_BUNDLE_BUILD_ROOT := $(patsubst %/,%,$(dir $(PSP_PORT_BUILD_DIR)))
+psp-port: psp-port-all
+
+psp-port-all:
+	$(MAKE) VERSION=ntsc-1.0 PSP_PORT_NO_ASSET_REGEN=1 \
+		PSP_PORT_BUILD_DIR=$(PSP_PORT_BUNDLE_BUILD_ROOT)/ntsc-1.0 \
+		PSP_PORT_INSTALL_DIR=$(PSP_PORT_INSTALL_DIR) psp-port-bootstrap
+	@set -e; for version in $(PSP_PORT_VERSIONS); do \
+		$(MAKE) VERSION=$$version PSP_PORT_NO_ASSET_REGEN=1 \
+			PSP_PORT_BUILD_DIR=$(PSP_PORT_BUNDLE_BUILD_ROOT)/$$version \
+			PSP_PORT_INSTALL_DIR=$(PSP_PORT_INSTALL_DIR) psp-port-game-module; \
+	done
+	@echo "PSP bundle is up to date: $(PSP_PORT_INSTALL_DIR)/EBOOT.PBP and $(words $(PSP_PORT_VERSIONS)) revision modules"
+
+psp-port-bootstrap: $(PSP_PORT_PBP) $(PSP_PORT_INSTALLED_UNPACKER_PRX) $(PSP_PORT_DVEMGR_PRX)
+	$(PYTHON) tools/psp_port_check_module.py $(PSP_PORT_PBP)
+	$(PYTHON) tools/psp_port_check_module.py $(PSP_PORT_INSTALLED_UNPACKER_PRX) --require-stop
+	@echo "PSP launcher and unpacker are up to date in $(PSP_PORT_INSTALL_DIR)"
+
+psp-port-game-module: $(PSP_PORT_INSTALLED_GAME_PRX)
+	$(PYTHON) tools/psp_port_check_module.py $(PSP_PORT_INSTALLED_GAME_PRX)
+	@echo "PSP game module is up to date: $(PSP_PORT_INSTALLED_GAME_PRX)"
 
 psp-port-eboot:
-	$(MAKE) PSP_PORT_NO_ASSET_REGEN=1 $(PSP_PORT_PBP) $(PSP_PORT_DVEMGR_PRX)
+	$(MAKE) VERSION=ntsc-1.0 PSP_PORT_NO_ASSET_REGEN=1 \
+		PSP_PORT_BUILD_DIR=$(PSP_PORT_BUNDLE_BUILD_ROOT)/ntsc-1.0 \
+		PSP_PORT_INSTALL_DIR=$(PSP_PORT_INSTALL_DIR) psp-port-bootstrap
 
 $(PSP_PORT_DVEMGR_BUILD_DIR)/%.o: $(PSP_PORT_DVEMGR_SOURCE_DIR)/%.c
 	@mkdir -p $(dir $@)
@@ -1691,22 +1777,53 @@ $(PSP_PORT_DVEMGR_PRX): $(PSP_PORT_DVEMGR_ELF)
 	@mkdir -p $(dir $@)
 	psp-prxgen $< $@
 
+$(PSP_PORT_LAUNCHER_OBJECT): $(PSP_PORT_LAUNCHER_SOURCE) src/port/psp/oot_psp_asset_identity.h
+	@mkdir -p $(dir $@)
+	$(PSP_PORT_CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -c -Os -G0 -Wall -Wextra \
+		-fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-ident \
+		-D_PSP_FW_VERSION=500 -Isrc/port/psp -I$(PSP_PORT_PSPSDK)/include -I$(PSP_PORT_PREFIX)/include \
+		-o $@ $<
+
+$(PSP_PORT_LAUNCHER_ELF): $(PSP_PORT_LAUNCHER_OBJECT)
+	$(PSP_PORT_CC) -o $@ $< -specs=$(PSP_PORT_PSPSDK)/lib/prxspecs -Wl,-q \
+		-T$(PSP_PORT_PSPSDK)/lib/linkfile.prx -Wl,-zmax-page-size=128 -Wl,--gc-sections \
+		-Wl,-u,module_info -Wl,-u,__library_exports $(PSP_PORT_PSPSDK)/lib/prxexports.o \
+		-L$(PSP_PORT_PSPSDK)/lib -L$(PSP_PORT_PREFIX)/lib \
+		-lpspdebug -lpspdisplay -lpspge -lpspsdk
+	psp-fixup-imports $@
+
+$(PSP_PORT_LAUNCHER_PRX): $(PSP_PORT_LAUNCHER_ELF)
+	psp-prxgen $< $@
+
 $(PSP_PORT_BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(PSP_PORT_CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $(PSP_PORT_CFLAGS) -o $@ $<
 
 $(PSP_PORT_BUILD_DIR)/%.o: %.s
 	@mkdir -p $(dir $@)
-	$(PSP_PORT_CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -c -x assembler-with-cpp $(PSP_PORT_ASM_DEFINES) $(PSP_PORT_INCLUDES) -Wa,-I$(EXTRACTED_DIR) -o $@ $<
+	$(PSP_PORT_CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -c -x assembler-with-cpp $(PSP_PORT_ASM_DEFINES) $(PSP_PORT_INCLUDES) -Wa,-I$(PSP_PORT_CANONICAL_EXTRACTED_DIR) -o $@ $<
+
+$(PSP_PORT_UNPACKER_BUILDER_OBJECT): src/port/psp/oot_psp_asset_builder.c $(PSP_PORT_SETUP_STAMP) $(PSP_PORT_RUNTIME_GENERATED_ASSET_STAMP)
+	@mkdir -p $(dir $@)
+	$(PSP_PORT_CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $(PSP_PORT_CFLAGS) \
+		-UOOT_PSP_GAME_MODULE -DOOT_PSP_UNPACKER_MODULE=1 -o $@ $<
 
 $(PSP_PORT_RUNTIME_OBJECTS) $(PSP_PORT_NATIVE_SEGMENT_OBJECTS): include/command_macros_base.h include/cutscene_commands.h include/scene.h
 
-$(PSP_PORT_SETUP_STAMP): $(PSP_PORT_ASSET_SNAPSHOT) tools/psp_port_asset_snapshot.py
+$(PSP_PORT_SETUP_STAMP): $(PSP_PORT_ASSET_SNAPSHOT) $(PSP_PORT_BASE_ASSET_TRANSFORM) \
+	tools/psp_port_asset_snapshot.py tools/psp_port_asset_union.py tools/version_config.py \
+	src/code/z_scene_table.c \
+	$(PSP_PORT_ROM_PROFILE_INPUTS)
 	@mkdir -p $(dir $@)
 	$(PYTHON) tools/psp_port_asset_snapshot.py restore $(PSP_PORT_ASSET_SNAPSHOT) $(PSP_PORT_BUILD_DIR)
+	$(PYTHON) tools/psp_port_asset_union.py $(PSP_PORT_BUILD_DIR) \
+		$(PSP_PORT_BASE_ASSET_TRANSFORM) $(PSP_PORT_ASSET_TRANSFORM) --version $(VERSION)
 	@touch $@
 
 $(PSP_PORT_ROMINFO_SOURCE) $(PSP_PORT_ASSET_TABLE_SOURCE) $(PSP_PORT_AUDIO_TABLE_SOURCE): $(PSP_PORT_SETUP_STAMP)
+	@test -f $@
+
+$(PSP_PORT_ASSET_TRANSFORM): $(PSP_PORT_SETUP_STAMP)
 	@test -f $@
 
 $(PSP_PORT_ROMINFO_OBJECT): $(PSP_PORT_ROMINFO_SOURCE)
@@ -1737,6 +1854,13 @@ $(PSP_PORT_ASSET_SEGMENT_TABLE_OBJECT): $(PSP_PORT_ASSET_SEGMENT_TABLE_SOURCE)
 	@mkdir -p $(dir $@)
 	$(PSP_PORT_CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $(PSP_PORT_CFLAGS) -o $@ $<
 
+$(PSP_PORT_ROM_PROFILE_SOURCE): $(PSP_PORT_ASSET_SEGMENT_TABLE_SOURCE) tools/psp_port_rom_profiles.py $(PSP_PORT_ROM_PROFILE_INPUTS)
+	$(PYTHON) tools/psp_port_rom_profiles.py $< $@
+
+$(PSP_PORT_ROM_PROFILE_OBJECT): $(PSP_PORT_ROM_PROFILE_SOURCE)
+	@mkdir -p $(dir $@)
+	$(PSP_PORT_CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $(PSP_PORT_CFLAGS) -o $@ $<
+
 $(PSP_PORT_EXTRACTED_ASSET_FILES): $(PSP_PORT_SETUP_STAMP)
 	@test -f $@
 
@@ -1760,6 +1884,8 @@ $(PSP_PORT_NATIVE_GENERATED_ASSET_STAMP): $(PSP_PORT_SETUP_STAMP)
 
 $(PSP_PORT_RUNTIME_OBJECTS): $(PSP_PORT_SETUP_STAMP) $(PSP_PORT_RUNTIME_GENERATED_ASSET_STAMP)
 
+$(PSP_PORT_PROBE_OBJECT) $(PSP_PORT_UNPACKER_OBJECT): $(PSP_PORT_SETUP_STAMP)
+
 $(PSP_PORT_BUILD_DIR)/src/audio/internal/playback.o \
 $(PSP_PORT_BUILD_DIR)/src/audio/internal/seqplayer.o \
 $(PSP_PORT_BUILD_DIR)/src/audio/internal/synthesis.o \
@@ -1772,16 +1898,23 @@ $(PSP_PORT_BUILD_DIR)/src/port/psp/oot_psp_mixer.o: PSP_PORT_CFLAGS := $(PSP_POR
 
 $(PSP_PORT_BUILD_MODE_STAMP): FORCE
 	@mkdir -p $(dir $@)
-	@mode='$(PSP_PORT_BUILD_MODE)'; \
-	if test ! -f $@ || test "$$(cat $@)" != "$$mode"; then \
-		printf '%s\n' "$$mode" > $@; \
+	@config='$(PSP_PORT_BUILD_CONFIG)'; \
+	if test ! -f $@ || test "$$(cat $@)" != "$$config"; then \
+		printf '%s\n' "$$config" > $@; \
 	fi
 
-$(PSP_PORT_LIBRARY): $(PSP_PORT_BUILD_MODE_STAMP) $(PSP_PORT_RUNTIME_OBJECTS) $(PSP_PORT_RUNTIME_ASM_OBJECTS) $(PSP_PORT_ASSET_OBJECTS) $(PSP_PORT_ROMINFO_OBJECT) $(PSP_PORT_ASSET_TABLE_OBJECT) $(PSP_PORT_AUDIO_TABLE_OBJECT) $(PSP_PORT_ASSET_SEGMENT_OBJECT) $(PSP_PORT_ASSET_SEGMENT_TABLE_OBJECT)
+$(PSP_PORT_RUNTIME_OBJECTS) $(PSP_PORT_RUNTIME_ASM_OBJECTS) $(PSP_PORT_ASSET_OBJECTS) \
+$(PSP_PORT_NATIVE_SEGMENT_OBJECTS) $(PSP_PORT_ROMINFO_OBJECT) $(PSP_PORT_ASSET_TABLE_OBJECT) \
+$(PSP_PORT_AUDIO_TABLE_OBJECT) $(PSP_PORT_ASSET_SEGMENT_OBJECT) $(PSP_PORT_ASSET_SEGMENT_TABLE_OBJECT) \
+$(PSP_PORT_ROM_PROFILE_OBJECT) $(PSP_PORT_PROBE_OBJECT) $(PSP_PORT_UNPACKER_OBJECT) \
+$(PSP_PORT_UNPACKER_BUILDER_OBJECT): $(PSP_PORT_BUILD_MODE_STAMP)
+
+$(PSP_PORT_LIBRARY): Makefile $(PSP_PORT_BUILD_MODE_STAMP) $(PSP_PORT_RUNTIME_OBJECTS) $(PSP_PORT_RUNTIME_ASM_OBJECTS) $(PSP_PORT_ASSET_OBJECTS) $(PSP_PORT_ROMINFO_OBJECT) $(PSP_PORT_ASSET_TABLE_OBJECT) $(PSP_PORT_AUDIO_TABLE_OBJECT) $(PSP_PORT_ASSET_SEGMENT_OBJECT) $(PSP_PORT_ASSET_SEGMENT_TABLE_OBJECT) $(PSP_PORT_ROM_PROFILE_OBJECT)
 	@mkdir -p $(dir $@)
-	$(file >$@.rsp,$(filter-out $(PSP_PORT_BUILD_MODE_STAMP),$^))
-	$(RM) $@
-	$(PSP_PORT_AR) rcs $@ @$@.rsp
+	$(file >$@.rsp,$(filter %.o,$^))
+	$(RM) $@.tmp
+	$(PSP_PORT_AR) rcs $@.tmp @$@.rsp
+	mv $@.tmp $@
 
 $(PSP_PORT_GPROF_LINKER_SCRIPT): $(PSP_PORT_GPROF_LINKER_SOURCE)
 	@mkdir -p $(dir $@)
@@ -1796,8 +1929,8 @@ endif
 		-Wl,--start-group $(PSP_PORT_LIBRARY) -Wl,--end-group $(PSP_PORT_LDFLAGS)
 	psp-fixup-imports $@
 
-$(PSP_PORT_RUNTIME_PATCH_BLOB): $(PSP_PORT_BASE_ELF) $(PSP_PORT_RUNTIME_PATCH_MANIFEST) tools/psp_port_runtime_patches.py
-	$(PYTHON) tools/psp_port_runtime_patches.py resolve $< $(PSP_PORT_RUNTIME_PATCH_MANIFEST) $@ --base-elf $(PSP_PORT_BASE_ELF)
+$(PSP_PORT_RUNTIME_PATCH_BLOB): $(PSP_PORT_BASE_ELF) $(PSP_PORT_RUNTIME_PATCH_MANIFEST) tools/psp_port_runtime_patches.py $(PSP_PORT_ASSET_SEGMENT_TABLE_SOURCE)
+	$(PYTHON) tools/psp_port_runtime_patches.py resolve $< $(PSP_PORT_RUNTIME_PATCH_MANIFEST) $@ --base-elf $(PSP_PORT_BASE_ELF) --asset-table $(PSP_PORT_ASSET_SEGMENT_TABLE_SOURCE)
 
 $(PSP_PORT_RUNTIME_PATCH_ASM): $(PSP_PORT_RUNTIME_PATCH_BLOB)
 	@printf '%s\n' \
@@ -1820,7 +1953,7 @@ endif
 	$(PSP_PORT_CC) -o $@ $(PSP_PORT_PROBE_OBJECT) $(if $(PSP_PORT_EXTRA_LINK_OBJECTS),@$@.extra.rsp) \
 		-Wl,--start-group $(PSP_PORT_LIBRARY) -Wl,--end-group $(PSP_PORT_RUNTIME_PATCH_OBJECT) $(PSP_PORT_LDFLAGS)
 	psp-fixup-imports $@
-	$(PYTHON) tools/psp_port_runtime_patches.py resolve $@ $(PSP_PORT_RUNTIME_PATCH_MANIFEST) $(PSP_PORT_RUNTIME_PATCH_BLOB) --base-elf $(PSP_PORT_BASE_ELF)
+	$(PYTHON) tools/psp_port_runtime_patches.py resolve $@ $(PSP_PORT_RUNTIME_PATCH_MANIFEST) $(PSP_PORT_RUNTIME_PATCH_BLOB) --base-elf $(PSP_PORT_BASE_ELF) --asset-table $(PSP_PORT_ASSET_SEGMENT_TABLE_SOURCE)
 	$(PSP_PORT_CC) -MMD -MP -MF $(PSP_PORT_RUNTIME_PATCH_OBJECT:.o=.d) -MT $(PSP_PORT_RUNTIME_PATCH_OBJECT) \
 		-c -x assembler-with-cpp $(PSP_PORT_ASM_DEFINES) $(PSP_PORT_INCLUDES) -o $(PSP_PORT_RUNTIME_PATCH_OBJECT) \
 		$(PSP_PORT_RUNTIME_PATCH_ASM)
@@ -1834,25 +1967,50 @@ $(PSP_PORT_PRX_ELF): $(PSP_PORT_ELF) $(PSP_PORT_ASSET_SEGMENT_SOURCE) tools/psp_
 $(PSP_PORT_PRX): $(PSP_PORT_PRX_ELF)
 	psp-prxgen $< $@
 
+$(PSP_PORT_BUILD_DIR)/unpacker/exports.c: src/port/psp/oot_psp_unpacker.exp
+	@mkdir -p $(dir $@)
+	psp-build-exports -b $< > $@
+
+$(PSP_PORT_UNPACKER_EXPORTS_OBJECT): $(PSP_PORT_BUILD_DIR)/unpacker/exports.c
+	$(PSP_PORT_CC) -G0 -Os -I$(PSP_PORT_PSPSDK)/include -c $< -o $@
+
+$(PSP_PORT_UNPACKER_ELF): $(PSP_PORT_UNPACKER_EXPORTS_OBJECT) $(PSP_PORT_UNPACKER_UI_OBJECT) $(PSP_PORT_LIBRARY) $(PSP_PORT_UNPACKER_OBJECT) $(PSP_PORT_UNPACKER_BUILDER_OBJECT) $(PSP_PORT_LINKER_DEPS) $(PSP_PORT_EXTRA_LINK_OBJECTS)
+	@mkdir -p $(dir $@)
+ifneq ($(PSP_PORT_EXTRA_LINK_OBJECTS),)
+	$(file >$@.extra.rsp,$(PSP_PORT_EXTRA_LINK_OBJECTS))
+endif
+	$(PSP_PORT_CC) -nostartfiles -o $@ $(PSP_PORT_UNPACKER_OBJECT) $(PSP_PORT_UNPACKER_BUILDER_OBJECT) $(PSP_PORT_UNPACKER_UI_OBJECT) $(PSP_PORT_UNPACKER_EXPORTS_OBJECT) \
+		$(if $(PSP_PORT_EXTRA_LINK_OBJECTS),@$@.extra.rsp) \
+		-Wl,--start-group $(PSP_PORT_LIBRARY) -Wl,--end-group $(PSP_PORT_UNPACKER_LDFLAGS)
+	psp-fixup-imports $@
+
+$(PSP_PORT_UNPACKER_PRX): $(PSP_PORT_UNPACKER_ELF)
+	psp-prxgen $< $@
+
+$(PSP_PORT_INSTALLED_GAME_PRX): $(PSP_PORT_PRX)
+	@mkdir -p $(dir $@)
+	cp $< $@
+
+$(PSP_PORT_INSTALLED_UNPACKER_PRX): $(PSP_PORT_UNPACKER_PRX)
+	@mkdir -p $(dir $@)
+	cp $< $@
+
 $(PSP_PORT_STRIPPED_ELF): $(PSP_PORT_ELF)
 	psp-strip -s -o $@ $<
 
-ifneq ($(PSP_PORT_GPROF_ENABLED),)
-PSP_PORT_EBOOT_PAYLOAD := $(PSP_PORT_STRIPPED_ELF)
-else
-PSP_PORT_EBOOT_PAYLOAD := $(PSP_PORT_PRX)
-endif
+PSP_PORT_EBOOT_PAYLOAD := $(PSP_PORT_LAUNCHER_PRX)
 
 PSP_PORT_ICON0 := assets/psp/ICON0.PNG
 
 $(PSP_PORT_PBP): $(PSP_PORT_EBOOT_PAYLOAD) $(PSP_PORT_ICON0)
+	@mkdir -p $(dir $@)
 	mksfoex -d MEMSIZE=1 "OOT PSP Port" $(PSP_PORT_BUILD_DIR)/PARAM.SFO
 	pack-pbp $@ $(PSP_PORT_BUILD_DIR)/PARAM.SFO $(PSP_PORT_ICON0) NULL NULL NULL NULL $< NULL
 
 psp-port-clean:
 	$(RM) -r $(PSP_PORT_BUILD_DIR)
 
-.PHONY: FORCE psp-port psp-port-eboot psp-port-clean
+.PHONY: FORCE psp-port psp-port-all psp-port-bootstrap psp-port-game-module psp-port-eboot psp-port-clean
 
 FORCE:
 
