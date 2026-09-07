@@ -7,6 +7,9 @@
 #include "oot_psp_unpacker_ui.h"
 
 PSP_MODULE_INFO("OOT PSP Unpacker", 0, 1, 0);
+PSP_MAIN_THREAD_PRIORITY(0x20);
+PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER | PSP_THREAD_ATTR_VFPU);
+PSP_MAIN_THREAD_STACK_SIZE_KB(256);
 PSP_HEAP_SIZE_KB(-1024);
 
 extern void __libcglue_init(int argc, char* argv[]);

@@ -16,7 +16,8 @@ extern void gfx_scegu_set_home_menu_background_active(bool active);
 extern int gfx_scegu_apply_video_mode(void);
 extern void gfx_scegu_render_home_menu(int selectedIndex, int screen, int submenuSelectedIndex,
                                        const char* statusMessage, uint8_t highlightRed, uint8_t highlightGreen,
-                                       uint8_t highlightBlue);
+                                       uint8_t highlightBlue, int batteryPercent, bool batteryExists,
+                                       bool batteryCharging);
 extern void gfx_scegu_render_first_boot_progress(uint32_t progressPermille, const char* statusMessage, bool error);
 extern bool gfx_scegu_depth_is_clear(int32_t x, int32_t y);
 extern bool gfx_scegu_depth_test(int32_t x, int32_t y, float projectedZ);
@@ -31,6 +32,9 @@ typedef struct OotPspHomeMenuRenderArgs {
     uint8_t highlightRed;
     uint8_t highlightGreen;
     uint8_t highlightBlue;
+    int batteryPercent;
+    bool batteryExists;
+    bool batteryCharging;
 } OotPspHomeMenuRenderArgs;
 
 typedef struct OotPspFirstBootProgressRenderArgs {
@@ -43,7 +47,8 @@ static void OotPspRenderer_DrawHomeMenu(void* arg) {
     const OotPspHomeMenuRenderArgs* menu = (const OotPspHomeMenuRenderArgs*)arg;
 
     gfx_scegu_render_home_menu(menu->selectedIndex, menu->screen, menu->submenuSelectedIndex, menu->statusMessage,
-                               menu->highlightRed, menu->highlightGreen, menu->highlightBlue);
+                               menu->highlightRed, menu->highlightGreen, menu->highlightBlue, menu->batteryPercent,
+                               menu->batteryExists, menu->batteryCharging);
 }
 
 static void OotPspRenderer_DrawFirstBootProgress(void* arg) {
@@ -145,7 +150,7 @@ int OotPspRenderer_ApplyVideoSettings(void) {
 
 void OotPspRenderer_RenderHomeMenu(int selectedIndex, int screen, int submenuSelectedIndex,
                                    const char* statusMessage, uint8_t highlightRed, uint8_t highlightGreen,
-                                   uint8_t highlightBlue) {
+                                   uint8_t highlightBlue, int batteryPercent, bool batteryExists, bool batteryCharging) {
     OotPspHomeMenuRenderArgs args;
 
     OotPspRenderer_Init();
@@ -156,6 +161,9 @@ void OotPspRenderer_RenderHomeMenu(int selectedIndex, int screen, int submenuSel
     args.highlightRed = highlightRed;
     args.highlightGreen = highlightGreen;
     args.highlightBlue = highlightBlue;
+    args.batteryPercent = batteryPercent;
+    args.batteryExists = batteryExists;
+    args.batteryCharging = batteryCharging;
 
     gfx_render_callback_frame(OotPspRenderer_DrawHomeMenu, &args);
 }

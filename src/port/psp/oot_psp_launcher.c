@@ -6,10 +6,14 @@
 #include <pspthreadman.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "oot_psp_asset_identity.h"
+#include "oot_psp_launcher_path.h"
 
 #define OOT_PSP_LAUNCHER_PATH_SIZE 512
+
+static const char* sOotPspLauncherFailure;
 
 PSP_MODULE_INFO("OOT PSP Launcher", 0, 1, 0);
 PSP_MAIN_THREAD_PRIORITY(0x20);
@@ -108,11 +112,11 @@ static s32 OotPspLauncher_Start(const char* modulePath, const char* executablePa
     size_t moduleLength = strlen(modulePath) + 1;
     size_t executableLength = strlen(executablePath) + 1;
     SceKernelLMOption loadOptions;
-    SceKernelSMOption startOptions;
     SceUID module;
     s32 result;
     int status = 0;
 
+    sOotPspLauncherFailure = "Module arguments are too long.";
     if (moduleLength + executableLength > sizeof(arguments)) {
         return -1;
     }
@@ -122,29 +126,27 @@ static s32 OotPspLauncher_Start(const char* modulePath, const char* executablePa
     loadOptions.size = sizeof(loadOptions);
     loadOptions.mpidtext = PSP_MEMORY_PARTITION_USER;
     loadOptions.mpiddata = PSP_MEMORY_PARTITION_USER;
+    sOotPspLauncherFailure = "Module file exists, but could not be loaded.";
     module = sceKernelLoadModule(modulePath, 0, &loadOptions);
     if (module < 0) {
         return module;
     }
-    memset(&startOptions, 0, sizeof(startOptions));
-    startOptions.size = sizeof(startOptions);
-    startOptions.mpidstack = PSP_MEMORY_PARTITION_USER;
-    /* The unpacker runs synchronously in module_start. Its newlib main-thread
-     * stack declaration is bypassed, so allocate the conversion stack here. */
-    startOptions.stacksize = 256 * 1024;
-    startOptions.priority = 0x20;
-    startOptions.attribute = PSP_THREAD_ATTR_USER | PSP_THREAD_ATTR_VFPU;
-    result = sceKernelStartModule(module, moduleLength + executableLength, arguments, &status, &startOptions);
+    sOotPspLauncherFailure = "Module loaded, but could not be started.";
+    result = sceKernelStartModule(module, moduleLength + executableLength, arguments, &status, NULL);
+    printf("Start result: 0x%08X, module status: %d\n", (unsigned int)result, status);
     if (result < 0) {
         sceKernelUnloadModule(module);
         return result;
     }
     if (strstr(modulePath, "unpacker.prx") != NULL) {
         int stopStatus = 0;
+        sOotPspLauncherFailure = "Could not stop the asset unpacker.";
         result = sceKernelStopModule(module, 0, NULL, &stopStatus, NULL);
         if (result < 0) return result;
+        sOotPspLauncherFailure = "Could not unload the asset unpacker.";
         result = sceKernelUnloadModule(module);
         if (result < 0) return result;
+        sOotPspLauncherFailure = "Asset unpacker reported an extraction failure.";
         if (status != 0) return -1;
     }
     return 0;
@@ -153,6 +155,7 @@ static s32 OotPspLauncher_Start(const char* modulePath, const char* executablePa
 static s32 OotPspLauncher_StartRelative(char* modulePath, size_t modulePathSize, const char* root,
                                         const char* relative, const char* executablePath) {
     char relativePath[OOT_PSP_LAUNCHER_PATH_SIZE];
+    sOotPspLauncherFailure = "The module path is too long.";
     if (strlen(relative) >= sizeof(relativePath)) return -1;
     strcpy(relativePath, relative); /* relative may alias modulePath */
     if (!OotPspLauncher_Path(modulePath, modulePathSize, root, relativePath)) return -1;
@@ -160,6 +163,11 @@ static s32 OotPspLauncher_StartRelative(char* modulePath, size_t modulePathSize,
 }
 
 static void OotPspLauncher_Fail(const char* message, const char* path, s32 error) {
+    printf("OOT PSP Launcher: %s\n", message);
+    if (path != NULL) {
+        printf("Path: %s\n", path);
+    }
+    printf("Error: 0x%08X\n", (unsigned int)error);
     pspDebugScreenSetXY(0, 0);
     pspDebugScreenPrintf("OOT PSP Launcher\n\n%s\n", message);
     if (path != NULL) {
@@ -171,7 +179,9 @@ static void OotPspLauncher_Fail(const char* message, const char* path, s32 error
 }
 
 int main(int argc, char** argv) {
-    const char* executablePath = ((argc > 0) && (argv != NULL)) ? argv[0] : NULL;
+    const char* launchArgument = ((argc > 0) && (argv != NULL)) ? argv[0] : NULL;
+    char executablePath[OOT_PSP_LAUNCHER_PATH_SIZE];
+    char cwd[OOT_PSP_LAUNCHER_PATH_SIZE];
     char root[OOT_PSP_LAUNCHER_PATH_SIZE];
     char modulePath[OOT_PSP_LAUNCHER_PATH_SIZE];
     char profile[OOT_PSP_ASSET_ID_PROFILE_SIZE + 1];
@@ -179,17 +189,23 @@ int main(int argc, char** argv) {
     s32 result;
 
     pspDebugScreenInit();
-    if (!OotPspLauncher_GetRoot(executablePath, root, sizeof(root))) {
-        OotPspLauncher_Fail("Could not locate the installation directory.", executablePath, -1);
+    if (getcwd(cwd, sizeof(cwd)) == NULL) cwd[0] = '\0';
+    if (!OotPspLauncher_ResolveExecutable(launchArgument, cwd, executablePath, sizeof(executablePath)) ||
+        !OotPspLauncher_GetRoot(executablePath, root, sizeof(root))) {
+        OotPspLauncher_Fail("Could not locate the installation directory.", launchArgument, -1);
         return 1;
     }
-    (void)sceIoChdir(root);
+    result = sceIoChdir(root);
+    if (result < 0) {
+        OotPspLauncher_Fail("Could not access the installation directory.", root, result);
+        return 1;
+    }
     if (!OotPspLauncher_ReadIdentity(root, profile)) {
         pspDebugScreenPrintf("Preparing Ocarina of Time assets...\n");
-        result = OotPspLauncher_StartRelative(modulePath, sizeof(modulePath), root, "Modules/unpacker.prx",
+        result = OotPspLauncher_StartRelative(modulePath, sizeof(modulePath), root, "modules/unpacker.prx",
                                               executablePath);
         if (result < 0) {
-            OotPspLauncher_Fail("Could not start the asset unpacker.", modulePath, result);
+            OotPspLauncher_Fail(sOotPspLauncherFailure, modulePath, result);
             return 1;
         }
         if (!OotPspLauncher_ReadIdentity(root, profile)) {
@@ -197,7 +213,7 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
-    written = snprintf(modulePath, sizeof(modulePath), "Modules/%s.prx", profile);
+    written = snprintf(modulePath, sizeof(modulePath), "modules/%s.prx", profile);
     if ((written < 0) || ((size_t)written >= sizeof(modulePath))) {
         OotPspLauncher_Fail("The selected game-module path is too long.", NULL, -1);
         return 1;
@@ -205,7 +221,7 @@ int main(int argc, char** argv) {
     pspDebugScreenPrintf("Starting %s...\n", profile);
     result = OotPspLauncher_StartRelative(modulePath, sizeof(modulePath), root, modulePath, executablePath);
     if (result < 0) {
-        OotPspLauncher_Fail("Could not start the selected game module.", modulePath, result);
+        OotPspLauncher_Fail(sOotPspLauncherFailure, modulePath, result);
         return 1;
     }
 

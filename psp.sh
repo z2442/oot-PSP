@@ -108,11 +108,11 @@ echo "Game modules: ${#psp_version_list[@]} (${psp_version_list[*]})"
 
 required_files=(
     EBOOT.PBP
-    Modules/unpacker.prx
+    modules/unpacker.prx
     Plugins/dvemgr.prx
 )
 for version in "${psp_version_list[@]}"; do
-    required_files+=("Modules/$version.prx")
+    required_files+=("modules/$version.prx")
 done
 
 missing_files=()
@@ -130,6 +130,6 @@ fi
 
 echo "Complete PSP bundle written to $bundle_dir"
 echo "  launcher: EBOOT.PBP"
-echo "  runtime unpacker: Modules/unpacker.prx"
+echo "  runtime unpacker: modules/unpacker.prx"
 echo "  game modules: ${#psp_version_list[@]}"
 echo "  DVE plugin: Plugins/dvemgr.prx"

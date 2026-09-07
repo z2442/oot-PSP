@@ -9,7 +9,7 @@ The default bundle is `build/psp-port/ntsc-1.0/`. Copy these files together:
 ```text
 PSP/GAME/OOT_PSP/
 ├── EBOOT.PBP
-├── Modules/
+├── modules/
 │   ├── unpacker.prx
 │   ├── ntsc-1.0.prx
 │   ├── pal-1.1.prx

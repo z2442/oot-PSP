@@ -13,8 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def package(bundle: Path, output: Path, revision: str) -> None:
     versions = sorted(p.name for p in (ROOT / 'baseroms').iterdir()
                       if (p / 'config.yml').is_file() and (p / 'segments.csv').is_file())
-    paths = ['EBOOT.PBP', 'Modules/unpacker.prx', 'Plugins/dvemgr.prx']
-    paths += [f'Modules/{version}.prx' for version in versions]
+    paths = ['EBOOT.PBP', 'modules/unpacker.prx', 'Plugins/dvemgr.prx']
+    paths += [f'modules/{version}.prx' for version in versions]
     contents = {}
     for relative in paths:
         source = bundle / relative
@@ -25,7 +25,7 @@ def package(bundle: Path, output: Path, revision: str) -> None:
         if data[:4] not in expected:
             raise ValueError(f'invalid build output: {source}')
         if relative != "Plugins/dvemgr.prx":
-            check_module(data, relative == "Modules/unpacker.prx")
+            check_module(data, relative == "modules/unpacker.prx")
         contents[relative] = data
     manifest = {'revision': revision, 'versions': versions,
                 'sha256': {path: hashlib.sha256(data).hexdigest() for path, data in contents.items()}}
@@ -38,7 +38,7 @@ def package(bundle: Path, output: Path, revision: str) -> None:
             'Place one supported Ocarina of Time .z64 ROM here. Any filename is accepted.\n'
             'Do not turn off the PSP during first-boot asset extraction.\n')
         archive.writestr('OOT_PSP/README.txt',
-            'Copy OOT_PSP into PSP/GAME. Keep EBOOT.PBP, Modules and Plugins together.\n'
+            'Copy OOT_PSP into PSP/GAME. Keep EBOOT.PBP, modules and Plugins together.\n'
             'Place your ROM in data and launch the game. Extraction runs once.\n'
             'To change ROMs, remove data/segments/oot_psp_assets.id before launching.\n'
             'No ROM or extracted assets are included. See build.json for the source revision.\n')

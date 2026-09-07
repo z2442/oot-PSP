@@ -843,6 +843,36 @@ static void gfx_scegu_render_home_menu_main(int selectedIndex, uint8_t highlight
     }
 }
 
+static void gfx_scegu_draw_home_menu_battery(int batteryPercent, bool batteryExists, bool batteryCharging) {
+    char label[16];
+    unsigned int fillColor;
+    int fillWidth;
+
+    gfx_scegu_draw_rect(402, 12, 52, 20, gfx_scegu_rgba(0, 0, 0, 180));
+    gfx_scegu_draw_rect(406, 15, 42, 14, gfx_scegu_rgba(170, 190, 180, 255));
+    gfx_scegu_draw_rect(449, 18, 4, 8, gfx_scegu_rgba(170, 190, 180, 255));
+
+    if (!batteryExists || (batteryPercent < 0)) {
+        snprintf(label, sizeof(label), "--");
+        fillWidth = 0;
+        fillColor = gfx_scegu_rgba(170, 190, 180, 255);
+    } else {
+        if (batteryPercent > 100) {
+            batteryPercent = 100;
+        }
+        fillWidth = (40 * batteryPercent) / 100;
+        fillColor = batteryCharging ? gfx_scegu_rgba(255, 214, 112, 255) :
+                                      gfx_scegu_rgba(112, 202, 142, 255);
+        snprintf(label, sizeof(label), "%d%%", batteryPercent);
+    }
+
+    if (fillWidth > 0) {
+        gfx_scegu_draw_rect(407, 16, fillWidth, 12, fillColor);
+    }
+    gfx_scegu_draw_home_menu_text(378, 27, label, 0.42f, gfx_scegu_rgba(255, 255, 245, 255),
+                                  gfx_scegu_rgba(0, 0, 0, 180), INTRAFONT_ALIGN_RIGHT);
+}
+
 #define HOME_MENU_ABOUT_QR_MODULE_COUNT 33
 #define HOME_MENU_ABOUT_QR_MODULE_SIZE 4
 #define HOME_MENU_ABOUT_VISIBLE_LINES 6
@@ -2135,7 +2165,8 @@ void gfx_scegu_set_home_menu_background_active(bool active) {
 }
 
 void gfx_scegu_render_home_menu(int selectedIndex, int screen, int submenuSelectedIndex, const char* statusMessage,
-                                uint8_t highlightRed, uint8_t highlightGreen, uint8_t highlightBlue) {
+                                uint8_t highlightRed, uint8_t highlightGreen, uint8_t highlightBlue,
+                                int batteryPercent, bool batteryExists, bool batteryCharging) {
     gfx_scegu_prepare_home_menu_draw();
 
     if (screen == 1) {
@@ -2149,6 +2180,8 @@ void gfx_scegu_render_home_menu(int selectedIndex, int screen, int submenuSelect
     } else {
         gfx_scegu_render_home_menu_main(selectedIndex, highlightRed, highlightGreen, highlightBlue);
     }
+
+    gfx_scegu_draw_home_menu_battery(batteryPercent, batteryExists, batteryCharging);
 }
 
 #endif // TARGET_SCEGU

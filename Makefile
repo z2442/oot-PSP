@@ -1526,8 +1526,8 @@ PSP_PORT_UNPACKER_PRX_ELF := $(PSP_PORT_BUILD_DIR)/oot-psp-unpacker.prx.elf
 PSP_PORT_UNPACKER_PRX := $(PSP_PORT_BUILD_DIR)/oot-psp-unpacker.prx
 PSP_PORT_INSTALL_DIR ?= $(patsubst %/$(VERSION),%/ntsc-1.0,$(PSP_PORT_DEFAULT_BUILD_DIR))
 PSP_PORT_PBP := $(PSP_PORT_INSTALL_DIR)/EBOOT.PBP
-PSP_PORT_INSTALLED_GAME_PRX := $(PSP_PORT_INSTALL_DIR)/Modules/$(VERSION).prx
-PSP_PORT_INSTALLED_UNPACKER_PRX := $(PSP_PORT_INSTALL_DIR)/Modules/unpacker.prx
+PSP_PORT_INSTALLED_GAME_PRX := $(PSP_PORT_INSTALL_DIR)/modules/$(VERSION).prx
+PSP_PORT_INSTALLED_UNPACKER_PRX := $(PSP_PORT_INSTALL_DIR)/modules/unpacker.prx
 PSP_PORT_DVEMGR_SOURCE_DIR := src/port/psp/dvemgr
 PSP_PORT_DVEMGR_BUILD_DIR := $(PSP_PORT_BUILD_DIR)/dvemgr
 PSP_PORT_DVEMGR_OBJECTS := \
@@ -1786,7 +1786,7 @@ $(PSP_PORT_LAUNCHER_OBJECT): $(PSP_PORT_LAUNCHER_SOURCE) src/port/psp/oot_psp_as
 
 $(PSP_PORT_LAUNCHER_ELF): $(PSP_PORT_LAUNCHER_OBJECT)
 	$(PSP_PORT_CC) -o $@ $< -specs=$(PSP_PORT_PSPSDK)/lib/prxspecs -Wl,-q \
-		-T$(PSP_PORT_PSPSDK)/lib/linkfile.prx -Wl,-zmax-page-size=128 -Wl,--gc-sections \
+		-T$(PSP_PORT_PSPSDK)/lib/linkfile.prx -Wl,-zmax-page-size=128 \
 		-Wl,-u,module_info -Wl,-u,__library_exports $(PSP_PORT_PSPSDK)/lib/prxexports.o \
 		-L$(PSP_PORT_PSPSDK)/lib -L$(PSP_PORT_PREFIX)/lib \
 		-lpspdebug -lpspdisplay -lpspge -lpspsdk
