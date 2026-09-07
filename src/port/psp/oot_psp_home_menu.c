@@ -3,6 +3,7 @@
 #include <pspctrl.h>
 #include <pspimpose_driver.h>
 #include <pspkernel.h>
+#include <psppower.h>
 #include <stddef.h>
 #include <stdio.h>
 
@@ -275,7 +276,8 @@ static void OotPspHomeMenu_Render(const char* statusMessage, const Color_RGB8* t
     }
 
     OotPspRenderer_RenderHomeMenu(sSelectedIndex, sScreen, submenuSelectedIndex,
-                                  statusMessage, highlightRed, highlightGreen, highlightBlue);
+                                  statusMessage, highlightRed, highlightGreen, highlightBlue,
+                                  scePowerGetBatteryLifePercent());
 }
 
 void OotPspHomeMenu_PollHomeButton(void) {

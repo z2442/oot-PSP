@@ -19,7 +19,7 @@ void OotPspRenderer_SetHomeMenuBackgroundActive(bool active);
 int OotPspRenderer_ApplyVideoSettings(void);
 void OotPspRenderer_RenderHomeMenu(int selectedIndex, int screen, int submenuSelectedIndex,
                                    const char* statusMessage, uint8_t highlightRed, uint8_t highlightGreen,
-                                   uint8_t highlightBlue);
+                                   uint8_t highlightBlue, int batteryPercent);
 void OotPspRenderer_RenderFirstBootProgress(uint32_t progressPermille, const char* statusMessage, bool error);
 
 #endif
