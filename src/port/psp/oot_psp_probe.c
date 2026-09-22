@@ -197,6 +197,8 @@ int main(int argc, char** argv) {
             if (OotPspHomeMenu_IsOpen()) {
                 const Color_RGB8* tunicColor = NULL;
 
+                OotPspAudio_Update();
+
 #if defined(OOTDEBUG)
                 OotPspPerformance_Flush();
 #endif
@@ -239,6 +241,7 @@ int main(int argc, char** argv) {
     OotPspPerformance_Flush();
 #endif
     Graph_Destroy(&gfxCtx);
+    OotPspAudioBackend_Shutdown();
     OotPspDve_Shutdown();
     sceKernelExitGame();
     return 0;

@@ -1,6 +1,7 @@
 #include "sched.h"
 
 #include "array_count.h"
+#include "oot_psp_audio_backend.h"
 #include "oot_psp_performance.h"
 #include "oot_psp_renderer.h"
 
@@ -152,7 +153,19 @@ static void SchedPsp_PaceGfxTask(OSScTask* task) {
              *
              * Sleep only for the remaining amount of this VI.
              */
-            sceKernelDelayThread((u32)waitUsec);
+            /* Use spare pacing time to prepare audio without an AudioGen
+             * context switch. Recheck the deadline after each bounded pump;
+             * do not spin while the ME owns the shared synthesis state. */
+            for (;;) {
+                s32 remaining;
+                OotPspAudio_Update();
+                remaining = SchedPsp_TimeDiff(sNextGfxCompletionUsec,
+                                              sceKernelGetSystemTimeLow());
+                if (remaining <= 0) {
+                    break;
+                }
+                sceKernelDelayThread(remaining > 5000 ? 5000 : (u32)remaining);
+            }
         } else if (waitUsec < 0) {
             /*
              * Frame missed its deadline.
@@ -201,7 +214,9 @@ void Sched_Notify(Scheduler* sc) {
             /*
              * Execute the graphics display list.
              */
+            OotPspAudio_Update();
             OotPspRenderer_RenderTask(&task->list);
+            OotPspAudio_Update();
 
             /*
              * Only a task that actually presents a framebuffer should

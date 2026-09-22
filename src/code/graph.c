@@ -386,6 +386,9 @@ void Graph_Update(GraphicsContext* gfxCtx, GameState* gameState) {
 #endif
 
     GameState_ReqPadData(gameState);
+#if defined(TARGET_PSP)
+    OotPspAudio_Update();
+#endif
     GameState_Update(gameState);
 #if defined(TARGET_PSP) && defined(OOTDEBUG)
     gameEndUsec = OotPspPerformance_Now();

@@ -26,6 +26,9 @@
 #ifndef OOT_PSP_AUDIO_MEDIA_ENGINE
 #define OOT_PSP_AUDIO_MEDIA_ENGINE 1
 #endif
+#ifndef OOT_PSP_AUDIO_ME_DIRECT_OUTPUT
+#define OOT_PSP_AUDIO_ME_DIRECT_OUTPUT 1
+#endif
 #ifndef OOT_PSP_AUDIO_DIAGNOSTICS
 #define OOT_PSP_AUDIO_DIAGNOSTICS 0
 #endif
@@ -66,10 +69,14 @@ static volatile s32 sOotPspAudioInitialized = false;
 #define OOT_PSP_AUDIO_GAME_THREAD_PRIORITY     0x20
 #define OOT_PSP_AUDIO_OUTPUT_THREAD_PRIORITY   (OOT_PSP_AUDIO_GAME_THREAD_PRIORITY - 2)
 #define OOT_PSP_AUDIO_PRODUCER_THREAD_PRIORITY OOT_PSP_AUDIO_GAME_THREAD_PRIORITY
-#define OOT_PSP_AUDIO_PRODUCER_URGENT_PRIORITY (OOT_PSP_AUDIO_GAME_THREAD_PRIORITY - 1)
+/* Direct ME playback must never preempt the game just because a previous ME
+ * synthesis job has not completed yet.  The ME owns playback; Allegrex only
+ * submits work when a slot is available. */
+#define OOT_PSP_AUDIO_PRODUCER_URGENT_PRIORITY OOT_PSP_AUDIO_PRODUCER_THREAD_PRIORITY
 
 #define OOT_PSP_AUDIO_MAX_UPDATES_NORMAL 8
-#define OOT_PSP_AUDIO_MAX_UPDATES_CATCHUP 2
+/* Never run multiple sequence/control updates back-to-back to catch up. */
+#define OOT_PSP_AUDIO_MAX_UPDATES_CATCHUP 1
 /* Initial and dynamically sized AI buffers can be shorter than one nominal
  * source chunk, so allow one extra update while priming the high-water mark. */
 #define OOT_PSP_AUDIO_MAX_UPDATES_PRIME (OOT_PSP_AUDIO_STARTUP_CHUNKS + 1)
@@ -86,6 +93,17 @@ static volatile s32 sOotPspAudioInitialized = false;
 #define OOT_PSP_AUDIO_RENDER_FLAG_UNDERRUN 1
 #define OOT_PSP_AUDIO_DMA_COPY_MIN_BYTES 1024
 #define OOT_PSP_AUDIO_MAX_ME_WRITE_RANGES 512
+#define OOT_PSP_AUDIO_ME_FIFO_STATUS_ADDRESS 0xBE000028U
+#define OOT_PSP_AUDIO_ME_FIFO_WRITE_ADDRESS 0xBE000070U
+#define OOT_PSP_AUDIO_ME_FIFO_SRC_READY 0x20U
+#define OOT_PSP_AUDIO_ME_FIFO_BURST 64U
+#define OOT_PSP_AUDIO_ME_FIFO_PRIME_FRAMES 24U
+/* Direct-output playback is ME-owned.  Keep the live read cursor local and
+ * expose it to Allegrex only often enough for conservative ring-space
+ * accounting.  Telemetry is even less urgent and can be batched heavily. */
+#define OOT_PSP_AUDIO_ME_READPOS_PUBLISH_FRAMES 64U
+#define OOT_PSP_AUDIO_ME_TELEMETRY_WRITE_INTERVAL 1024U
+#define OOT_PSP_AUDIO_ME_FIFO_NOT_READY_BACKOFF 32U
 
 #if OOT_PSP_AUDIO_DIAGNOSTICS
 #define OOT_PSP_AUDIO_DIAGNOSTIC_THREAD_PRIORITY 0x40
@@ -127,6 +145,23 @@ enum {
     OOT_PSP_AUDIO_ME_SHARED_QUEUE_FRAMES,
     OOT_PSP_AUDIO_ME_SHARED_QUEUE_WRITE_POS,
     OOT_PSP_AUDIO_ME_SHARED_QUEUE_RESULT_WRITE_POS,
+    OOT_PSP_AUDIO_ME_SHARED_RING_READ_POS,
+    OOT_PSP_AUDIO_ME_SHARED_RING_WRITE_POS,
+    OOT_PSP_AUDIO_ME_SHARED_OUTPUT_ENABLED,
+    OOT_PSP_AUDIO_ME_SHARED_OUTPUT_STARTED,
+    OOT_PSP_AUDIO_ME_SHARED_OUTPUT_STAGE,
+    OOT_PSP_AUDIO_ME_SHARED_OUTPUT_WRITES,
+    OOT_PSP_AUDIO_ME_SHARED_OUTPUT_NONZERO,
+    OOT_PSP_AUDIO_ME_SHARED_OUTPUT_UNDERRUNS,
+    OOT_PSP_AUDIO_ME_SHARED_OUTPUT_PRIME_REMAINING,
+    OOT_PSP_AUDIO_ME_SHARED_OUTPUT_LAST_STATUS,
+    OOT_PSP_AUDIO_ME_SHARED_OUTPUT_CHECKPOINT,
+    OOT_PSP_AUDIO_ME_SHARED_CLOCK_BEFORE,
+    OOT_PSP_AUDIO_ME_SHARED_CLOCK_AFTER,
+    OOT_PSP_AUDIO_ME_SHARED_HW_POWER,
+    OOT_PSP_AUDIO_ME_SHARED_HW_ENABLE,
+    OOT_PSP_AUDIO_ME_SHARED_HW_IRQ,
+    OOT_PSP_AUDIO_ME_SHARED_HW_CLKOUT,
     OOT_PSP_AUDIO_ME_SHARED_COUNT,
 };
 
@@ -144,6 +179,23 @@ static volatile u32 sAudioMeSharedStorage[OOT_PSP_AUDIO_ME_SHARED_COUNT] __attri
 #define sAudioMeQueueFrames                sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_QUEUE_FRAMES]
 #define sAudioMeQueueWritePos              sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_QUEUE_WRITE_POS]
 #define sAudioMeQueueResultWritePos        sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_QUEUE_RESULT_WRITE_POS]
+#define sAudioReadPos                       sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_RING_READ_POS]
+#define sAudioWritePos                      sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_RING_WRITE_POS]
+#define sAudioMeOutputEnabled               sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_OUTPUT_ENABLED]
+#define sAudioMeOutputStarted               sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_OUTPUT_STARTED]
+#define sAudioMeOutputStage                 sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_OUTPUT_STAGE]
+#define sAudioMeOutputWrites                sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_OUTPUT_WRITES]
+#define sAudioMeOutputNonzero               sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_OUTPUT_NONZERO]
+#define sAudioMeOutputUnderruns             sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_OUTPUT_UNDERRUNS]
+#define sAudioMeOutputPrimeRemaining        sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_OUTPUT_PRIME_REMAINING]
+#define sAudioMeOutputLastStatus             sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_OUTPUT_LAST_STATUS]
+#define sAudioMeOutputCheckpoint             sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_OUTPUT_CHECKPOINT]
+#define sAudioMeClockBefore                  sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_CLOCK_BEFORE]
+#define sAudioMeClockAfter                   sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_CLOCK_AFTER]
+#define sAudioMeHwPower                      sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_HW_POWER]
+#define sAudioMeHwEnable                     sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_HW_ENABLE]
+#define sAudioMeHwIrq                        sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_HW_IRQ]
+#define sAudioMeHwClkout                     sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_HW_CLKOUT]
 
 #if OOT_PSP_AUDIO_DIAGNOSTICS
 static volatile OotPspMixerOpcodeProfile sAudioMeOpcodeProfileStorage
@@ -165,12 +217,12 @@ static volatile OotPspMixerOpcodeProfile sAudioMeOpcodeProfileStorage
 #endif
 
 static s16 sAudioRing[OOT_PSP_AUDIO_RING_FRAMES * OOT_PSP_AUDIO_CHANNELS] __attribute__((aligned(64)));
+#define sAudioRingUncached \
+    ((volatile u32*)(UNCACHED_USER_MASK | (u32)(uintptr_t)sAudioRing))
 static s16 sAudioMix[2][OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES * OOT_PSP_AUDIO_CHANNELS]
     __attribute__((aligned(64)));
 static u8 sAudioExternalPool[OOT_PSP_AUDIO_EXTERNAL_POOL_SIZE] __attribute__((aligned(64)));
 
-static volatile u32 sAudioReadPos;
-static volatile u32 sAudioWritePos;
 static volatile u32 sAudioOutputFrames;
 static volatile u32 sAudioPendingOutputFrames;
 static volatile s32 sAudioOutputThreadRunning;
@@ -181,6 +233,11 @@ static volatile s32 sAudioMeBootStarted;
 static volatile s32 sAudioMeBootResult;
 static volatile s32 sAudioMeInitialized;
 static volatile s32 sAudioMeCommandPending;
+/* Set after the startup ring has been primed.  In this mode normal playback
+ * never waits for ME completion: a busy ME simply causes that synthesis
+ * submission to be skipped while its existing PCM continues playing. */
+static volatile s32 sAudioMeAsyncPlayback;
+static volatile u32 sAudioMeBusySkips;
 static volatile u32 sAudioSourceFrequency = OOT_PSP_AUDIO_DEFAULT_SOURCE_FREQUENCY;
 static volatile u32 sAudioSourceChunkFrames;
 #if OOT_PSP_AUDIO_DIAGNOSTICS
@@ -256,6 +313,42 @@ static s32 sAudioMeCompletionInterruptReady;
 static s32 sAudioOutputChannel = -1;
 static s32 sAudioHardwareSrc;
 
+enum {
+    AUDIO_TRACE_ROUTE_BEFORE, AUDIO_TRACE_ROUTE_AFTER,
+    AUDIO_TRACE_ME_POWER, AUDIO_TRACE_ME_ENABLE, AUDIO_TRACE_ME_IRQ,
+    AUDIO_TRACE_CPU_POWER, AUDIO_TRACE_CPU_ENABLE, AUDIO_TRACE_CPU_IRQ,
+    AUDIO_TRACE_CPU_STATUS, AUDIO_TRACE_NONZERO, AUDIO_TRACE_RECOVERIES, AUDIO_TRACE_COUNT
+};
+static volatile u32 sAudioHwTraceStorage[AUDIO_TRACE_COUNT]
+    __attribute__((aligned(64), section(".uncached")));
+#define sAudioHwTrace ((volatile u32*)(UNCACHED_USER_MASK | (u32)(uintptr_t)sAudioHwTraceStorage))
+/* Allegrex-only ownership state, accessed through me-core's kernel bridge. */
+static u32 sAudioSavedSysreg6c;
+static s32 sAudioSysreg6cOwned;
+
+/*
+ * These variables are used only by code running on the ME.  POPS likewise
+ * keeps the live FIFO state in its ME callback instead of making every FIFO
+ * decision depend on main-RAM mailbox coherency.  The uncached shared fields
+ * above are mirrors for Allegrex diagnostics only.
+ */
+#if OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT
+static u32 sAudioMeLocalOutputStarted;
+static u32 sAudioMeLocalOutputStage;
+static u32 sAudioMeLocalOutputWrites;
+static u32 sAudioMeLocalOutputUnderruns;
+static u32 sAudioMeLocalOutputPrimeRemaining;
+static u32 sAudioMeLocalOutputLastStatus;
+static u32 sAudioMeLocalSourcePhase;
+static u32 sAudioMeLocalNonzero;
+static u32 sAudioMeLocalRecoveries;
+static u32 sAudioMeLocalReadPos;
+static u32 sAudioMeLocalReadAdvancePending;
+static u32 sAudioMeLocalLastTelemetryWrites;
+static u32 sAudioMeLocalHeldSample;
+static u32 sAudioMeLocalHeldSampleValid;
+#endif
+
 void AudioThread_InitExternalPool(void* ramAddr, u32 size);
 static s32 OotPspAudioBackend_EnsureMeLockSema(void);
 #if OOT_PSP_AUDIO_MEDIA_ENGINE
@@ -269,6 +362,312 @@ static void OotPspAudioBackend_MeWritebackOutputs(const Acmd* cmdList, s32 cmdCo
 static void OotPspAudioBackend_MeQueueBuffer(s32 invalidateSource);
 static void OotPspAudioBackend_QueueCpuCopy(const s16* samples, u32 frames, u32 writePos);
 static u32 OotPspAudioBackend_FreeFrames(void);
+static u32 OotPspAudioBackend_SourceChunkFrames(void);
+static void OotPspAudioBackend_WritebackRange(const void* address, u32 size);
+static s32 OotPspAudioBackend_PrimeMeOutput(void);
+
+static void OotPspAudioBackend_MePublishReadPos(s32 force) {
+#if OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT
+    if (!force && (sAudioMeLocalReadAdvancePending < OOT_PSP_AUDIO_ME_READPOS_PUBLISH_FRAMES)) {
+        return;
+    }
+
+    /* Allegrex only uses this cursor to decide how much ring space is free.
+     * Publishing late is safe: it temporarily underestimates free space. */
+    sAudioReadPos = sAudioMeLocalReadPos;
+    sAudioMeLocalReadAdvancePending = 0;
+    meLibSync();
+#else
+    (void)force;
+#endif
+}
+
+static void OotPspAudioBackend_MePublishOutputStatus(s32 force) {
+#if OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT
+    if (!force &&
+        ((sAudioMeLocalOutputWrites - sAudioMeLocalLastTelemetryWrites) <
+         OOT_PSP_AUDIO_ME_TELEMETRY_WRITE_INTERVAL)) {
+        return;
+    }
+
+    sAudioMeOutputStarted = sAudioMeLocalOutputStarted;
+    sAudioMeOutputStage = sAudioMeLocalOutputStage;
+    sAudioMeOutputWrites = sAudioMeLocalOutputWrites;
+    sAudioMeOutputNonzero = sAudioMeLocalNonzero;
+    sAudioMeOutputUnderruns = sAudioMeLocalOutputUnderruns;
+    sAudioMeOutputPrimeRemaining = sAudioMeLocalOutputPrimeRemaining;
+    sAudioMeOutputLastStatus = sAudioMeLocalOutputLastStatus;
+    sAudioHwTrace[AUDIO_TRACE_NONZERO] = sAudioMeLocalNonzero;
+    sAudioHwTrace[AUDIO_TRACE_RECOVERIES] = sAudioMeLocalRecoveries;
+    sAudioMeLocalLastTelemetryWrites = sAudioMeLocalOutputWrites;
+    meLibSync();
+#else
+    (void)force;
+#endif
+}
+
+/* Keep FIFO polling on the ME but avoid hammering the MMIO status port at
+ * full instruction speed while the hardware cannot accept another word. */
+static inline void OotPspAudioBackend_MeFifoBackoff(void) {
+#if OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT
+    u32 spin;
+
+    /* A short ME-only pause prevents a full-speed MMIO poll storm while
+     * remaining tiny compared with one 44.1 kHz sample period. */
+    for (spin = 0; spin < OOT_PSP_AUDIO_ME_FIFO_NOT_READY_BACKOFF; spin++) {
+        meLibDelayPipeline();
+    }
+#endif
+}
+
+/* Exact 2x interpolation for the POPS-style 44.1 kHz FIFO.  The ring stores
+ * one packed stereo frame per u32 (left in the low half, right in the high
+ * half).  Match the old Allegrex half-sample interpolation, including its
+ * symmetric rounding, without touching floating point or VFPU state. */
+static inline u32 OotPspAudioBackend_MeLerpPackedStereoHalf(u32 current, u32 next) {
+#if OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT
+    s32 left = (s16)(current & 0xFFFFU);
+    s32 right = (s16)(current >> 16);
+    s32 nextLeft = (s16)(next & 0xFFFFU);
+    s32 nextRight = (s16)(next >> 16);
+    s32 leftDelta = nextLeft - left;
+    s32 rightDelta = nextRight - right;
+
+    leftDelta += 1 | (leftDelta >> 31);
+    rightDelta += 1 | (rightDelta >> 31);
+    left += leftDelta >> 1;
+    right += rightDelta >> 1;
+
+    return (u32)(u16)(s16)left | ((u32)(u16)(s16)right << 16);
+#else
+    (void)next;
+    return current;
+#endif
+}
+
+/*
+ * POPS keeps the audio controller alive on Allegrex, then has its ME callback
+ * feed packed stereo PCM directly to the SRC FIFO.  me-core already owns all
+ * ME boot, mapping, and exception setup here. Audio-specific clock enables
+ * are applied after the driver's silent DMA has drained and shut down.
+ */
+static void OotPspAudioBackend_MeServiceOutput(s32 idleBackoff) {
+#if OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT
+    volatile u32* audio = (volatile u32*)0xBE000000U;
+    volatile u32* fifoStatus = (volatile u32*)OOT_PSP_AUDIO_ME_FIFO_STATUS_ADDRESS;
+    volatile u32* fifoWrite = (volatile u32*)OOT_PSP_AUDIO_ME_FIFO_WRITE_ADDRESS;
+    u32 writePosSnapshot;
+    u32 i;
+
+    /* Every field controlling the FIFO is ME-local.  Shared fields are only
+     * telemetry, never inputs to this state machine. */
+    if (sAudioMeLocalOutputStage == 0) {
+        return;
+    }
+
+    /*
+     * popsman performs this setup inside its ME callback before its first
+     * FIFO write.  Enable the additional ME bus-clock bits seen in popsman's
+     * ME entry (0x2f40), preserving the bits me-core needs for mixing.  Its
+     * default 0x0f differs from POPS' 0x304.  Codec setup remains on Allegrex.
+     */
+    if (sAudioMeLocalOutputStage == 1) {
+        sAudioMeOutputCheckpoint = 10;
+        meLibSync();
+        sAudioMeClockBefore = HW_SYS_BUS_CLOCK_ENABLE;
+        HW_SYS_BUS_CLOCK_ENABLE = sAudioMeClockBefore | 0x304;
+        meLibSync();
+        sAudioMeClockAfter = HW_SYS_BUS_CLOCK_ENABLE;
+        sAudioMeOutputCheckpoint = 11;
+        meLibSync();
+        audio[0x00 / 4] = 1;
+        meLibSync();
+        sAudioHwTrace[AUDIO_TRACE_ME_POWER] = audio[0x00 / 4];
+        sAudioMeOutputCheckpoint = 12;
+        meLibSync();
+        audio[0x04 / 4] = 0;
+        meLibSync();
+        sAudioMeOutputCheckpoint = 13;
+        meLibSync();
+        sAudioMeLocalOutputStage = 2;
+        OotPspAudioBackend_MePublishOutputStatus(true);
+    }
+
+    if (sAudioMeLocalOutputStage == 2) {
+        u32 status = audio[0x0C / 4];
+
+        sAudioMeLocalOutputLastStatus = status;
+        if ((status & 7) != 0) {
+            OotPspAudioBackend_MePublishOutputStatus(true);
+            return;
+        }
+
+        /* popsman 0x3040..0x3090 waits for the volume port, then writes
+         * the requested volume shifted by five (0x3594). */
+        if ((audio[0x50 / 4] & 0x10000) != 0) {
+            sAudioMeOutputCheckpoint = 14;
+            OotPspAudioBackend_MePublishOutputStatus(true);
+            return;
+        }
+        audio[0x50 / 4] = PSP_AUDIO_VOLUME_MAX >> 5;
+        audio[0x2C / 4] = 7;
+        audio[0x24 / 4] = 0x22;
+        audio[0x20 / 4] = 7;
+        audio[0x08 / 4] = 0;
+        audio[0x14 / 4] = 0x1208;
+        audio[0x18 / 4] = 0;
+        audio[0x10 / 4] = 2;
+        audio[0x38 / 4] = 0x80;
+        audio[0x40 / 4] = 1;
+        audio[0x04 / 4] = 2;
+        meLibSync();
+        sAudioHwTrace[AUDIO_TRACE_ME_ENABLE] = audio[0x04 / 4];
+        sAudioHwTrace[AUDIO_TRACE_ME_IRQ] = audio[0x24 / 4];
+        sAudioMeLocalOutputPrimeRemaining = OOT_PSP_AUDIO_ME_FIFO_PRIME_FRAMES;
+        sAudioMeLocalOutputStage = 3;
+        sAudioMeOutputCheckpoint = 15;
+    }
+
+    if (sAudioMeLocalOutputStage == 3) {
+        for (i = 0; (i < OOT_PSP_AUDIO_ME_FIFO_BURST) &&
+                    (sAudioMeLocalOutputPrimeRemaining != 0); i++) {
+            u32 status = *fifoStatus;
+
+            sAudioMeLocalOutputLastStatus = status;
+            if ((status & OOT_PSP_AUDIO_ME_FIFO_SRC_READY) == 0) {
+                if (idleBackoff) {
+                    OotPspAudioBackend_MeFifoBackoff();
+                }
+                return;
+            }
+            *fifoWrite = 0;
+            sAudioMeLocalOutputPrimeRemaining--;
+            sAudioMeLocalOutputWrites++;
+        }
+        if (sAudioMeLocalOutputPrimeRemaining != 0) {
+            return;
+        }
+        sAudioMeLocalOutputStage = 4;
+        OotPspAudioBackend_MePublishOutputStatus(true);
+    }
+
+    /* The producer only advances this pointer when it publishes a complete
+     * PCM block.  Snapshot it once per FIFO burst instead of rereading shared
+     * uncached memory for every single hardware word. */
+    writePosSnapshot = sAudioWritePos;
+
+    for (i = 0; i < OOT_PSP_AUDIO_ME_FIFO_BURST; i++) {
+        u32 readPos;
+        u32 buffered;
+        u32 sample = 0;
+
+        u32 status = *fifoStatus;
+
+        sAudioMeLocalOutputLastStatus = status;
+        /* popsman 0x310c/0x31d4 returns to channel initialization when bit
+         * 0x2 is set and its control mailbox requests normal playback. */
+        if ((status & 2) != 0) {
+            sAudioMeLocalRecoveries++;
+            sAudioMeLocalOutputStage = 1;
+            sAudioMeLocalSourcePhase = 0;
+            sAudioMeLocalOutputStarted = false;
+            sAudioMeLocalHeldSampleValid = false;
+            OotPspAudioBackend_MePublishReadPos(true);
+            OotPspAudioBackend_MePublishOutputStatus(true);
+            break;
+        }
+        if ((status & OOT_PSP_AUDIO_ME_FIFO_SRC_READY) == 0) {
+            if (idleBackoff) {
+                OotPspAudioBackend_MeFifoBackoff();
+            }
+            break;
+        }
+
+        readPos = sAudioMeLocalReadPos;
+        buffered = (writePosSnapshot - readPos) & OOT_PSP_AUDIO_RING_MASK;
+        if (!sAudioMeLocalOutputStarted &&
+            (buffered >= (OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES / 2) * OOT_PSP_AUDIO_STARTUP_CHUNKS)) {
+            sAudioMeLocalOutputStarted = true;
+        }
+
+        if (sAudioMeLocalOutputStarted && (buffered != 0)) {
+            u32 currentSample;
+            u32 nextSample = 0;
+            s32 nextSampleValid = false;
+
+            /* CPU-produced PCM can enter this ring, so the first observation
+             * of a source frame remains uncached.  Once observed, however, a
+             * frame is immutable until consumed. Retain it in ME-local state
+             * across the two 44.1 kHz writes instead of rereading main RAM. */
+            if (!sAudioMeLocalHeldSampleValid) {
+                sAudioMeLocalHeldSample = sAudioRingUncached[readPos];
+                sAudioMeLocalHeldSampleValid = true;
+            }
+            currentSample = sAudioMeLocalHeldSample;
+            sample = currentSample;
+
+            /* The POPS FIFO itself runs at 44.1 kHz.  OoT's direct-output
+             * handoff is restricted to the normal 22.05 kHz source rate, so
+             * generate the missing half-sample instead of simply repeating
+             * each source frame:
+             *
+             *     A, (A+B)/2, B, (B+C)/2, ...
+             *
+             * At the midpoint, load B once. After advancing the source cursor
+             * B becomes the retained current frame for the next FIFO write. */
+            if ((sAudioMeLocalSourcePhase != 0) && (buffered > 1)) {
+                nextSample = sAudioRingUncached[(readPos + 1) & OOT_PSP_AUDIO_RING_MASK];
+                nextSampleValid = true;
+                sample = OotPspAudioBackend_MeLerpPackedStereoHalf(currentSample, nextSample);
+            }
+
+            sAudioMeLocalSourcePhase += OOT_PSP_AUDIO_DEFAULT_SOURCE_FREQUENCY;
+            if (sAudioMeLocalSourcePhase >= OOT_PSP_AUDIO_OUTPUT_FREQUENCY) {
+                sAudioMeLocalSourcePhase -= OOT_PSP_AUDIO_OUTPUT_FREQUENCY;
+                sAudioMeLocalReadPos = (readPos + 1) & OOT_PSP_AUDIO_RING_MASK;
+                sAudioMeLocalReadAdvancePending++;
+                if (nextSampleValid) {
+                    sAudioMeLocalHeldSample = nextSample;
+                    sAudioMeLocalHeldSampleValid = true;
+                } else {
+                    sAudioMeLocalHeldSampleValid = false;
+                }
+                OotPspAudioBackend_MePublishReadPos(false);
+            }
+        } else if (sAudioMeLocalOutputStarted) {
+            sAudioMeLocalOutputStarted = false;
+            sAudioMeLocalSourcePhase = 0;
+            sAudioMeLocalHeldSampleValid = false;
+            sAudioMeLocalOutputUnderruns++;
+            OotPspAudioBackend_MePublishReadPos(true);
+            OotPspAudioBackend_MePublishOutputStatus(true);
+        }
+
+        *fifoWrite = sample;
+        if (sample != 0) {
+            sAudioMeLocalNonzero++;
+        }
+        sAudioMeLocalOutputWrites++;
+    }
+
+    /* The common FIFO-not-ready path reaches here with no writes.  Do not
+     * turn that busy poll into shared-RAM stores plus meLibSync().  Normal
+     * playback telemetry is sampled every 1024 FIFO writes instead. */
+    OotPspAudioBackend_MePublishOutputStatus(false);
+#endif
+}
+
+void OotPspAudioBackend_ServiceOutputMe(void) {
+#if OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT
+    /* Work checkpoints must not spin or sleep waiting for the FIFO. Idle
+     * polling retains its backoff; here only enter when service is needed.
+     * This path uses integer registers only and leaves mixer/VME state alone. */
+    if ((sAudioMeLocalOutputStage == 4) &&
+        ((hw(OOT_PSP_AUDIO_ME_FIFO_STATUS_ADDRESS) & (OOT_PSP_AUDIO_ME_FIFO_SRC_READY | 2U)) != 0)) {
+        OotPspAudioBackend_MeServiceOutput(false);
+    }
+#endif
+}
 
 static s32 OotPspAudioBackend_MeJobIsRunning(void) {
     return (sAudioMeState == OOT_PSP_AUDIO_ME_STATE_RUN) ||
@@ -318,10 +717,32 @@ __attribute__((noinline, aligned(4))) void meLibOnProcess(void) {
     sAudioMeProgress = OOT_PSP_AUDIO_ME_PROGRESS_BOOT_RELEASED;
     meLibSync();
     OotPspMixer_InitVme();
+#if OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT
+    /* Allegrex releases BOOTING only after the silent driver transfer has
+     * enabled the audio clock.  Start the independent ME-side state machine
+     * here; do not import the Allegrex telemetry stage as control state. */
+    sAudioMeLocalOutputStarted = false;
+    sAudioMeLocalOutputStage = 1;
+    sAudioMeLocalOutputWrites = 0;
+    sAudioMeLocalOutputUnderruns = 0;
+    sAudioMeLocalOutputPrimeRemaining = 0;
+    sAudioMeLocalOutputLastStatus = 0;
+    sAudioMeLocalSourcePhase = 0;
+    sAudioMeLocalNonzero = 0;
+    sAudioMeLocalRecoveries = 0;
+    sAudioMeLocalReadPos = sAudioReadPos;
+    sAudioMeLocalReadAdvancePending = 0;
+    sAudioMeLocalLastTelemetryWrites = 0;
+    sAudioMeLocalHeldSample = 0;
+    sAudioMeLocalHeldSampleValid = false;
+    OotPspAudioBackend_MePublishReadPos(true);
+    OotPspAudioBackend_MePublishOutputStatus(true);
+#endif
     sAudioMeProgress = OOT_PSP_AUDIO_ME_PROGRESS_READY;
     meLibSync();
 
     while (sAudioMeState != OOT_PSP_AUDIO_ME_STATE_STOP) {
+        OotPspAudioBackend_MeServiceOutput(true);
         if ((sAudioMeState == OOT_PSP_AUDIO_ME_STATE_RUN) ||
             (sAudioMeState == OOT_PSP_AUDIO_ME_STATE_SYNTH_RUN)) {
             Acmd* cmdList = (Acmd*)(uintptr_t)sAudioMeCmdList;
@@ -364,22 +785,37 @@ __attribute__((noinline, aligned(4))) void meLibOnProcess(void) {
                 OotPspAudioBackend_MeWritebackRange(privateOutput, privateOutputBytes);
             }
             meLibSync();
-            sAudioMeState = OOT_PSP_AUDIO_ME_STATE_IDLE;
+            if (sAudioMeState != OOT_PSP_AUDIO_ME_STATE_STOP) {
+                sAudioMeState = OOT_PSP_AUDIO_ME_STATE_IDLE;
+            }
             meLibSync();
             if (sAudioMeCompletionInterruptEnabled) {
                 meLibSendExternalSoftInterrupt();
             }
+            OotPspAudioBackend_MeServiceOutput(false);
         } else if (sAudioMeState == OOT_PSP_AUDIO_ME_STATE_QUEUE_BUFFER) {
             sAudioMeProgress = 1;
             OotPspAudioBackend_MeQueueBuffer(true);
             sAudioMeProgress = 2;
             meLibSync();
-            sAudioMeState = OOT_PSP_AUDIO_ME_STATE_IDLE;
+            if (sAudioMeState != OOT_PSP_AUDIO_ME_STATE_STOP) {
+                sAudioMeState = OOT_PSP_AUDIO_ME_STATE_IDLE;
+            }
+            OotPspAudioBackend_MeServiceOutput(false);
         } else {
             meLibDelayPipeline();
         }
     }
 
+#if OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT
+    OotPspAudioBackend_MePublishReadPos(true);
+    OotPspAudioBackend_MePublishOutputStatus(true);
+    /* Stop FIFO activity before Allegrex restores the startup register. */
+    hw(0xBE000004U) = 0;
+    hw(0xBE000024U) = 0;
+    hw(0xBE000000U) = 0;
+    meLibSync();
+#endif
     OotPspMixer_ShutdownVme();
     sAudioMeState = OOT_PSP_AUDIO_ME_STATE_HALTED;
     meLibSync();
@@ -402,11 +838,26 @@ s32 OotPspAudioBackend_BootMe(void) {
 
     sAudioMeCmdList = 0;
     sAudioMeCmdCount = 0;
+    sAudioMeAsyncPlayback = false;
+    sAudioMeBusySkips = 0;
     sAudioMeProgress = 0;
     sAudioMeQueueSrc = 0;
     sAudioMeQueueFrames = 0;
     sAudioMeQueueWritePos = 0;
     sAudioMeQueueResultWritePos = 0;
+    sAudioReadPos = 0;
+    sAudioWritePos = 0;
+    sAudioMeOutputEnabled = false;
+    sAudioMeOutputStarted = false;
+    sAudioMeOutputStage = 0;
+    sAudioMeOutputWrites = 0;
+    sAudioMeOutputNonzero = 0;
+    sAudioMeOutputUnderruns = 0;
+    sAudioMeOutputPrimeRemaining = 0;
+    sAudioMeOutputLastStatus = 0;
+    sAudioMeOutputCheckpoint = 0;
+    sAudioMeClockBefore = 0;
+    sAudioMeClockAfter = 0;
 #if OOT_PSP_AUDIO_DIAGNOSTICS
     memset((void*)sAudioMeOpcodeProfile, 0, sizeof(*sAudioMeOpcodeProfile));
     sAudioMeOpcodeProfile->currentOpcode = OOT_PSP_MIXER_PROFILE_OPCODE_IDLE;
@@ -447,6 +898,15 @@ static s32 OotPspAudioBackend_InitMe(void) {
     /* A failed registration is non-fatal; command waits retain their polling fallback. */
     OotPspAudioBackend_EnsureMeCompletionInterrupt();
 
+    ret = OotPspAudioBackend_PrimeMeOutput();
+    if (ret < 0) {
+        sAudioMeOutputEnabled = false;
+        sAudioMeState = OOT_PSP_AUDIO_ME_STATE_STOP;
+        meLibSync();
+        printf("[audio-me] direct output handoff failed err=%d; strict ME output disabled\n", (int)ret);
+        return ret;
+    }
+
     meLibSync();
     sAudioMeState = OOT_PSP_AUDIO_ME_STATE_IDLE;
 
@@ -468,7 +928,157 @@ static s32 OotPspAudioBackend_InitMe(void) {
     }
 
     sAudioMeInitialized = true;
+    if (sAudioMeOutputEnabled) {
+        printf("[audio-me] direct FIFO v11: bounded cache/copy service gaps\n");
+    }
     return 0;
+#endif
+}
+
+/* Runs on Allegrex through the existing me-core kernel bridge. The codec
+ * driver's enable callback only toggles AUDIO_CLKOUT (BC100058 bit 24).
+ * Keep all unrelated peripheral-clock bits intact. */
+static int OotPspAudioBackend_AudioClockHandoff(void* const enable) {
+    sAudioMeHwPower = hw(0xBE000000U);
+    if (enable != NULL) {
+        hw(0xBC100058U) |= 0x01010000U; /* AUDIO0 and AUDIO_CLKOUT */
+        meLibSync();
+        /* Verified in popsman: startup 0x346c sets this to 1; teardown
+         * 0x33d0 clears it. Its precise hardware semantics are unconfirmed.
+         * Apply on Allegrex, after normal-driver drain and before ME release. */
+        if (!sAudioSysreg6cOwned) {
+            sAudioSavedSysreg6c = hw(0xBC10006CU);
+            sAudioSysreg6cOwned = true;
+        }
+        sAudioHwTrace[AUDIO_TRACE_ROUTE_BEFORE] = sAudioSavedSysreg6c;
+        hw(0xBC10006CU) = 1;
+        meLibSync();
+        sAudioHwTrace[AUDIO_TRACE_ROUTE_AFTER] = hw(0xBC10006CU);
+        if (sAudioHwTrace[AUDIO_TRACE_ROUTE_AFTER] != 1) {
+            hw(0xBC10006CU) = sAudioSavedSysreg6c;
+            meLibSync();
+            sAudioSysreg6cOwned = false;
+            return -1;
+        }
+    }
+    sAudioMeHwClkout = hw(0xBC100058U);
+    meLibSync();
+    return 0;
+}
+
+static s32 OotPspAudioBackend_PrimeMeOutput(void) {
+#if OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT && OOT_PSP_AUDIO_HARDWARE_SRC
+    s32 ret;
+    u32 drainStart;
+
+    if (!sAudioHardwareSrc || (sAudioSourceFrequency != OOT_PSP_AUDIO_DEFAULT_SOURCE_FREQUENCY) ||
+        (sAudioSourceFrequency > OOT_PSP_AUDIO_OUTPUT_FREQUENCY)) {
+        return -1;
+    }
+
+    /*
+     * sceAudioSRCChReserve configured the SRC rate but intentionally left the
+     * controller off. A silent transfer initializes the codec, but its final
+     * interrupt also disables the controller and AUDIO_CLKOUT. Wait for that
+     * cleanup before restoring the clock and releasing the ME.
+     */
+    memset(sAudioMix[0], 0,
+           OotPspAudioBackend_SourceChunkFrames() * OOT_PSP_AUDIO_CHANNELS * sizeof(s16));
+    OotPspAudioBackend_WritebackRange(
+        sAudioMix[0], OotPspAudioBackend_SourceChunkFrames() * OOT_PSP_AUDIO_CHANNELS * sizeof(s16));
+    ret = sceAudioSRCOutputBlocking(PSP_AUDIO_VOLUME_MAX, sAudioMix[0]);
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = sceAudioSRCOutputBlocking(PSP_AUDIO_VOLUME_MAX, NULL);
+    if (ret < 0) {
+        return ret;
+    }
+    drainStart = sceKernelGetSystemTimeLow();
+    do {
+        ret = kcall(OotPspAudioBackend_AudioClockHandoff, 0, NULL);
+        if (ret < 0) {
+            return ret;
+        }
+        if (sAudioMeHwPower == 0) {
+            break;
+        }
+        if ((sceKernelGetSystemTimeLow() - drainStart) >= OOT_PSP_AUDIO_ME_TIMEOUT_US) {
+            printf("[audio-me] driver drain timeout power=%08lx\n", (unsigned long)sAudioMeHwPower);
+            return -1;
+        }
+        sceKernelDelayThread(OOT_PSP_AUDIO_ME_POLL_USEC);
+    } while (1);
+    ret = kcall(OotPspAudioBackend_AudioClockHandoff, 0, (void*)1);
+    if (ret < 0) {
+        return ret;
+    }
+    printf("[audio-me] driver drained power=%08lx peripheral-clock=%08lx\n",
+           (unsigned long)sAudioMeHwPower, (unsigned long)sAudioMeHwClkout);
+    printf("[audio-me] sysreg6c=%08lx->%08lx\n",
+           (unsigned long)sAudioHwTrace[AUDIO_TRACE_ROUTE_BEFORE],
+           (unsigned long)sAudioHwTrace[AUDIO_TRACE_ROUTE_AFTER]);
+
+    sAudioMeOutputStarted = false;
+    sAudioMeOutputStage = 1;
+    sAudioMeOutputEnabled = true;
+    meLibSync();
+    return 0;
+#else
+    return -1;
+#endif
+}
+
+static int OotPspAudioBackend_ReadMainAudioRegisters(void) {
+    sAudioHwTrace[AUDIO_TRACE_CPU_POWER] = hw(0xBE000000U);
+    sAudioHwTrace[AUDIO_TRACE_CPU_ENABLE] = hw(0xBE000004U);
+    sAudioHwTrace[AUDIO_TRACE_CPU_IRQ] = hw(0xBE000024U);
+    sAudioHwTrace[AUDIO_TRACE_CPU_STATUS] = hw(0xBE000028U);
+    meLibSync();
+    return 0;
+}
+
+static int OotPspAudioBackend_RestoreSysreg6c(void) {
+    if (sAudioSysreg6cOwned) {
+        hw(0xBC10006CU) = sAudioSavedSysreg6c;
+        meLibSync();
+        sAudioSysreg6cOwned = false;
+    }
+    return 0;
+}
+
+void OotPspAudioBackend_Shutdown(void) {
+#if OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT
+    u32 start;
+    if (!sAudioMeBootStarted || (sAudioMeBootResult < 0)) {
+        return;
+    }
+    sAudioProducerThreadRunning = false;
+    start = sceKernelGetSystemTimeLow();
+    while (sAudioProducerThreadId >= 0) {
+        if ((sceKernelGetSystemTimeLow() - start) >= OOT_PSP_AUDIO_ME_TIMEOUT_US) {
+            printf("[audio-me] shutdown: producer did not stop; handoff retained\n");
+            return;
+        }
+        sceKernelDelayThread(OOT_PSP_AUDIO_ME_POLL_USEC);
+    }
+    start = sceKernelGetSystemTimeLow();
+    if (sAudioMeState != OOT_PSP_AUDIO_ME_STATE_HALTED) {
+        sAudioMeState = OOT_PSP_AUDIO_ME_STATE_STOP;
+        meLibSync();
+    }
+    while (sAudioMeState != OOT_PSP_AUDIO_ME_STATE_HALTED) {
+        if ((sceKernelGetSystemTimeLow() - start) >= OOT_PSP_AUDIO_ME_TIMEOUT_US) {
+            printf("[audio-me] shutdown: ME did not halt; handoff retained\n");
+            return;
+        }
+        sceKernelDelayThread(OOT_PSP_AUDIO_ME_POLL_USEC);
+    }
+    kcall(OotPspAudioBackend_RestoreSysreg6c, 0);
+    sAudioMeInitialized = false;
+    sAudioMeAsyncPlayback = false;
+    sAudioMeOutputEnabled = false;
 #endif
 }
 
@@ -539,7 +1149,14 @@ static void OotPspAudioBackend_MeInvalidateRange(const void* address, u32 size) 
     start = (uintptr_t)address & ~(OOT_PSP_AUDIO_CACHE_LINE_SIZE - 1);
     end = ((uintptr_t)address + size + OOT_PSP_AUDIO_CACHE_LINE_SIZE - 1) &
           ~(OOT_PSP_AUDIO_CACHE_LINE_SIZE - 1);
-    meLibDcacheInvalidateRange((u32)start, end - start);
+    /* Keep long state/sample refreshes from monopolizing the FIFO owner.
+     * Bound work on aligned lines; do not publish partial job completion. */
+    while (start < end) {
+        u32 bytes = (end - start > 1024U) ? 1024U : (u32)(end - start);
+        meLibDcacheInvalidateRange((u32)start, bytes);
+        start += bytes;
+        OotPspAudioBackend_ServiceOutputMe();
+    }
 }
 
 static void OotPspAudioBackend_MeWritebackRange(const void* address, u32 size) {
@@ -553,7 +1170,12 @@ static void OotPspAudioBackend_MeWritebackRange(const void* address, u32 size) {
     start = (uintptr_t)address & ~(OOT_PSP_AUDIO_CACHE_LINE_SIZE - 1);
     end = ((uintptr_t)address + size + OOT_PSP_AUDIO_CACHE_LINE_SIZE - 1) &
           ~(OOT_PSP_AUDIO_CACHE_LINE_SIZE - 1);
-    meLibDcacheWritebackRange((u32)start, end - start);
+    while (start < end) {
+        u32 bytes = (end - start > 1024U) ? 1024U : (u32)(end - start);
+        meLibDcacheWritebackRange((u32)start, bytes);
+        start += bytes;
+        OotPspAudioBackend_ServiceOutputMe();
+    }
 }
 
 static u32 OotPspAudioBackend_CommandDmaSize(u32 w0) {
@@ -836,6 +1458,7 @@ static void OotPspAudioBackend_InvalidateMeWrites(const Acmd* cmdList, s32 cmdCo
     OotPspAudioBackend_ResetMeWriteRanges();
 }
 
+#if !(OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT)
 static void OotPspAudioBackend_InvalidateQueuedRingFrames(u32 writePos, u32 frames) {
     while (frames != 0) {
         u32 todo = frames;
@@ -851,6 +1474,7 @@ static void OotPspAudioBackend_InvalidateQueuedRingFrames(u32 writePos, u32 fram
         writePos = (writePos + todo) & OOT_PSP_AUDIO_RING_MASK;
     }
 }
+#endif
 
 static void OotPspAudioBackend_PublishPendingMeQueue(void) {
     u32 expectedWritePos;
@@ -868,18 +1492,48 @@ static void OotPspAudioBackend_PublishPendingMeQueue(void) {
         return;
     }
 
+#if OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT
+    /* The ME already published this position after writing the PCM.  The
+     * Allegrex never reads the samples in direct-output mode, so neither
+     * invalidate the ring back into its cache nor republish ME-owned state. */
+    return;
+#else
     OotPspAudioBackend_InvalidateQueuedRingFrames(sAudioMePendingQueueWritePos,
                                                   sAudioMePendingQueueFrames);
     /* Publish only after Allegrex can see every ring line written by the ME. */
     sAudioWritePos = resultWritePos;
+#endif
 }
 
 static void OotPspAudioBackend_FallbackFromMe(const Acmd* cmdList, s32 cmdCount, const s16* queueSrc,
                                               u32 queueFrames, u32 queueWritePos) {
+#if OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT
+    /* Strict POPS-style output: never turn an ME stall into a giant Allegrex
+     * mixer spike.  The existing ME-local/ring PCM may continue draining, but
+     * this failed job is dropped and the backend is marked inactive. */
+    (void)cmdList;
+    (void)cmdCount;
+    (void)queueSrc;
+    (void)queueFrames;
+    (void)queueWritePos;
+    printf("[audio-me] ME job failed state=%lu progress=%lu checkpoint=%lu; dropping job (no CPU fallback)\n",
+           (unsigned long)sAudioMeState, (unsigned long)sAudioMeProgress,
+           (unsigned long)sAudioMeOutputCheckpoint);
+    sAudioMeInitialized = false;
+    sAudioMeAsyncPlayback = false;
+    AUDIO_DIAG_INCREMENT(sAudioDiagnosticMeFallbacks);
+#if defined(OOTDEBUG)
+    sAudioProfileMeFailures++;
+#endif
+    OotPspAudioBackend_ResetMeWriteRanges();
+#else
 #if defined(OOTDEBUG) || OOT_PSP_AUDIO_DIAGNOSTICS
     u32 buildStartUsec = 0;
 #endif
 
+    printf("[audio-me] ME mixing failed state=%lu progress=%lu checkpoint=%lu; CPU fallback\n",
+           (unsigned long)sAudioMeState, (unsigned long)sAudioMeProgress,
+           (unsigned long)sAudioMeOutputCheckpoint);
     sAudioMeInitialized = false;
     AUDIO_DIAG_INCREMENT(sAudioDiagnosticCpuMixes);
     AUDIO_DIAG_INCREMENT(sAudioDiagnosticMeFallbacks);
@@ -914,6 +1568,7 @@ static void OotPspAudioBackend_FallbackFromMe(const Acmd* cmdList, s32 cmdCount,
     if ((queueSrc != NULL) && (queueFrames != 0)) {
         OotPspAudioBackend_QueueCpuCopy(queueSrc, queueFrames, queueWritePos);
     }
+#endif
 }
 
 static void OotPspAudioBackend_ClearPendingMeCommand(void) {
@@ -1263,6 +1918,19 @@ void OotPspAudioBackend_SubmitSynthesis(Acmd* cmdList, s16* aiBuffer, s32 aiFram
     }
 
     OotPspAudioBackend_LockMe();
+#if OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT
+    if (sAudioMeAsyncPlayback && sAudioMeCommandPending && OotPspAudioBackend_MeJobIsRunning()) {
+        /* Normal playback is fire-and-forget.  Never stall Allegrex waiting
+         * for the ME; the already-buffered PCM keeps feeding the FIFO. */
+        sAudioMeBusySkips++;
+        OotPspAudioBackend_UnlockMe();
+        return;
+    }
+#endif
+    /* If the previous job already completed, this only reaps its bookkeeping;
+     * it cannot block because the running case returned above. During initial
+     * priming sAudioMeAsyncPlayback is false, so the old blocking behavior is
+     * retained long enough to fill the startup reserve safely. */
     OotPspAudioBackend_WaitForCommandsLocked();
     queueWritePos = sAudioWritePos;
     if ((u32)aiFrames > OotPspAudioBackend_FreeFrames()) {
@@ -1274,15 +1942,26 @@ void OotPspAudioBackend_SubmitSynthesis(Acmd* cmdList, s16* aiBuffer, s32 aiFram
     }
 
     if (!sAudioMeInitialized) {
+#if OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT
+        /* Strict direct-output mode never falls back to Allegrex mixing. */
+        OotPspAudioBackend_UnlockMe();
+        return;
+#else
         OotPspAudioBackend_RunSynthesisCpu(cmdList, aiBuffer, aiFrames, queueWritePos);
         OotPspAudioBackend_UnlockMe();
         return;
+#endif
     }
 
     if (!AudioSynth_CanBuildCommandsOnMe()) {
+#if OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT
+        OotPspAudioBackend_UnlockMe();
+        return;
+#else
         OotPspAudioBackend_RunSynthesisCpu(cmdList, aiBuffer, aiFrames, queueWritePos);
         OotPspAudioBackend_UnlockMe();
         return;
+#endif
     }
 
     if (sAudioMeState != OOT_PSP_AUDIO_ME_STATE_IDLE) {
@@ -1494,6 +2173,12 @@ static void OotPspAudioBackend_FadeChunkToSilenceState(s16** outPtr, u32 frames,
 static s32 OotPspAudioBackend_CanRunUpdate(void) {
     u32 reserveFrames = gAudioCtx.audioBufferParameters.maxAiBufferLength;
 
+    /* Scheduled updates used to fill all 16384 frames instead of maintaining
+     * the target reserve. Include the in-flight job to bound latency and
+     * avoid spending Allegrex sequence/cache work on excess future audio. */
+    if (OotPspAudioBackend_TotalBufferedFrames() >= OotPspAudioBackend_TargetBufferFrames()) {
+        return false;
+    }
     if ((reserveFrames == 0) || (reserveFrames >= OOT_PSP_AUDIO_RING_FRAMES)) {
         reserveFrames = OotPspAudioBackend_SourceChunkFrames();
     }
@@ -1510,6 +2195,15 @@ typedef enum {
 static OotPspAudioUpdateResult OotPspAudioBackend_TryRunUpdate(void) {
     s32 publishImmediately;
 
+#if OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT
+    /* AudioThread_Update waits before it changes shared synthesis state.
+     * Defer the entire update here while the ME owns that state. Checking
+     * only at SubmitSynthesis is too late to avoid the earlier wait. */
+    if (sAudioMeAsyncPlayback && sAudioMeCommandPending && OotPspAudioBackend_MeJobIsRunning()) {
+        sAudioMeBusySkips++;
+        return OOT_PSP_AUDIO_UPDATE_BLOCKED;
+    }
+#endif
     if (!OotPspAudioBackend_CanRunUpdate()) {
         AUDIO_DIAG_SET(sAudioDiagnosticProducerState, OOT_PSP_AUDIO_PRODUCER_STATE_RING_FULL);
         AUDIO_DIAG_INCREMENT(sAudioDiagnosticRingFull);
@@ -1527,15 +2221,16 @@ static OotPspAudioUpdateResult OotPspAudioBackend_TryRunUpdate(void) {
                          OotPspAudioBackend_UrgentBufferFrames();
     AUDIO_DIAG_SET(sAudioDiagnosticProducerState, OOT_PSP_AUDIO_PRODUCER_STATE_UPDATE);
     AudioThread_Update();
-    if (publishImmediately) {
-        /* The ME may finish quickly, but its ring position is not visible to
-         * AudioOut until Allegrex drains the completion. Under pressure wait
-         * on the completion semaphore now instead of losing a 60 Hz period. */
+    if (publishImmediately && !sAudioMeAsyncPlayback) {
+        /* Startup priming may still wait so the initial reserve is real.
+         * Once asynchronous ME playback begins, normal updates never wait. */
         AUDIO_DIAG_SET(sAudioDiagnosticProducerState, OOT_PSP_AUDIO_PRODUCER_STATE_WAIT_ME);
         OotPspAudioBackend_WaitForCommands();
     }
     AUDIO_DIAG_INCREMENT(sAudioDiagnosticUpdates);
-    sceKernelRotateThreadReadyQueue(sceKernelGetThreadCurrentPriority());
+    if (sAudioProducerThreadRunning) {
+        sceKernelRotateThreadReadyQueue(sceKernelGetThreadCurrentPriority());
+    }
     return OOT_PSP_AUDIO_UPDATE_COMPLETED;
 }
 
@@ -1745,6 +2440,10 @@ static void OotPspAudioBackend_MeQueueBuffer(s32 invalidateSource) {
         }
 
         dst = &sAudioRing[writePos * OOT_PSP_AUDIO_CHANNELS];
+        /* Copy at most 1 KiB before servicing already committed PCM. */
+        if (todo > 256U) {
+            todo = 256U;
+        }
         bytes = todo * OOT_PSP_AUDIO_CHANNELS * sizeof(s16);
         OotPspAudioBackend_MeInvalidateRange(dst, bytes);
         memcpy(dst, samples, bytes);
@@ -1756,6 +2455,14 @@ static void OotPspAudioBackend_MeQueueBuffer(s32 invalidateSource) {
     }
 
     sAudioMeQueueResultWritePos = writePos;
+#if OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT
+    /* POPS keeps PCM production and FIFO consumption on the ME.  Publish the
+     * completed ring write here so playback never waits for an Allegrex
+     * cache-invalidate/publish round trip. */
+    meLibSync();
+    sAudioWritePos = writePos;
+    meLibSync();
+#endif
 }
 
 static u32 OotPspAudioBackend_RenderOutputChunk(s16* mix) {
@@ -1927,22 +2634,99 @@ exit:
 
 static int OotPspAudioBackend_ProducerThread(UNUSED SceSize args, UNUSED void* argp) {
     u32 nextUpdateUsec;
-    s32 priorityBoosted = false;
+#if OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT
+    u32 meOutputNextReportUsec;
+    u32 meOutputReports = 0;
+    SceKernelThreadRunStatus producerRunStatus;
+    u32 producerLastRunUsec = 0;
+    u32 producerLastSampleUsec = 0;
+    s32 producerRunSampleValid = false;
+#endif
 
     AUDIO_DIAG_SET(sAudioDiagnosticProducerState, OOT_PSP_AUDIO_PRODUCER_STATE_PRIMING);
     OotPspAudioBackend_RunUpdatesTo(OOT_PSP_AUDIO_MAX_UPDATES_PRIME,
                                     OotPspAudioBackend_StartupBufferFrames());
     OotPspAudioBackend_WaitForCommands();
+#if OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT
+    /* Startup is now safely primed. From this point onward Allegrex never
+     * waits for a normal ME synthesis completion. */
+    sAudioMeAsyncPlayback = true;
+    printf("[audio-me] async playback enabled: no normal ME waits\n");
+    printf("[audio-me] active=%d state=%lu progress=%lu checkpoint=%lu clocks=%08lx->%08lx\n",
+           (int)sAudioMeInitialized, (unsigned long)sAudioMeState, (unsigned long)sAudioMeProgress,
+           (unsigned long)sAudioMeOutputCheckpoint, (unsigned long)sAudioMeClockBefore,
+           (unsigned long)sAudioMeClockAfter);
+    printf("[audio-me] fifo stage=%lu status=%08lx prime=%lu writes=%lu nonzero=%lu underruns=%lu read=%lu write=%lu\n",
+           (unsigned long)sAudioMeOutputStage, (unsigned long)sAudioMeOutputLastStatus,
+           (unsigned long)sAudioMeOutputPrimeRemaining, (unsigned long)sAudioMeOutputWrites,
+           (unsigned long)sAudioMeOutputNonzero, (unsigned long)sAudioMeOutputUnderruns,
+           (unsigned long)sAudioReadPos, (unsigned long)sAudioWritePos);
+#endif
     nextUpdateUsec = sceKernelGetSystemTimeLow();
+#if OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT
+    meOutputNextReportUsec = nextUpdateUsec + 1000000;
+    memset(&producerRunStatus, 0, sizeof(producerRunStatus));
+    producerRunStatus.size = sizeof(producerRunStatus);
+    if (sceKernelReferThreadRunStatus(sceKernelGetThreadId(), &producerRunStatus) >= 0) {
+        producerLastRunUsec = producerRunStatus.runClocks.low;
+        producerLastSampleUsec = nextUpdateUsec;
+        producerRunSampleValid = true;
+    }
+#endif
 
     while (sAudioProducerThreadRunning) {
         s32 delayUsec;
         s32 missedUpdate = false;
-        u32 playableFrames;
         u32 now;
 
         nextUpdateUsec += OOT_PSP_AUDIO_UPDATE_USEC;
         now = sceKernelGetSystemTimeLow();
+#if OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT
+        if ((meOutputReports < 30) && ((s32)(now - meOutputNextReportUsec) >= 0)) {
+            producerRunStatus.size = sizeof(producerRunStatus);
+            if (sceKernelReferThreadRunStatus(sceKernelGetThreadId(), &producerRunStatus) >= 0) {
+                if (producerRunSampleValid) {
+                    printf("[audio-me] producer cpu-us=%lu elapsed-us=%lu buffered=%lu target=%lu\n",
+                           (unsigned long)(producerRunStatus.runClocks.low - producerLastRunUsec),
+                           (unsigned long)(now - producerLastSampleUsec),
+                           (unsigned long)OotPspAudioBackend_TotalBufferedFrames(),
+                           (unsigned long)OotPspAudioBackend_TargetBufferFrames());
+                }
+                producerLastRunUsec = producerRunStatus.runClocks.low;
+                producerLastSampleUsec = now;
+                producerRunSampleValid = true;
+            }
+            /* Main-side BE register reads returned the same 0x10 for every
+             * address after the handoff. They are not meaningful ME state.
+             * Avoid further main-side controller access during playback. */
+            printf("[audio-me] pcm nonzero=%lu recoveries=%lu busy-skips=%lu\n",
+                   (unsigned long)sAudioHwTrace[AUDIO_TRACE_NONZERO],
+                   (unsigned long)sAudioHwTrace[AUDIO_TRACE_RECOVERIES],
+                   (unsigned long)sAudioMeBusySkips);
+            printf("[audio-me] immediate-ME power=%08lx enable=%08lx irq=%08lx; CPU power=%08lx enable=%08lx irq=%08lx status=%08lx\n",
+                   (unsigned long)sAudioHwTrace[AUDIO_TRACE_ME_POWER],
+                   (unsigned long)sAudioHwTrace[AUDIO_TRACE_ME_ENABLE],
+                   (unsigned long)sAudioHwTrace[AUDIO_TRACE_ME_IRQ],
+                   (unsigned long)sAudioHwTrace[AUDIO_TRACE_CPU_POWER],
+                   (unsigned long)sAudioHwTrace[AUDIO_TRACE_CPU_ENABLE],
+                   (unsigned long)sAudioHwTrace[AUDIO_TRACE_CPU_IRQ],
+                   (unsigned long)sAudioHwTrace[AUDIO_TRACE_CPU_STATUS]);
+            printf("[audio-me] registers power=%08lx enable=%08lx irq=%08lx\n",
+                   (unsigned long)sAudioMeHwPower, (unsigned long)sAudioMeHwEnable,
+                   (unsigned long)sAudioMeHwIrq);
+            printf("[audio-me] active=%d state=%lu progress=%lu checkpoint=%lu clocks=%08lx->%08lx\n",
+                   (int)sAudioMeInitialized, (unsigned long)sAudioMeState, (unsigned long)sAudioMeProgress,
+                   (unsigned long)sAudioMeOutputCheckpoint, (unsigned long)sAudioMeClockBefore,
+                   (unsigned long)sAudioMeClockAfter);
+            printf("[audio-me] fifo stage=%lu status=%08lx prime=%lu writes=%lu nonzero=%lu underruns=%lu read=%lu write=%lu\n",
+                   (unsigned long)sAudioMeOutputStage, (unsigned long)sAudioMeOutputLastStatus,
+                   (unsigned long)sAudioMeOutputPrimeRemaining, (unsigned long)sAudioMeOutputWrites,
+                   (unsigned long)sAudioMeOutputNonzero, (unsigned long)sAudioMeOutputUnderruns,
+                   (unsigned long)sAudioReadPos, (unsigned long)sAudioWritePos);
+            meOutputNextReportUsec += 1000000;
+            meOutputReports++;
+        }
+#endif
         delayUsec = (s32)(nextUpdateUsec - now);
         if (delayUsec > 0) {
             AUDIO_DIAG_SET(sAudioDiagnosticProducerState, OOT_PSP_AUDIO_PRODUCER_STATE_TIMER_WAIT);
@@ -1967,19 +2751,6 @@ static int OotPspAudioBackend_ProducerThread(UNUSED SceSize args, UNUSED void* a
             }
         }
 
-        playableFrames = OotPspAudioBackend_PlayableFrames();
-        if (!priorityBoosted && (playableFrames < OotPspAudioBackend_UrgentBufferFrames())) {
-            if (sceKernelChangeThreadPriority(sceKernelGetThreadId(),
-                                              OOT_PSP_AUDIO_PRODUCER_URGENT_PRIORITY) >= 0) {
-                priorityBoosted = true;
-            }
-        } else if (priorityBoosted && (playableFrames >= OotPspAudioBackend_IoBackoffFrames())) {
-            if (sceKernelChangeThreadPriority(sceKernelGetThreadId(),
-                                              OOT_PSP_AUDIO_PRODUCER_THREAD_PRIORITY) >= 0) {
-                priorityBoosted = false;
-            }
-        }
-
         if (missedUpdate) {
             AUDIO_DIAG_SET(sAudioDiagnosticProducerState, OOT_PSP_AUDIO_PRODUCER_STATE_CATCHUP);
             AUDIO_DIAG_INCREMENT(sAudioDiagnosticCatchups);
@@ -1999,9 +2770,6 @@ static int OotPspAudioBackend_ProducerThread(UNUSED SceSize args, UNUSED void* a
         }
     }
 
-    if (priorityBoosted) {
-        sceKernelChangeThreadPriority(sceKernelGetThreadId(), OOT_PSP_AUDIO_PRODUCER_THREAD_PRIORITY);
-    }
     AUDIO_DIAG_SET(sAudioDiagnosticProducerState, OOT_PSP_AUDIO_PRODUCER_STATE_STOPPED);
     sAudioProducerThreadRunning = false;
     sAudioProducerThreadId = -1;
@@ -2705,7 +3473,8 @@ static s32 OotPspAudioBackend_StartThreads(void) {
         return -1;
     }
 
-    if ((sAudioOutputThreadId < 0) && !sAudioOutputThreadRunning) {
+    if (!(OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT) &&
+        (sAudioOutputThreadId < 0) && !sAudioOutputThreadRunning) {
         sAudioOutputThreadRunning = true;
         AUDIO_DIAG_SET(sAudioDiagnosticOutputState, OOT_PSP_AUDIO_OUTPUT_STATE_STARTING);
         threadId = sceKernelCreateThread(
@@ -2730,7 +3499,26 @@ static s32 OotPspAudioBackend_StartThreads(void) {
         sAudioOutputThreadId = threadId;
     }
 
-    if ((sAudioProducerThreadId < 0) && !sAudioProducerThreadRunning) {
+#if OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT
+    /* The existing uncached mailbox is a single-owner job slot. Multiple
+     * outstanding jobs cannot share gAudioCtx's mutable synthesis state.
+     * Prime once; normal production is cooperative on the game thread. */
+    if (!sAudioMeInitialized) {
+        return -1;
+    }
+    if (!sAudioMeAsyncPlayback) {
+        OotPspAudioBackend_RunUpdatesTo(OOT_PSP_AUDIO_MAX_UPDATES_PRIME,
+                                        OotPspAudioBackend_StartupBufferFrames());
+        OotPspAudioBackend_WaitForCommands();
+        if (!sAudioMeInitialized) {
+            return -1;
+        }
+        sAudioMeAsyncPlayback = true;
+        printf("[audio-me] cooperative producer: no AudioGen thread; shared mailbox, ME synthesis/output\n");
+    }
+#endif
+    if (!(OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT) &&
+        (sAudioProducerThreadId < 0) && !sAudioProducerThreadRunning) {
         sAudioProducerThreadRunning = true;
         AUDIO_DIAG_SET(sAudioDiagnosticProducerState, OOT_PSP_AUDIO_PRODUCER_STATE_STARTING);
         threadId = sceKernelCreateThread(
@@ -2948,7 +3736,54 @@ void OotPspAudio_Init(void) {
 }
 
 void OotPspAudio_Update(void) {
+#if OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT
+    static s32 pumping;
+    static u32 lastPumpUsec;
+    static u32 maxGapUsec;
+    static u32 nextReportUsec;
+    static u32 reports;
+    u32 now;
+
+    /* May be reached from graphics pacing as well as frame boundaries.
+     * Never recurse through an audio asset load or touch ME-owned state. */
+    if (!sOotPspAudioInitialized || !sAudioMeInitialized ||
+        !sAudioMeAsyncPlayback || pumping) {
+        return;
+    }
+    pumping = true;
+    now = sceKernelGetSystemTimeLow();
+    if (lastPumpUsec != 0 && now - lastPumpUsec > maxGapUsec) {
+        maxGapUsec = now - lastPumpUsec;
+    }
+    lastPumpUsec = now;
+    if (nextReportUsec == 0) {
+        nextReportUsec = now + 1000000;
+    }
+    /* At most one sequence update per call, and no waiting for the ME.
+     * The admission check runs before AudioThread_Update mutates state. */
+    if (sAudioMeCommandPending && !OotPspAudioBackend_MeJobIsRunning()) {
+        /* Reap before counting the reserve: the ME has already published
+         * its PCM, so retaining pendingFrames would count that job twice. */
+        OotPspAudioBackend_WaitForCommands();
+    }
+    if (sAudioMeInitialized) {
+        OotPspAudioBackend_RunUpdates(1);
+    }
+    if (reports < 30 && (s32)(now - nextReportUsec) >= 0) {
+        printf("[audio-me] cooperative gap-us=%lu buffered=%lu busy=%lu underruns=%lu writes=%lu state=%lu\n",
+               (unsigned long)maxGapUsec,
+               (unsigned long)OotPspAudioBackend_TotalBufferedFrames(),
+               (unsigned long)sAudioMeBusySkips,
+               (unsigned long)sAudioMeOutputUnderruns,
+               (unsigned long)sAudioMeOutputWrites, (unsigned long)sAudioMeState);
+        maxGapUsec = 0;
+        nextReportUsec = now + 1000000;
+        reports++;
+    }
+    pumping = false;
+#else
     if (!sAudioProducerThreadRunning) {
         OotPspAudioBackend_RunUpdates(OOT_PSP_AUDIO_MAX_UPDATES_NORMAL);
     }
+#endif
 }

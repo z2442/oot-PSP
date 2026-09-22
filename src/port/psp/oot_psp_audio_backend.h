@@ -3,6 +3,10 @@
 
 #include "ultra64.h"
 
+void OotPspAudioBackend_Shutdown(void);
+/* ME-only cooperative FIFO servicing; never call from Allegrex. */
+void OotPspAudioBackend_ServiceOutputMe(void);
+
 #ifndef OOT_PSP_AUDIO_DIAGNOSTICS
 #define OOT_PSP_AUDIO_DIAGNOSTICS 0
 #endif

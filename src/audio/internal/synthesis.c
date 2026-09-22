@@ -187,7 +187,14 @@ static void OotPspAudioSynth_MeInvalidateRange(const void* address, u32 size) {
 
     start = (uintptr_t)address & ~63U;
     end = ((uintptr_t)address + size + 63U) & ~63U;
-    meLibDcacheInvalidateRange((u32)start, end - start);
+    /* These helpers are ME-only. Service committed output between bounded
+     * cache batches without exposing partially refreshed synthesis state. */
+    while (start < end) {
+        u32 bytes = (end - start > 1024U) ? 1024U : (u32)(end - start);
+        meLibDcacheInvalidateRange((u32)start, bytes);
+        start += bytes;
+        OotPspAudioBackend_ServiceOutputMe();
+    }
 }
 
 static void OotPspAudioSynth_MeWritebackRange(const void* address, u32 size) {
@@ -200,7 +207,12 @@ static void OotPspAudioSynth_MeWritebackRange(const void* address, u32 size) {
 
     start = (uintptr_t)address & ~63U;
     end = ((uintptr_t)address + size + 63U) & ~63U;
-    meLibDcacheWritebackRange((u32)start, end - start);
+    while (start < end) {
+        u32 bytes = (end - start > 1024U) ? 1024U : (u32)(end - start);
+        meLibDcacheWritebackRange((u32)start, bytes);
+        start += bytes;
+        OotPspAudioBackend_ServiceOutputMe();
+    }
 }
 
 static u32 OotPspAudioSynth_NoteSubStateSize(void) {
@@ -535,6 +547,11 @@ Acmd* AudioSynth_BuildCommandList(Acmd* cmdStart, s32* cmdCnt, s16* aiStart, s32
     gAudioCtx.curLoadedBook = NULL;
 
     for (i = gAudioCtx.audioBufferParameters.ticksPerUpdate; i > 0; i--) {
+#if defined(TARGET_PSP)
+        if (sOotPspAudioMeLocalFlags.buildingOnMe) {
+            OotPspAudioBackend_ServiceOutputMe();
+        }
+#endif
         if (i == 1) {
             chunkLen = aiBufLen;
         } else if ((aiBufLen / i) >= gAudioCtx.audioBufferParameters.samplesPerTickMax) {
@@ -1368,6 +1385,12 @@ Acmd* AudioSynth_ProcessNote(s32 noteIndex, NoteSubEu* noteSubEu, NoteSynthesisS
     }
 
     resamplingRateFixedPoint = noteSubEu->resamplingRateFixedPoint;
+#if defined(TARGET_PSP)
+    /* Service old, committed PCM while constructing the next block. */
+    if (sOotPspAudioMeLocalFlags.buildingOnMe) {
+        OotPspAudioBackend_ServiceOutputMe();
+    }
+#endif
     nParts = noteSubEu->bitField1.hasTwoParts + 1;
     samplesLenFixedPoint = (resamplingRateFixedPoint * aiBufLen * 2) + synthState->samplePosFrac;
     numSamplesToLoad = samplesLenFixedPoint >> 16;

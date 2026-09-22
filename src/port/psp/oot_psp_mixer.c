@@ -3,6 +3,9 @@
 #include "attributes.h"
 #include "audio.h"
 #include "oot_psp_audio_commands.h"
+#if defined(TARGET_PSP)
+#include "oot_psp_audio_backend.h"
+#endif
 
 #ifndef OOT_PSP_AUDIO_MIXER_VME
 #define OOT_PSP_AUDIO_MIXER_VME 1
@@ -1835,6 +1838,13 @@ static void OotPspMixer_ExecuteCommandListInternal(const Acmd* cmdList, s32 cmdC
 #endif
 
     for (i = 0; i < cmdCount; i++) {
+#if defined(TARGET_PSP)
+        /* A RAM reserve cannot feed hardware while the same ME is busy
+         * executing an entire command list. Drain it between commands. */
+        if (sMixerExecutionState.executingOnMe) {
+            OotPspAudioBackend_ServiceOutputMe();
+        }
+#endif
         const Acmd* cmd = &cmdList[i];
         u32 w0 = cmd->words.w0;
         u32 w1 = cmd->words.w1;
