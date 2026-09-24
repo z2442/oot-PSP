@@ -9,6 +9,8 @@
 #include "audio.h"
 #if defined(TARGET_PSP)
 #include "oot_psp_audio_backend.h"
+#include "oot_psp_audio_producer.h"
+#define gAudioCtx (*OotPspAudioProducer_GameContext())
 #if defined(OOTDEBUG) || OOT_PSP_AUDIO_DIAGNOSTICS
 #include <pspkernel.h>
 #endif
@@ -532,6 +534,11 @@ void AudioThread_QueueCmdU16(u32 opArgs, u16 data) {
 s32 AudioThread_ScheduleProcessCmds(void) {
     static s32 D_801304E8 = 0;
     s32 ret;
+#if defined(TARGET_PSP)
+    if (OotPspAudioProducer_Active() && !OotPspAudioProducer_IsMe()) {
+        return OotPspAudioProducer_SubmitBatch();
+    }
+#endif
 
     if (D_801304E8 < (u8)((gAudioCtx.threadCmdWritePos - gAudioCtx.threadCmdReadPos) + 0x100)) {
         D_801304E8 = (u8)((gAudioCtx.threadCmdWritePos - gAudioCtx.threadCmdReadPos) + 0x100);
@@ -678,6 +685,13 @@ void func_800E5F34(void) {
  * original name: Nap_StartSpecChange
  */
 s32 AudioThread_ResetAudioHeap(s32 specId) {
+#if defined(TARGET_PSP)
+    if (OotPspAudioProducer_Active() && !OotPspAudioProducer_IsMe()) {
+        func_800E5F34();
+        AUDIOCMD_GLOBAL_RESET_AUDIO_HEAP(specId);
+        return AudioThread_ScheduleProcessCmds();
+    }
+#endif
     s32 resetStatus;
     OSMesg msg;
     s32 pad;
@@ -955,11 +969,22 @@ void AudioThread_Noop2Cmd(u32 arg0, s32 arg1) {
  * original name: Nap_WaitVsync
  */
 void AudioThread_WaitForAudioTask(void) {
+#if defined(TARGET_PSP)
+    if (OotPspAudioProducer_Active()) {
+        OotPspAudioProducer_WaitTick();
+        return;
+    }
+#endif
     osRecvMesg(gAudioCtx.taskStartQueueP, NULL, OS_MESG_NOBLOCK);
     osRecvMesg(gAudioCtx.taskStartQueueP, NULL, OS_MESG_BLOCK);
 }
 
 s32 func_800E6590(s32 seqPlayerIndex, s32 channelIndex, s32 layerIndex) {
+#if defined(TARGET_PSP)
+    if (OotPspAudioProducer_Active() && !OotPspAudioProducer_IsMe()) {
+        return OotPspAudioProducer_SampleRemaining(seqPlayerIndex, channelIndex, layerIndex);
+    }
+#endif
     SequencePlayer* seqPlayer;
     SequenceLayer* layer;
     Note* note;
@@ -985,10 +1010,30 @@ s32 func_800E6590(s32 seqPlayerIndex, s32 channelIndex, s32 layerIndex) {
 
             note = layer->note;
             if (layer == note->playbackState.parentLayer) {
+#if defined(TARGET_PSP)
+                /* The autonomous producer snapshots every active layer.
+                 * Synthetic waves use the same union as tunedSample, but
+                 * contain PCM/code pointers, not TunedSample structures. */
+                if (note->noteSubEu.bitField1.isSyntheticWave) {
+                    return 0;
+                }
+#endif
                 tunedSample = note->noteSubEu.tunedSample;
                 if (tunedSample == NULL) {
                     return 0;
                 }
+#if defined(TARGET_PSP)
+                if ((uintptr_t)tunedSample < 0x08000000u || (uintptr_t)tunedSample >= 0x0c000000u ||
+                    ((uintptr_t)tunedSample & 3u) != 0 ||
+                    (uintptr_t)tunedSample->sample < 0x08000000u ||
+                    (uintptr_t)tunedSample->sample >= 0x0c000000u ||
+                    ((uintptr_t)tunedSample->sample & 3u) != 0 ||
+                    (uintptr_t)tunedSample->sample->loop < 0x08000000u ||
+                    (uintptr_t)tunedSample->sample->loop >= 0x0c000000u ||
+                    ((uintptr_t)tunedSample->sample->loop & 3u) != 0) {
+                    return 0;
+                }
+#endif
                 loopEnd = tunedSample->sample->loop->header.end;
                 samplePos = note->synthesisState.samplePosInt;
                 return loopEnd - samplePos;
@@ -1014,6 +1059,17 @@ void func_800E66A0(void) {
  * original name: Nap_SilenceCheck_Inner
  */
 s32 func_800E66C0(s32 flags) {
+#if defined(TARGET_PSP)
+    if (OotPspAudioProducer_Active() && !OotPspAudioProducer_IsMe() &&
+        OotPspAudioProducer_GameContext() != NULL) {
+        /* Main service calls this with engine ownership; the helper returns
+         * -1 in that case to select the original implementation below. */
+        s32 count = OotPspAudioProducer_CountNotes(flags);
+        if (count >= 0) {
+            return count;
+        }
+    }
+#endif
     s32 phi_v1;
     NotePlaybackState* playbackState;
     NoteSubEu* noteSubEu;
@@ -1054,6 +1110,12 @@ s32 func_800E66C0(s32 flags) {
  */
 u32 AudioThread_NextRandom(void) {
     static u32 sAudioRandom = 0x12345678;
+#if defined(TARGET_PSP)
+    if (OotPspAudioProducer_IsMe()) {
+        gAudioCtx.audioRandom = gAudioCtx.audioRandom * 1664525u + 1013904223u;
+        return gAudioCtx.audioRandom;
+    }
+#endif
 
     sAudioRandom = ((osGetCount() + 0x1234567) * (sAudioRandom + gAudioCtx.totalTaskCount));
     sAudioRandom += gAudioCtx.audioRandom;

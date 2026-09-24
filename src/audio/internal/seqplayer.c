@@ -22,6 +22,10 @@
 #include "audio.h"
 #if defined(TARGET_PSP)
 #include <string.h>
+#include "oot_psp_audio_producer.h"
+#include "oot_psp_audio_backend.h"
+/* Bad-script reporting must never call PSP kernel logging from the ME. */
+#define osSyncPrintf(...) do { if (!OotPspAudioProducer_IsMe()) osSyncPrintf(__VA_ARGS__); } while (0)
 #endif
 
 static_assert(MML_VERSION == MML_VERSION_OOT, "This file implements the OoT version of the MML");
@@ -1338,6 +1342,9 @@ s32 AudioSeq_SeqLayerProcessScriptStep2(SequenceLayer* layer) {
 
     while (true) {
 #if defined(TARGET_PSP)
+        if (OotPspAudioProducer_IsMe()) OotPspAudioBackend_ServiceOutputMe();
+#endif
+#if defined(TARGET_PSP)
         if (!OotPspAudio_ValidateSeqPtr(seqPlayer, state->pc, 1, "layer-cmd")) {
             AudioSeq_SeqLayerDisable(layer);
             return PROCESS_SCRIPT_END;
@@ -2068,6 +2075,9 @@ void AudioSeq_SequenceChannelProcessScript(SequenceChannel* channel) {
     }
 
     while (true) {
+#if defined(TARGET_PSP)
+        if (OotPspAudioProducer_IsMe()) OotPspAudioBackend_ServiceOutputMe();
+#endif
         SeqScriptState* scriptState = &channel->scriptState;
         s32 param;
         s16 temp1;
@@ -2876,6 +2886,9 @@ void AudioSeq_SequencePlayerProcessSequence(SequencePlayer* seqPlayer) {
         seqPlayer->recalculateVolume = true;
 
         while (true) {
+#if defined(TARGET_PSP)
+            if (OotPspAudioProducer_IsMe()) OotPspAudioBackend_ServiceOutputMe();
+#endif
 #if defined(TARGET_PSP)
             if (!OotPspAudio_ValidateSeqPtr(seqPlayer, seqScript->pc, 1, "seq-cmd")) {
                 AudioSeq_SequencePlayerDisable(seqPlayer);

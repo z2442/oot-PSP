@@ -24,6 +24,10 @@
 #include "ultra64.h"
 #include "ultra64/abi.h"
 #include "audio.h"
+#if defined(TARGET_PSP)
+#include "oot_psp_audio_producer.h"
+#define gAudioCtx (*OotPspAudioProducer_GameContext())
+#endif
 
 // Direct audio command (skips the queueing system)
 #define SEQCMD_SET_SEQPLAYER_VOLUME_NOW(seqPlayerIndex, duration, volume)                       \

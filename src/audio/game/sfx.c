@@ -5,6 +5,10 @@
 #include "terminal.h"
 #include "ultra64.h"
 #include "audio.h"
+#if defined(TARGET_PSP)
+#include "oot_psp_audio_producer.h"
+#define gAudioCtx (*OotPspAudioProducer_GameContext())
+#endif
 
 typedef struct SfxRequest {
     /* 0x00 */ u16 sfxId;

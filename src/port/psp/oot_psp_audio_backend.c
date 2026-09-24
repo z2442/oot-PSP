@@ -16,6 +16,13 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifndef OOT_PSP_AUDIO_ME_TRANSPORT_TEST
+#define OOT_PSP_AUDIO_ME_TRANSPORT_TEST 0
+#endif
+#if OOT_PSP_AUDIO_ME_TRANSPORT_TEST
+#include "oot_psp_audio_transport_test.inc.c"
+#endif
+
 #define OOT_PSP_AUDIO_CHANNELS 2
 #ifndef OOT_PSP_AUDIO_SOURCE_FREQUENCY
 #define OOT_PSP_AUDIO_SOURCE_FREQUENCY 22050
@@ -682,6 +689,8 @@ static s32 OotPspAudioBackend_MeJobIsRunning(void) {
 #define AUDIO_DIAG_INCREMENT(variable) ((void)0)
 #endif
 
+#include "oot_psp_audio_producer.inc.c"
+
 __attribute__((noinline, aligned(4))) void meLibOnException(void) {
     sAudioMeState = OOT_PSP_AUDIO_ME_STATE_FAULT;
     meLibSync();
@@ -743,6 +752,18 @@ __attribute__((noinline, aligned(4))) void meLibOnProcess(void) {
 
     while (sAudioMeState != OOT_PSP_AUDIO_ME_STATE_STOP) {
         OotPspAudioBackend_MeServiceOutput(true);
+#if OOT_PSP_AUDIO_ME_TRANSPORT_TEST
+        OotPspAudioTransportTest_MeStep();
+#endif
+#if OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT
+        if (AUTO_BUS->active) {
+            OotPspAudioProducer_MeStep();
+            continue;
+        }
+#endif
+#if OOT_PSP_AUDIO_ME_TRANSPORT_TEST
+        OotPspAudioTransportTest_MeStep();
+#endif
         if ((sAudioMeState == OOT_PSP_AUDIO_ME_STATE_RUN) ||
             (sAudioMeState == OOT_PSP_AUDIO_ME_STATE_SYNTH_RUN)) {
             Acmd* cmdList = (Acmd*)(uintptr_t)sAudioMeCmdList;
@@ -869,6 +890,9 @@ s32 OotPspAudioBackend_BootMe(void) {
     meLibSync();
 
     sAudioMeBootStarted = true;
+#if OOT_PSP_AUDIO_ME_TRANSPORT_TEST
+    OotPspAudioTransportTest_Init();
+#endif
     sAudioMeBootResult = meLibDefaultInit();
     return sAudioMeBootResult;
 #endif
@@ -1055,6 +1079,9 @@ void OotPspAudioBackend_Shutdown(void) {
         return;
     }
     sAudioProducerThreadRunning = false;
+    if (AUTO_BUS->active && !OotPspAudioProducer_Stop()) {
+        return;
+    }
     start = sceKernelGetSystemTimeLow();
     while (sAudioProducerThreadId >= 0) {
         if ((sceKernelGetSystemTimeLow() - start) >= OOT_PSP_AUDIO_ME_TIMEOUT_US) {
@@ -1076,6 +1103,7 @@ void OotPspAudioBackend_Shutdown(void) {
         sceKernelDelayThread(OOT_PSP_AUDIO_ME_POLL_USEC);
     }
     kcall(OotPspAudioBackend_RestoreSysreg6c, 0);
+    AUTO_BUS->active = 0;
     sAudioMeInitialized = false;
     sAudioMeAsyncPlayback = false;
     sAudioMeOutputEnabled = false;
@@ -3514,7 +3542,7 @@ static s32 OotPspAudioBackend_StartThreads(void) {
             return -1;
         }
         sAudioMeAsyncPlayback = true;
-        printf("[audio-me] cooperative producer: no AudioGen thread; shared mailbox, ME synthesis/output\n");
+        OotPspAudioProducer_Start();
     }
 #endif
     if (!(OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT) &&
@@ -3736,6 +3764,13 @@ void OotPspAudio_Init(void) {
 }
 
 void OotPspAudio_Update(void) {
+    if (OotPspAudioProducer_Active()) {
+#if OOT_PSP_AUDIO_ME_TRANSPORT_TEST
+        OotPspAudioTransportTest_MainStep();
+#endif
+        OotPspAudioProducer_Pump();
+        return;
+    }
 #if OOT_PSP_AUDIO_MEDIA_ENGINE && OOT_PSP_AUDIO_ME_DIRECT_OUTPUT
     static s32 pumping;
     static u32 lastPumpUsec;
@@ -3751,6 +3786,9 @@ void OotPspAudio_Update(void) {
         return;
     }
     pumping = true;
+#if OOT_PSP_AUDIO_ME_TRANSPORT_TEST
+    OotPspAudioTransportTest_MainStep();
+#endif
     now = sceKernelGetSystemTimeLow();
     if (lastPumpUsec != 0 && now - lastPumpUsec > maxGapUsec) {
         maxGapUsec = now - lastPumpUsec;

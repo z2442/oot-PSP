@@ -11,6 +11,10 @@
 #include "ultra64.h"
 #include "versions.h"
 #include "audio.h"
+#if defined(TARGET_PSP)
+#include "oot_psp_audio_producer.h"
+#define gAudioCtx (*OotPspAudioProducer_GameContext())
+#endif
 #include "ocarina.h"
 
 #define ABS_ALT(x) ((x) < 0 ? -(x) : (x))

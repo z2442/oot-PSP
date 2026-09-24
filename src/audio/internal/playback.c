@@ -3,6 +3,10 @@
  */
 #include "ultra64.h"
 #include "audio.h"
+#if defined(TARGET_PSP)
+#include "oot_psp_audio_producer.h"
+#define osSyncPrintf(...) do { if (!OotPspAudioProducer_IsMe()) osSyncPrintf(__VA_ARGS__); } while (0)
+#endif
 
 #if defined(TARGET_PSP)
 #define OOT_PSP_AUDIO_NATIVE_PTR_START 0x08000000U

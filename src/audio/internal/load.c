@@ -12,6 +12,7 @@
 #include "audio.h"
 #if defined(TARGET_PSP)
 #include "oot_psp_asset_loader.h"
+#include "oot_psp_audio_producer.h"
 #endif
 
 #define MK_ASYNC_MSG(retData, tableType, id, loadStatus) \
@@ -125,6 +126,9 @@ static void* OotPspAudio_GetResidentSampleBank(u32 sampleBankId) {
 }
 
 static void OotPspAudio_LogBadSampleLookup(s32 fontId, s32 instId) {
+    if (OotPspAudioProducer_IsMe()) {
+        return;
+    }
     if (!sOotPspAudioBadSampleLookupLogged) {
         sOotPspAudioBadSampleLookupLogged = true;
         osSyncPrintf("oot-psp audio skipped bad sample lookup font=%d inst=%d\n", fontId, instId);
@@ -132,6 +136,9 @@ static void OotPspAudio_LogBadSampleLookup(s32 fontId, s32 instId) {
 }
 
 static void OotPspAudio_LogBadSamplePtr(s32 fontId, s32 instId, const Sample* sample) {
+    if (OotPspAudioProducer_IsMe()) {
+        return;
+    }
     if (!sOotPspAudioBadSampleLookupLogged) {
         sOotPspAudioBadSampleLookupLogged = true;
         osSyncPrintf("oot-psp audio skipped bad sample ptr font=%d inst=%d sample=%p\n", fontId, instId, sample);
@@ -342,6 +349,12 @@ void AudioLoad_DecreaseSampleDmaTtls(void) {
  * original name: Nas_WaveDmaCallBack
  */
 void* AudioLoad_DmaSampleData(u32 devAddr, u32 size, s32 arg2, u8* dmaIndexRef, s32 medium) {
+#if defined(TARGET_PSP)
+    if (OotPspAudioProducer_IsMe()) {
+        return (void*)(uintptr_t)OotPspAudioProducer_Request(OOT_AUDIO_RPC_SAMPLE_DMA,
+                    devAddr, size, arg2, (u32)(uintptr_t)dmaIndexRef, medium);
+    }
+#endif
     s32 pad1;
     SampleDma* dma;
     s32 hasDma = false;
@@ -846,6 +859,11 @@ void AudioLoad_DiscardFont(s32 fontId) {
  * original name: Nas_StartMySeq
  */
 s32 AudioLoad_SyncInitSeqPlayer(s32 playerIdx, s32 seqId, s32 arg2) {
+#if defined(TARGET_PSP)
+    if (OotPspAudioProducer_IsMe()) {
+        return OotPspAudioProducer_Request(OOT_AUDIO_RPC_INIT_SEQ, playerIdx, seqId, arg2, 0, 0);
+    }
+#endif
     if (gAudioCtx.resetTimer != 0) {
         return 0;
     }
@@ -1567,6 +1585,25 @@ void AudioLoad_ProcessLoads(s32 resetStatus) {
     AudioLoad_ProcessAsyncLoads(resetStatus);
 }
 
+#if defined(TARGET_PSP)
+s32 AudioLoad_HasPendingLoads(void) {
+    s32 i;
+    for (i = 0; i < ARRAY_COUNT(gAudioCtx.asyncLoads); i++) {
+        if (gAudioCtx.asyncLoads[i].status == 1) {
+            return true;
+        }
+    }
+    for (i = 0; i < ARRAY_COUNT(gAudioCtx.slowLoads); i++) {
+        if (gAudioCtx.slowLoads[i].state == SLOW_LOAD_STATE_START ||
+            gAudioCtx.slowLoads[i].state == SLOW_LOAD_STATE_LOADING) {
+            return true;
+        }
+    }
+    return gAudioCtx.preloadSampleStackTop != 0 || gAudioCtx.curUnkMediumLoad != NULL ||
+           MQ_GET_COUNT(&sScriptLoadQueue) != 0 || MQ_GET_COUNT(&gAudioCtx.preloadSampleQueue) != 0;
+}
+#endif
+
 /**
  * original name: Nas_SetRomHandler
  */
@@ -1773,6 +1810,15 @@ s32 AudioLoad_SlowLoadSample(s32 fontId, s32 instId, s8* status) {
         *status = 2;
         return 0;
     }
+#if defined(TARGET_PSP)
+    /* The font/sample metadata is ME-owned, and pinned samples already have
+     * native RAM addresses. Do not surrender the engine just to discover
+     * that no load is necessary. Only a real miss crosses to Allegrex. */
+    if (OotPspAudioProducer_IsMe()) {
+        return OotPspAudioProducer_Request(OOT_AUDIO_RPC_SLOW_SAMPLE, fontId, instId,
+                                           (u32)(uintptr_t)status, 0, 0);
+    }
+#endif
 
     slowLoad = &gAudioCtx.slowLoads[gAudioCtx.slowLoadPos];
     if (slowLoad->state == SLOW_LOAD_STATE_DONE) {
@@ -1957,6 +2003,12 @@ void AudioLoad_DmaSlowCopyUnkMedium(s32 devAddr, u8* ramAddr, s32 size, s32 arg3
  * original name: SeqLoad
  */
 s32 AudioLoad_SlowLoadSeq(s32 seqId, u8* ramAddr, s8* status) {
+#if defined(TARGET_PSP)
+    if (OotPspAudioProducer_IsMe()) {
+        return OotPspAudioProducer_Request(OOT_AUDIO_RPC_SLOW_SEQ, seqId,
+                                           (u32)(uintptr_t)ramAddr, (u32)(uintptr_t)status, 0, 0);
+    }
+#endif
     AudioSlowLoad* slowLoad;
     AudioTable* seqTable;
     u32 size;
@@ -2758,6 +2810,13 @@ void AudioLoad_Unused5(void) {
  * original name: MK_load
  */
 void AudioLoad_ScriptLoad(s32 tableType, s32 id, s8* status) {
+#if defined(TARGET_PSP)
+    if (OotPspAudioProducer_IsMe()) {
+        OotPspAudioProducer_Request(OOT_AUDIO_RPC_SCRIPT_LOAD, tableType, id,
+                                    (u32)(uintptr_t)status, 0, 0);
+        return;
+    }
+#endif
     static u32 sLoadIndex = 0;
 
     sScriptLoadDonePointers[sLoadIndex] = status;
