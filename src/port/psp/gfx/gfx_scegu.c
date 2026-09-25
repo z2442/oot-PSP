@@ -1683,6 +1683,29 @@ static void gfx_scegu_draw_triangles(float buf_vbo[], UNUSED size_t buf_vbo_len,
     sceGuDrawArray(GU_TRIANGLES, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D, 3 * buf_vbo_num_tris, 0, buf);
 }
 
+/* Retained buffers must remain pinned until finish_render completes. */
+void gfx_scegu_draw_native_mesh(const void* vertices, const uint16_t* indices,
+                               unsigned int count, const float model[4][4], uint32_t cull) {
+    if (!is_shader_enabled(cur_shader->shader_id)) {
+        gfx_scegu_apply_shader(get_shader_from_id(get_shader_remap(cur_shader->shader_id)));
+    }
+    gfx_scegu_reserve_list_memory(256);
+    /* The software test retains CCW faces for G_CULL_BACK. The normal path
+     * disables GU culling because its CPU has already made that decision. */
+    if (cull) {
+        sceGuFrontFace(cull == G_CULL_BACK ? GU_CCW : GU_CW);
+        sceGuEnable(GU_CULL_FACE);
+    }
+    sceGuSetMatrix(GU_MODEL, (const ScePspFMatrix4*)model);
+    sceGuDrawArray(GU_TRIANGLES, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF |
+                   GU_INDEX_16BIT | GU_TRANSFORM_3D, count, indices, vertices);
+    sceGuSetMatrix(GU_MODEL, (const ScePspFMatrix4*)identity_matrix);
+    if (cull) {
+        sceGuDisable(GU_CULL_FACE);
+        sceGuFrontFace(GU_CCW);
+    }
+}
+
 static void gfx_scegu_draw_fog_triangles(float buf_vbo[], size_t buf_vbo_len,
                                          size_t buf_vbo_num_tris, bool useTextureAlpha,
                                          bool restoreShaderState) {

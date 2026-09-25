@@ -24,6 +24,7 @@ EXTERNAL_VROM_ALIGN = 16
 PACKED_ASSET_FILENAME = "oot_psp_assets.bin"
 NATIVE_ASSET_FLAG = 1
 TEXTURE_WORDS_FLAG = 2
+IMMUTABLE_MESH_FLAG = 4
 TEXTURE_WORD_ALIGN = 8
 TEXTURE_FORMAT_BITS = {
     "rgba16": 16,
@@ -1116,6 +1117,11 @@ def annotate_asset_flags(entries: list[dict[str, object]], native_assets: Native
 
         if native_assets.build_native_segment(entry) is not None:
             flags |= NATIVE_ASSET_FLAG
+            # Audited static sign: GetItem_DrawSoldOut changes matrices only;
+            # no actor writes its DL, vertices or texture. Extend explicitly
+            # after auditing writers, never infer immutability from a serial.
+            if name in {"object_gi_soldout"}:
+                flags |= IMMUTABLE_MESH_FLAG
             if name in native_assets.texture_ranges_by_segment:
                 flags |= TEXTURE_WORDS_FLAG
 

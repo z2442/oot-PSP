@@ -371,6 +371,10 @@ static size_t OotPsp_AssetRangeSerialCacheIndex(uintptr_t ramStart) {
     return (size_t)(key & (OOT_PSP_ASSET_RANGE_SERIAL_CACHE_SET_COUNT - 1));
 }
 
+u32 OotPsp_GetExternalAssetGeneration(void) {
+    return sOotPspAssetRangeSerialCacheGeneration;
+}
+
 static void OotPsp_ClearAssetRangeSerialCache(void) {
     sOotPspAssetRangeSerialCacheGeneration++;
     if (sOotPspAssetRangeSerialCacheGeneration == 0) {

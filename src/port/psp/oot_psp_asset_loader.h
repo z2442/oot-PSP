@@ -12,6 +12,8 @@
 #define OOT_PSP_ASSET_READ_NOT_EXTERNAL 1
 #define OOT_PSP_EXTERNAL_ASSET_NATIVE 1
 #define OOT_PSP_EXTERNAL_ASSET_TEXTURE_WORDS 2
+/* Audited static mesh assets only; in-place writers must never use this flag. */
+#define OOT_PSP_EXTERNAL_ASSET_IMMUTABLE_MESH 4
 
 typedef struct OotPspExternalAsset {
     uintptr_t vromStart;
@@ -65,6 +67,7 @@ s32 OotPsp_GetLoadedExternalAssetRangeFlags(const void* ptr, size_t size, u32* f
  * ranges into the linked PSP representation. Record properties of that final
  * representation so renderers do not interpret it as raw N64 data. */
 s32 OotPsp_MarkLoadedExternalAssetRangeFlags(const void* ptr, size_t size, u32 flags);
+u32 OotPsp_GetExternalAssetGeneration(void);
 u32 OotPsp_GetExternalAssetRangeSerial(const void* ptr, size_t size);
 s32 OotPsp_GetNativeExternalTextureMappingRange(const void* ptr, uintptr_t* ramStart, uintptr_t* ramEnd);
 s32 OotPsp_GetNativeExternalTextureRangeStart(const void* ptr, size_t size, uintptr_t* ramStart);
