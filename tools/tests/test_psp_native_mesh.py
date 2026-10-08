@@ -67,7 +67,6 @@ struct { bool combine_color_mul_env,combine_color_mul_prim,combine_alpha_mul_env
     struct { unsigned fmt; } texture_tile[2]; } rdp;
 struct ColorCombiner { unsigned vertex_color_source[2], used_textures[2]; } comb;
 struct TriPipelineState { bool use_texture,use_fog,use_alpha,texture_tint_colors_corrected;
-    bool tex_u_scale_to_primitive[2],tex_v_scale_to_primitive[2];
     float tex_u_scale[2],tex_v_scale[2],tex_u_bias[2],tex_v_bias[2]; struct ColorCombiner* comb; };
 struct { struct TriPipelineState tri_pipeline; } rendering_state;
 uintptr_t gSegments[16];
@@ -153,9 +152,9 @@ int main(void) {
         assert(sNativeMeshes[i].vertices[0].color.a==255); found=true;
     }
     assert(found);
-    rendering_state.tri_pipeline.tex_u_scale_to_primitive[0]=true;
-    cursor=commands; assert(!gfx_native_try(&cursor)); /* per-triangle UV mapping */
-    rendering_state.tri_pipeline.tex_u_scale_to_primitive[0]=false;
+    comb.used_textures[1]=true;
+    cursor=commands; assert(!gfx_native_try(&cursor)); /* two textures */
+    comb.used_textures[1]=false;
     for (unsigned i=0;i<OOT_PSP_NATIVE_MESH_ENTRIES;i++) sNativeMeshes[i].pinned=true;
     generation++; cursor=commands; assert(!gfx_native_try(&cursor)); /* no overwrite of submitted buffers */
     puts("native mesh cache tests passed");

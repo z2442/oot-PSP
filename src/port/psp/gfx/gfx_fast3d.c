@@ -227,9 +227,6 @@ struct TriPipelineState {
     bool alpha_mul_env;
     float tex_u_scale[2], tex_v_scale[2];
     float tex_u_bias[2], tex_v_bias[2];
-    float tex_u_shift_scale[2], tex_v_shift_scale[2];
-    float tex_u_nominal_span[2], tex_v_nominal_span[2];
-    bool tex_u_scale_to_primitive[2], tex_v_scale_to_primitive[2];
 } __attribute__((aligned(4)));
 
 typedef struct TextureTileState {
@@ -3108,18 +3105,15 @@ static void gfx_prepare_texture_coord_state(struct TriPipelineState* state, int 
     const float shift_scale_s = gfx_texture_shift_scale(tileState->shifts);
     const float shift_scale_t = gfx_texture_shift_scale(tileState->shiftt);
 
-    state->tex_u_shift_scale[coordSlot] = shift_scale_s;
-    state->tex_v_shift_scale[coordSlot] = shift_scale_t;
+    const float nominal_span_u = 8.0f * (tileState->lrs - tileState->uls + 4);
+    const float nominal_span_v = 8.0f * (tileState->lrt - tileState->ult + 4);
 
-    state->tex_u_nominal_span[coordSlot] = 8.0f * (tileState->lrs - tileState->uls + 4);
-    state->tex_v_nominal_span[coordSlot] = 8.0f * (tileState->lrt - tileState->ult + 4);
-
-    if (state->tex_u_nominal_span[coordSlot] == 0.0f || state->tex_v_nominal_span[coordSlot] == 0.0f) {
+    if (nominal_span_u == 0.0f || nominal_span_v == 0.0f) {
         return;
     }
 
-    const float inv_nominal_span_u = 1.0f / state->tex_u_nominal_span[coordSlot];
-    const float inv_nominal_span_v = 1.0f / state->tex_v_nominal_span[coordSlot];
+    const float inv_nominal_span_u = 1.0f / nominal_span_u;
+    const float inv_nominal_span_v = 1.0f / nominal_span_v;
 
     /* Reuse each reciprocal for scale and bias. PSP scalar floating-point
      * division is expensive, and this state is rebuilt for every material. */
@@ -3129,8 +3123,9 @@ static void gfx_prepare_texture_coord_state(struct TriPipelineState* state, int 
         (filter_bias - tileState->uls * 8.0f) * inv_nominal_span_u;
     state->tex_v_bias[coordSlot] =
         (filter_bias - tileState->ult * 8.0f) * inv_nominal_span_v;
-    state->tex_u_scale_to_primitive[coordSlot] = tileState->masks == G_TX_NOMASK;
-    state->tex_v_scale_to_primitive[coordSlot] = tileState->maskt == G_TX_NOMASK;
+    /* G_TX_NOMASK clamps at the tile edge; it does not fit the tile to the
+     * primitive. The moon uses 128-texel UVs for a 64-texel tile, leaving the
+     * rest of its quad transparent. Rescaling those UVs doubles its diameter. */
 #if defined(TARGET_PSP)
     {
         const struct TextureHashmapNode* texture_node = rendering_state.textures[textureSlot];
@@ -3172,8 +3167,6 @@ static void gfx_prepare_flame_atlas_coord_state(struct TriPipelineState* state) 
     const uint32_t atlasX = (phase % GFX_FLAME_ATLAS_COLUMNS) * GFX_FLAME_ATLAS_FRAME_WIDTH;
     const uint32_t atlasY = (phase / GFX_FLAME_ATLAS_COLUMNS) * GFX_FLAME_ATLAS_FRAME_HEIGHT;
 
-    state->tex_u_nominal_span[0] = textureSpanU;
-    state->tex_v_nominal_span[0] = textureSpanV;
     state->tex_u_scale[0] = (GFX_FLAME_ATLAS_FRAME_WIDTH - 1.0f) /
                             (GFX_FLAME_ATLAS_WIDTH * textureSpanU);
     state->tex_v_scale[0] = (GFX_FLAME_ATLAS_FRAME_HEIGHT - 1.0f) /
@@ -3432,12 +3425,6 @@ static void gfx_prepare_tri_pipeline_state(void) {
         state->tex_v_scale[i] = 0.0f;
         state->tex_u_bias[i] = 0.0f;
         state->tex_v_bias[i] = 0.0f;
-        state->tex_u_shift_scale[i] = 1.0f;
-        state->tex_v_shift_scale[i] = 1.0f;
-        state->tex_u_nominal_span[i] = 0.0f;
-        state->tex_v_nominal_span[i] = 0.0f;
-        state->tex_u_scale_to_primitive[i] = false;
-        state->tex_v_scale_to_primitive[i] = false;
     }
     if (state->use_texture) {
         int base_texture = state->two_texture_blend ? 0 : active_texture;
@@ -3765,41 +3752,6 @@ static float gfx_widescreen_margin_pixels(void) {
 
 static float gfx_hud_anchor_offset_pixels(void) {
     return sHudAnchorOffsetPixels;
-}
-
-static GFX_DL_HANDLER void gfx_apply_unmasked_texture_axis(const struct LoadedVertex *const vertices[],
-                                                           size_t n_vertices, bool use_u, float nominal_span,
-                                                           float shift_scale, float *scale, float *bias) {
-    float min_coord;
-    float max_coord;
-    float span;
-
-    if (n_vertices == 0 || nominal_span <= 0.0f) {
-        return;
-    }
-
-    min_coord = (use_u ? vertices[0]->u : vertices[0]->v) * shift_scale;
-    max_coord = min_coord;
-
-    for (size_t i = 1; i < n_vertices; i++) {
-        const float coord = (use_u ? vertices[i]->u : vertices[i]->v) * shift_scale;
-
-        if (coord < min_coord) {
-            min_coord = coord;
-        }
-        if (coord > max_coord) {
-            max_coord = coord;
-        }
-    }
-
-    span = max_coord - min_coord;
-    if (span <= nominal_span + 1.0f) {
-        return;
-    }
-
-    /* Unmasked axes can use oversize UVs to stretch one tile, not repeat it. */
-    *scale = shift_scale / (span + 1.0f);
-    *bias = -min_coord / (span + 1.0f);
 }
 
 struct ShaderProgram {
@@ -4185,45 +4137,8 @@ static void gfx_sp_triangles(uint32_t packed0, uint32_t packed1, uint8_t triangl
     const float* tex_v_scale = state->tex_v_scale;
     const float* tex_u_bias = state->tex_u_bias;
     const float* tex_v_bias = state->tex_v_bias;
-    float adjusted_tex_u_scale[2];
-    float adjusted_tex_v_scale[2];
-    float adjusted_tex_u_bias[2];
-    float adjusted_tex_v_bias[2];
     const uint32_t shader_program_id = rendering_state.shader_program->shader_id;
 
-    if (use_texture) {
-        const struct LoadedVertex *uv_vertices[3] = {v1, v2, v3};
-        const int coord_count = state->two_texture_blend ? 2 : 1;
-        const bool adjust_tex_coords =
-            state->tex_u_scale_to_primitive[0] || state->tex_v_scale_to_primitive[0] ||
-            (state->two_texture_blend &&
-             (state->tex_u_scale_to_primitive[1] || state->tex_v_scale_to_primitive[1]));
-
-        if (adjust_tex_coords) {
-            memcpy(adjusted_tex_u_scale, state->tex_u_scale, sizeof(adjusted_tex_u_scale));
-            memcpy(adjusted_tex_v_scale, state->tex_v_scale, sizeof(adjusted_tex_v_scale));
-            memcpy(adjusted_tex_u_bias, state->tex_u_bias, sizeof(adjusted_tex_u_bias));
-            memcpy(adjusted_tex_v_bias, state->tex_v_bias, sizeof(adjusted_tex_v_bias));
-            tex_u_scale = adjusted_tex_u_scale;
-            tex_v_scale = adjusted_tex_v_scale;
-            tex_u_bias = adjusted_tex_u_bias;
-            tex_v_bias = adjusted_tex_v_bias;
-
-            for (int coord = 0; coord < coord_count; coord++) {
-                if (state->tex_u_scale_to_primitive[coord]) {
-                    gfx_apply_unmasked_texture_axis(uv_vertices, 3, true, state->tex_u_nominal_span[coord],
-                                                    state->tex_u_shift_scale[coord], &adjusted_tex_u_scale[coord],
-                                                    &adjusted_tex_u_bias[coord]);
-                }
-                if (state->tex_v_scale_to_primitive[coord]) {
-                    gfx_apply_unmasked_texture_axis(uv_vertices, 3, false, state->tex_v_nominal_span[coord],
-                                                    state->tex_v_shift_scale[coord], &adjusted_tex_v_scale[coord],
-                                                    &adjusted_tex_v_bias[coord]);
-                }
-            }
-        }
-    }
-    
     const size_t new_tri_count = clipped_vertices_num / 3;
 
     if (new_tri_count == 0) {
@@ -6720,8 +6635,7 @@ static GFX_DL_HANDLER bool gfx_native_try(Gfx** cursor) {
         (state->use_alpha && state->comb->vertex_color_source[1] != CC_SHADE &&
          state->comb->vertex_color_source[1] != CC_0) ||
         (rsp.geometry_mode & G_CULL_BOTH) == G_CULL_BOTH) return false;
-    if (state->use_texture && (state->tex_u_scale_to_primitive[0] || state->tex_v_scale_to_primitive[0] ||
-        state->comb->used_textures[1] || rdp.texture_tile[0].fmt == G_IM_FMT_CI ||
+    if (state->use_texture && (state->comb->used_textures[1] || rdp.texture_tile[0].fmt == G_IM_FMT_CI ||
         !rdp.loaded_texture[0].source_size_bytes)) return false;
     struct NativeMaterial material = {0};
     material.geometry_mode = rsp.geometry_mode;
