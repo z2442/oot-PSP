@@ -4399,9 +4399,20 @@ void Npc_TrackPointWithLimits(Actor* actor, NpcInteractInfo* interactInfo, s16 m
     offsetActorPos.y = actor->world.pos.y + interactInfo->yOffset;
     offsetActorPos.z = actor->world.pos.z;
 
+#if PLATFORM_PSP
+    // With both pitch limits zero, only the return to neutral matters.
+    pitchTowardsTarget = 0;
+    if ((minHeadPitch != 0) || (maxHeadPitch != 0) || (minTorsoPitch != 0) || (maxTorsoPitch != 0)) {
+        pitchTowardsTarget = Math_Vec3f_Pitch(&offsetActorPos, &interactInfo->trackPos);
+    }
+    // The height offset cannot change yaw. Reuse it for the body as well.
+    yawTowardsTarget = Math_Vec3f_Yaw(&actor->world.pos, &interactInfo->trackPos);
+    bodyYawDiff = yawTowardsTarget;
+#else
     pitchTowardsTarget = Math_Vec3f_Pitch(&offsetActorPos, &interactInfo->trackPos);
     yawTowardsTarget = Math_Vec3f_Yaw(&offsetActorPos, &interactInfo->trackPos);
     bodyYawDiff = Math_Vec3f_Yaw(&actor->world.pos, &interactInfo->trackPos);
+#endif
     bodyYawDiff -= actor->shape.rot.y;
 
     temp = CLAMP(bodyYawDiff, -maxHeadYaw, maxHeadYaw);
@@ -4538,6 +4549,14 @@ void Npc_TrackPoint(Actor* actor, NpcInteractInfo* interactInfo, s16 presetIndex
     interactInfo->trackingMode =
         Npc_UpdateAutoTurn(actor, interactInfo, sNpcTrackingPresets[presetIndex].autoTurnDistanceRange,
                            sNpcTrackingPresets[presetIndex].maxYawForPlayerTracking, trackingMode);
+
+#if PLATFORM_PSP
+    // Auto-turn timers above must still advance, even when the pose has settled.
+    if ((interactInfo->trackingMode == NPC_TRACKING_NONE) && (interactInfo->headRot.x == 0) &&
+        (interactInfo->headRot.y == 0) && (interactInfo->torsoRot.x == 0) && (interactInfo->torsoRot.y == 0)) {
+        return;
+    }
+#endif
 
     rotLimits = sNpcTrackingPresets[presetIndex].rotLimits;
 

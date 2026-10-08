@@ -466,16 +466,21 @@ void Matrix_TranslateRotateZYX(Vec3f* translation, Vec3s* rotation) {
     f32 temp2;
 
 #if PLATFORM_PSP
-    OotPspVfpu_MtxFTranslate(cmf, translation->x, translation->y, translation->z);
-    OotPspVfpu_MtxFRotateZ(cmf, sin, cos);
+    f32 angles[6];
+
+    angles[0] = sin;
+    angles[1] = cos;
 
     if (rotation->y != 0) {
-        OotPspVfpu_MtxFRotateY(cmf, Math_SinS(rotation->y), Math_CosS(rotation->y));
+        angles[2] = Math_SinS(rotation->y);
+        angles[3] = Math_CosS(rotation->y);
     }
 
     if (rotation->x != 0) {
-        OotPspVfpu_MtxFRotateX(cmf, Math_SinS(rotation->x), Math_CosS(rotation->x));
+        angles[4] = Math_SinS(rotation->x);
+        angles[5] = Math_CosS(rotation->x);
     }
+    OotPspVfpu_MtxFTranslateRotateZYX(cmf, translation, angles, rotation->y != 0, rotation->x != 0);
 #else
     temp1 = cmf->xx;
     temp2 = cmf->xy;

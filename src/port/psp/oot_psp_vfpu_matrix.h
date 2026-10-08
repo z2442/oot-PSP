@@ -285,6 +285,95 @@ static inline void OotPspVfpu_MtxFTranslate(MtxF* mf, f32 x, f32 y, f32 z) {
         : "memory");
 }
 
+/* Keep a skeleton limb's matrix in registers through translation and Z/Y/X
+ * rotations. Use the same dot products and separate multiply/add operations
+ * as the individual helpers, with the game's existing lookup-table angles. */
+static inline void OotPspVfpu_MtxFTranslateRotateZYX(MtxF* mf, const Vec3f* translation, const f32* angles,
+                                                  s32 rotateY, s32 rotateX) {
+    __asm__ volatile(
+        "lv.s S000, 0(%[mf])\n"
+        "lv.s S001, 4(%[mf])\n"
+        "lv.s S002, 8(%[mf])\n"
+        "lv.s S003, 12(%[mf])\n"
+        "lv.s S010, 16(%[mf])\n"
+        "lv.s S011, 20(%[mf])\n"
+        "lv.s S012, 24(%[mf])\n"
+        "lv.s S013, 28(%[mf])\n"
+        "lv.s S020, 32(%[mf])\n"
+        "lv.s S021, 36(%[mf])\n"
+        "lv.s S022, 40(%[mf])\n"
+        "lv.s S023, 44(%[mf])\n"
+        "lv.s S030, 48(%[mf])\n"
+        "lv.s S031, 52(%[mf])\n"
+        "lv.s S032, 56(%[mf])\n"
+        "lv.s S033, 60(%[mf])\n"
+        "lv.s S100, 0(%[translation])\n"
+        "lv.s S101, 4(%[translation])\n"
+        "lv.s S102, 8(%[translation])\n"
+        "vone.s S103\n"
+        "vdot.q S200, R000, C100\n"
+        "vdot.q S201, R001, C100\n"
+        "vdot.q S202, R002, C100\n"
+        "vdot.q S203, R003, C100\n"
+        "vmov.q C030, C200\n"
+        "lv.s S300, 0(%[angles])\n"
+        "lv.s S301, 4(%[angles])\n"
+        "vscl.q C100, C000, S301\n"
+        "vscl.q C110, C010, S300\n"
+        "vadd.q C100, C100, C110\n"
+        "vscl.q C110, C010, S301\n"
+        "vscl.q C120, C000, S300\n"
+        "vsub.q C110, C110, C120\n"
+        "vmov.q C000, C100\n"
+        "vmov.q C010, C110\n"
+        "beqz %[rotateY], 1f\n"
+        "nop\n"
+        "lv.s S300, 8(%[angles])\n"
+        "lv.s S301, 12(%[angles])\n"
+        "vscl.q C100, C000, S301\n"
+        "vscl.q C110, C020, S300\n"
+        "vsub.q C100, C100, C110\n"
+        "vscl.q C110, C000, S300\n"
+        "vscl.q C120, C020, S301\n"
+        "vadd.q C110, C110, C120\n"
+        "vmov.q C000, C100\n"
+        "vmov.q C020, C110\n"
+        "1:\n"
+        "beqz %[rotateX], 2f\n"
+        "nop\n"
+        "lv.s S300, 16(%[angles])\n"
+        "lv.s S301, 20(%[angles])\n"
+        "vscl.q C100, C010, S301\n"
+        "vscl.q C110, C020, S300\n"
+        "vadd.q C100, C100, C110\n"
+        "vscl.q C110, C020, S301\n"
+        "vscl.q C120, C010, S300\n"
+        "vsub.q C110, C110, C120\n"
+        "vmov.q C010, C100\n"
+        "vmov.q C020, C110\n"
+        "2:\n"
+        "sv.s S000, 0(%[mf])\n"
+        "sv.s S001, 4(%[mf])\n"
+        "sv.s S002, 8(%[mf])\n"
+        "sv.s S003, 12(%[mf])\n"
+        "sv.s S010, 16(%[mf])\n"
+        "sv.s S011, 20(%[mf])\n"
+        "sv.s S012, 24(%[mf])\n"
+        "sv.s S013, 28(%[mf])\n"
+        "sv.s S020, 32(%[mf])\n"
+        "sv.s S021, 36(%[mf])\n"
+        "sv.s S022, 40(%[mf])\n"
+        "sv.s S023, 44(%[mf])\n"
+        "sv.s S030, 48(%[mf])\n"
+        "sv.s S031, 52(%[mf])\n"
+        "sv.s S032, 56(%[mf])\n"
+        "sv.s S033, 60(%[mf])\n"
+        :
+        : [mf] "r"(mf), [translation] "r"(translation), [angles] "r"(angles), [rotateY] "r"(rotateY),
+          [rotateX] "r"(rotateX)
+        : "memory");
+}
+
 static inline void OotPspVfpu_MtxFScale(MtxF* mf, f32 x, f32 y, f32 z) {
     u32 xBits = OotPspVfpu_FloatBits(x);
     u32 yBits = OotPspVfpu_FloatBits(y);

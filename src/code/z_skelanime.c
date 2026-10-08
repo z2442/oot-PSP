@@ -1606,7 +1606,12 @@ void SkelAnime_AnimateFrame(SkelAnime* skelAnime) {
     Vec3s nextjointTable[100];
 
     SkelAnime_GetFrameData(skelAnime->animation, skelAnime->curFrame, skelAnime->limbCount, skelAnime->jointTable);
+#if PLATFORM_PSP
+    // An integer frame already has its final pose; no next-frame blend is needed.
+    if ((skelAnime->mode & ANIM_INTERP) && (skelAnime->curFrame != (s32)skelAnime->curFrame)) {
+#else
     if (skelAnime->mode & ANIM_INTERP) {
+#endif
         s32 frame = skelAnime->curFrame;
         f32 partialFrame = skelAnime->curFrame - frame;
 
@@ -1670,8 +1675,10 @@ s32 SkelAnime_Once(SkelAnime* skelAnime) {
     f32 updateRate = R_UPDATE_RATE * (1.0f / 3.0f);
 
     if (skelAnime->curFrame == skelAnime->endFrame) {
+#if !PLATFORM_PSP
         SkelAnime_GetFrameData(skelAnime->animation, (s32)skelAnime->curFrame, skelAnime->limbCount,
                                skelAnime->jointTable);
+#endif
         SkelAnime_AnimateFrame(skelAnime);
         return true;
     }
