@@ -15,6 +15,10 @@
 // DMEM Addresses for the RSP
 #define DMEM_TEMP 0x3C0
 #define DMEM_UNCOMPRESSED_NOTE 0x580
+#if defined(TARGET_PSP)
+/* Four-part notes need a staging buffer separate from the decoder output. */
+#define DMEM_PSP_HIGH_PITCH 0x1000
+#endif
 #define DMEM_HAAS_TEMP 0x5C0
 #define DMEM_COMB_TEMP 0x760             // = DMEM_TEMP + DMEM_2CH_SIZE + a bit more
 #define DMEM_COMPRESSED_ADPCM_DATA 0x940 // = DMEM_LEFT_CH
@@ -1369,6 +1373,11 @@ Acmd* AudioSynth_ProcessNote(s32 noteIndex, NoteSubEu* noteSubEu, NoteSynthesisS
 
     resamplingRateFixedPoint = noteSubEu->resamplingRateFixedPoint;
     nParts = noteSubEu->bitField1.hasTwoParts + 1;
+#if defined(TARGET_PSP)
+    if (noteSubEu->bitField0.hasFourParts) {
+        nParts = 4;
+    }
+#endif
     samplesLenFixedPoint = (resamplingRateFixedPoint * aiBufLen * 2) + synthState->samplePosFrac;
     numSamplesToLoad = samplesLenFixedPoint >> 16;
 
@@ -1429,6 +1438,13 @@ Acmd* AudioSynth_ProcessNote(s32 noteIndex, NoteSubEu* noteSubEu, NoteSynthesisS
 
             if (nParts == 1) {
                 samplesLenAdjusted = numSamplesToLoad;
+#if defined(TARGET_PSP)
+            } else if (nParts == 4) {
+                /* Each part must end on the same four-sample decimation phase.
+                 * Distribute the remainder without changing source consumption. */
+                samplesLenAdjusted = (numSamplesToLoad & ~3) +
+                                     ((curPart >= 4 - (numSamplesToLoad & 3)) ? 4 : 0);
+#endif
             } else if (numSamplesToLoad & 1) {
                 samplesLenAdjusted = (numSamplesToLoad & ~1) + (curPart * 2);
             } else {
@@ -1675,6 +1691,24 @@ Acmd* AudioSynth_ProcessNote(s32 noteIndex, NoteSubEu* noteSubEu, NoteSynthesisS
             }
 
             switch (nParts) {
+#if defined(TARGET_PSP)
+                case 4:
+                    /* Decimate twice, then append to PSP-only scratch DMEM.
+                     * Staging beside DMEM_TEMP would let the next decode
+                     * overwrite the earlier parts at high resampling rates. */
+                    AudioSynth_InterL(cmd++, DMEM_UNCOMPRESSED_NOTE + skipBytes,
+                                      DMEM_UNCOMPRESSED_NOTE + skipBytes, ALIGN8(samplesLenAdjusted / 2));
+                    AudioSynth_InterL(cmd++, DMEM_UNCOMPRESSED_NOTE + skipBytes,
+                                      DMEM_PSP_HIGH_PITCH + resampledTempLen, ALIGN8(samplesLenAdjusted / 4));
+                    resampledTempLen += samplesLenAdjusted / 2;
+                    sampleDmemBeforeResampling = DMEM_PSP_HIGH_PITCH;
+                    if (finished) {
+                        AudioSynth_ClearBuffer(cmd++, DMEM_PSP_HIGH_PITCH + resampledTempLen,
+                                               numSamplesToLoad * SAMPLE_SIZE - resampledTempLen +
+                                                   SAMPLES_PER_FRAME * SAMPLE_SIZE);
+                    }
+                    break;
+#endif
                 case 1:
                     sampleDmemBeforeResampling = DMEM_UNCOMPRESSED_NOTE + skipBytes;
                     break;

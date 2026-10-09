@@ -160,6 +160,16 @@ void Audio_InitNoteSub(Note* note, NoteSubEu* sub, NoteSubAttributes* attrs) {
 void Audio_NoteSetResamplingRate(NoteSubEu* noteSubEu, f32 resamplingRateInput) {
     f32 resamplingRate = 0.0f;
 
+#if defined(TARGET_PSP)
+    /* Preserve the original pitch ceiling before compensating for the PSP
+     * source rate. At 22.05 kHz, valid N64 pitches can require nearly 6x. */
+    resamplingRateInput = CLAMP_MAX(resamplingRateInput, 3.99996f * gAudioCtx.audioBufferParameters.resampleRate);
+    noteSubEu->bitField0.hasFourParts = resamplingRateInput >= 4.0f;
+    if (noteSubEu->bitField0.hasFourParts) {
+        noteSubEu->bitField1.hasTwoParts = false;
+        resamplingRate = CLAMP_MAX(resamplingRateInput * 0.25f, 1.99998f);
+    } else
+#endif
     if (resamplingRateInput < 2.0f) {
         noteSubEu->bitField1.hasTwoParts = false;
         resamplingRate = CLAMP_MAX(resamplingRateInput, 1.99998f);
