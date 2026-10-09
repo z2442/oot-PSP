@@ -177,6 +177,42 @@ static inline unsigned int getTexWidthBytes(int width, unsigned int psm) {
     return (unsigned int)bytes;
 }
 
+/* GE texture rows have a 16-byte stride even for small, linear textures.
+ * Keep the sampling dimensions unchanged; only the backing buffer is padded. */
+static unsigned int texman_buffer_width(int width, unsigned int type) {
+    unsigned int alignment;
+
+    switch (type) {
+        case GU_PSM_T4:
+            alignment = 32;
+            break;
+        case GU_PSM_T8:
+            alignment = 16;
+            break;
+        case GU_PSM_5650:
+        case GU_PSM_5551:
+        case GU_PSM_4444:
+        case GU_PSM_T16:
+            alignment = 8;
+            break;
+        case GU_PSM_8888:
+        case GU_PSM_T32:
+            alignment = 4;
+            break;
+        default:
+            return 0;
+    }
+
+    if ((width <= 0) || ((unsigned int)width > 0x7FFFFFFFU - (alignment - 1))) {
+        return 0;
+    }
+    return ((unsigned int)width + alignment - 1) & ~(alignment - 1);
+}
+
+static unsigned int texman_storage_size(int width, int height, unsigned int type) {
+    return getMemorySize(texman_buffer_width(width, type), height, type);
+}
+
 
 static inline uintptr_t texman_align_up(uintptr_t value) {
     return (value + (TEX_ALIGNMENT - 1)) & ~(uintptr_t)(TEX_ALIGNMENT - 1);
@@ -340,7 +376,7 @@ unsigned char texman_get_tex_type(unsigned int num) {
 }
 
 struct PSP_Texture *texman_reserve_memory(int width, int height, unsigned int type) {
-    unsigned int tex_size = getMemorySize(width, height, type);
+    unsigned int tex_size = texman_storage_size(width, height, type);
     unsigned int tex_num = texman_active_texture_id();
     struct PSP_Texture *current;
     uintptr_t allocation;
@@ -368,7 +404,7 @@ struct PSP_Texture *texman_reserve_memory(int width, int height, unsigned int ty
      * or differently formatted texture from consuming the cache forever.
      */
     if (current->location != NULL) {
-        unsigned int old_size = getMemorySize(current->width, current->height, current->type);
+        unsigned int old_size = texman_storage_size(current->width, current->height, current->type);
 
         if ((old_size != 0) && (tex_size <= old_size)) {
             if (sPspTexGuBound == tex_num) {
@@ -563,6 +599,8 @@ void texman_upload_swizzle(int width, int height, unsigned int type, const void 
 
 void texman_upload(int width, int height, unsigned int type, const void *buffer) {
     unsigned int size = getMemorySize(width, height, type);
+    const unsigned int rowBytes = getTexWidthBytes(width, type);
+    const unsigned int stride = getTexWidthBytes(texman_buffer_width(width, type), type);
     struct PSP_Texture *current;
     unsigned int tex_num;
 
@@ -599,13 +637,21 @@ void texman_upload(int width, int height, unsigned int type, const void *buffer)
     current->type = type;
     current->swizzled = GU_FALSE;
 
-    OotPsp_MemcpyVfpu(current->location, buffer, size);
+    if (rowBytes == stride) {
+        OotPsp_MemcpyVfpu(current->location, buffer, size);
+    } else {
+        for (int y = 0; y < height; y++) {
+            unsigned char* row = current->location + (size_t)y * stride;
+            memcpy(row, (const unsigned char*)buffer + (size_t)y * rowBytes, rowBytes);
+            memset(row + rowBytes, 0, stride - rowBytes);
+        }
+    }
 
 #ifdef DEBUG
     // printf("TEX_MAN upload plain [%u]\n", tex_num);
 #endif
 
-    texman_writeback_if_cached(current->location, size);
+    texman_writeback_if_cached(current->location, texman_storage_size(width, height, type));
     texman_bind_tex(tex_num);
 }
 
@@ -621,7 +667,7 @@ void texman_bind_tex(unsigned int num) {
     }
 
     current = &textures[num];
-    size = getMemorySize(current->width, current->height, current->type);
+    size = texman_storage_size(current->width, current->height, current->type);
 
     if ((current->location == NULL) || (size == 0)) {
         texman_log_bad_state("bind empty texture", num, current->width, current->height,
@@ -659,7 +705,8 @@ void texman_bind_tex(unsigned int num) {
     }
 
     sceGuTexMode(current->type, 0, 0, current->swizzled);
-    sceGuTexImage(0, current->width, current->height, current->width, current->location);
+    sceGuTexImage(0, current->width, current->height,
+                  texman_buffer_width(current->width, current->type), current->location);
     psp_tex_bound = num;
     sPspTexGuBound = num;
 }

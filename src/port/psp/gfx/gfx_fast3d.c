@@ -1902,8 +1902,13 @@ static unsigned int gfx_texture_cache_upload_size(uint16_t width, uint16_t heigh
     }
 
     if (upload_size > sizeof(psp_texture_stage_buf)) {
-        upload_size = (size_t)width * height * bytes_per_pixel;
+        upload_width = width;
+        upload_height = height;
     }
+
+    /* The GE rounds each texture row to a 16-byte stride. Tiny intensity
+     * maps need that storage too, even though their sampling width is 8. */
+    upload_size = (((size_t)upload_width * bytes_per_pixel + 15) & ~(size_t)15) * upload_height;
 
     if (upload_size > (size_t)0xFFFFFFFFU) {
         return 0xFFFFFFFFU;
