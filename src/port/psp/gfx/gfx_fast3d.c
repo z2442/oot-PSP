@@ -5530,14 +5530,14 @@ static void gfx_draw_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lr
     lr->x = (unsigned short)lrxf;
     lr->y = (unsigned short)lryf;
 
-    // The coordinates for texture rectangles shall bypass the 3D viewport/scissor state.
+    /* RDP rectangles bypass the RSP viewport, but still obey the RDP scissor.
+     * The skybox fog filter uses a screen-sized rectangle with the letterbox
+     * scissor active; expanding that scissor colors the edges of the bars. */
     struct XYWidthHeight default_viewport = {0, 0, gfx_current_dimensions.width, gfx_current_dimensions.height};
     struct XYWidthHeight viewport_saved = rdp.viewport;
-    struct XYWidthHeight scissor_saved = rdp.scissor;
     uint32_t geometry_mode_saved = rsp.geometry_mode;
     
     rdp.viewport = default_viewport;
-    rdp.scissor = default_viewport;
     rdp.viewport_or_scissor_changed = true;
     /* RDP rectangles do not use RSP geometry flags, but GU only writes the
      * depth buffer while its depth unit is enabled. Preserve depth processing
@@ -5549,7 +5549,6 @@ static void gfx_draw_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lr
     
     rsp.geometry_mode = geometry_mode_saved;
     rdp.viewport = viewport_saved;
-    rdp.scissor = scissor_saved;
     rdp.viewport_or_scissor_changed = true;
     gfx_mark_tri_pipeline_dirty();
     

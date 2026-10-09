@@ -1650,8 +1650,8 @@ static void gfx_scegu_set_viewport(int x, int y, int width, int height) {
 
     sceGuViewport(2048 - (SCR_WIDTH / 2) + originX + x + (width / 2),
                   2048 + (SCR_HEIGHT / 2) - originY - y - (height / 2), width, height);
-    sceGuScissor(originX + x, SCR_HEIGHT - originY - y - height, originX + x + width,
-                 SCR_HEIGHT - originY - y);
+    /* Preserve the independent RDP scissor, including when rectangles replace
+     * the RSP viewport without changing the interpreter's cached scissor. */
 }
 
 static void gfx_scegu_set_scissor(int x, int y, int width, int height) {
