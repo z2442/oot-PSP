@@ -150,46 +150,17 @@ void KaleidoScope_DrawEquipmentImage(PlayState* play, void* source, u32 width, u
 }
 
 void KaleidoScope_DrawPlayerWork(PlayState* play) {
-#if PLATFORM_PSP
     PauseContext* pauseCtx = &play->pauseCtx;
     Vec3f pos;
     Vec3s rot;
     f32 scale;
+#if PLATFORM_PSP
+    f32 portraitToPage;
 
     if (pauseCtx->state < PAUSE_STATE_OPENING_1) {
         return;
     }
-
-    if (LINK_AGE_IN_YEARS == YEARS_CHILD) {
-        pos.x = -31.0f;
-        pos.y = -48.0f;
-        pos.z = 4.0f;
-        scale = 0.016f;
-    } else if (CUR_EQUIP_VALUE(EQUIP_TYPE_SWORD) != EQUIP_VALUE_SWORD_MASTER) {
-        pos.x = -30.0f;
-        pos.y = -58.0f;
-        pos.z = 5.0f;
-        scale = 0.019f;
-    } else {
-        pos.x = -30.0f;
-        pos.y = -54.0f;
-        pos.z = 5.0f;
-        scale = 0.017f;
-    }
-
-    rot.y = -468;
-    rot.x = rot.z = 0;
-    Player_DrawPauseOnPage(play, pauseCtx->playerSegment, &pauseCtx->playerSkelAnime, &pos, &rot, scale,
-                           SWORD_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_SWORD)),
-                           TUNIC_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_TUNIC)),
-                           SHIELD_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_SHIELD)),
-                           BOOTS_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_BOOTS)));
-    return;
-#else
-    PauseContext* pauseCtx = &play->pauseCtx;
-    Vec3f pos;
-    Vec3s rot;
-    f32 scale;
+#endif
 
     if (LINK_AGE_IN_YEARS == YEARS_CHILD) {
         pos.x = 2.0f;
@@ -210,6 +181,22 @@ void KaleidoScope_DrawPlayerWork(PlayState* play) {
 
     rot.y = 32300;
     rot.x = rot.z = 0;
+#if PLATFORM_PSP
+    // Convert the N64 portrait's 60-degree projection and camera at z = -400
+    // into page units. The portrait occupies x = -64..0 and y = 50..-62.
+    portraitToPage = (PAUSE_EQUIP_PLAYER_HEIGHT * 0.8660254f) / (pos.z + 400.0f);
+    pos.x = -32.0f - pos.x * portraitToPage;
+    pos.y = -6.0f + pauseCtx->pagesYOrigin1 + pos.y * portraitToPage;
+    pos.z = 0.0f;
+    scale *= portraitToPage;
+    rot.y = -468;
+
+    Player_DrawPauseOnPage(play, pauseCtx->playerSegment, &pauseCtx->playerSkelAnime, &pos, &rot, scale,
+                           SWORD_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_SWORD)),
+                           TUNIC_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_TUNIC)),
+                           SHIELD_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_SHIELD)),
+                           BOOTS_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_BOOTS)));
+#else
     Player_DrawPause(play, pauseCtx->playerSegment, &pauseCtx->playerSkelAnime, &pos, &rot, scale,
                      SWORD_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_SWORD)),
                      TUNIC_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_TUNIC)),
