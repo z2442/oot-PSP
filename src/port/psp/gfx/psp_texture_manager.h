@@ -42,6 +42,7 @@ int texman_vram_space_available(unsigned int size);
 int texman_texture_slot_available(void);
 unsigned char *texman_get_tex_data(unsigned int num);
 struct PSP_Texture *texman_reserve_memory(int width, int height, unsigned int type);
+struct PSP_Texture *texman_prepare_gpu_texture(unsigned int num, int width, int height, unsigned int type);
 void texman_upload_swizzle(int width, int height, unsigned int type, const void *buffer);
 void texman_upload(int width, int height, unsigned int type, const void *buffer);
 void texman_bind_tex(unsigned int num);

@@ -14,6 +14,11 @@
 #include "play_state.h"
 #include "player.h"
 
+#if PLATFORM_PSP
+#include "oot_psp_shadow.h"
+#include "oot_psp_gfx_ext.h"
+#endif
+
 #define FLAGS (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED)
 
 void EnSda_Init(Actor* thisx, PlayState* play);
@@ -177,6 +182,9 @@ void func_80AF8F60(Player* player, u8* shadowTexture, f32 arg2) {
             temp_t0 = sp7C.x + 32.0f;
             temp_t1 = (s16)sp7C.y << 6;
 
+#if PLATFORM_PSP
+            OotPspShadow_Add(shadowTexture, temp_t0, temp_t1 / 64, D_80AFA15C[i]);
+#else
             if (D_80AFA15C[i] == 2) {
                 for (j = 0, phi_a3 = -0x180; j < 12; j++, phi_a3 += 0x40) {
                     for (phi_a0 = -D_80AFA108[j]; phi_a0 < D_80AFA108[j]; phi_a0++) {
@@ -238,6 +246,7 @@ void func_80AF8F60(Player* player, u8* shadowTexture, f32 arg2) {
                     }
                 }
             }
+#endif
         }
     }
 }
@@ -260,6 +269,9 @@ void func_80AF95C4(EnSda* this, u8* shadowTexture, Player* player, PlayState* pl
     Vec3f sp64[22];
 
     PRINTF("SDA CONT \n");
+#if PLATFORM_PSP
+    OotPspShadow_Begin(shadowTexture, BREG(57) != 0 ? OOT_PSP_SHADOW_BORDER : 0);
+#else
     if (BREG(57) != 0) {
         for (shadowTextureTemp = shadowTexture, i = 0; i < 0x1000; i++, shadowTextureTemp++) {
             if ((i >= 0 && i < 0x40) || (i >= 0xFC0 && i < 0x1000) || ((i & 0x3F) == 0) || ((i & 0x3F) == 0x3F)) {
@@ -273,6 +285,7 @@ void func_80AF95C4(EnSda* this, u8* shadowTexture, Player* player, PlayState* pl
             *shadowTextureTemp32 = 0;
         }
     }
+#endif
     Matrix_RotateX((BREG(50) + 70) / 100.0f, MTXMODE_NEW);
     for (i = 0; i < PLAYER_BODYPART_MAX; i++) {
         if (D_80AFA16C[i] >= 0) {
@@ -313,6 +326,9 @@ void func_80AF95C4(EnSda* this, u8* shadowTexture, Player* player, PlayState* pl
             temp_t0 = sp188.x + 32.0f;
             temp_t1 = (s16)sp188.y << 6;
 
+#if PLATFORM_PSP
+            OotPspShadow_Add(shadowTexture, temp_t0, temp_t1 / 64, 0);
+#else
             for (j = 0; j < 6; j++) {
                 for (j = 0, phi_a3 = -0xC0; j < 7; j++, phi_a3 += 0x40) {
                     for (phi_a0 = -D_80AFA0E8[j]; phi_a0 < D_80AFA0E8[j] - 1; phi_a0++) {
@@ -326,14 +342,22 @@ void func_80AF95C4(EnSda* this, u8* shadowTexture, Player* player, PlayState* pl
                     }
                 }
             }
+#endif
         }
     }
     if (BREG(61) == 1) {
+#if PLATFORM_PSP
+        OotPspShadowMask* mask = (OotPspShadowMask*)shadowTexture;
+        mask->flags |= OOT_PSP_SHADOW_GRADIENT;
+        mask->gradientBase = 255 - BREG(61);
+        mask->gradientStep = BREG(60) + 4;
+#else
         for (shadowTextureTemp = shadowTexture, i = 0; i < 0x1000; i++, shadowTextureTemp++) {
             if (*shadowTextureTemp != 0) {
                 *shadowTextureTemp = -((i >> 6) * (BREG(60) + 4)) + (255 - BREG(61));
             }
         }
+#endif
     }
     PRINTF("SDA CONT 4\n");
 }
@@ -361,6 +385,9 @@ void func_80AF9C70(u8* shadowTexture, Player* player, PlayState* play) {
     Matrix_Scale(((BREG(56) - 250) / 1000.0f) + 0.6f, 1.0f, ((BREG(59) - 250) / 1000.0f) + 0.6f, MTXMODE_APPLY);
     MATRIX_FINALIZE_AND_LOAD(POLY_XLU_DISP++, play->state.gfxCtx, "../z_en_sda.c", 860);
     gSPDisplayList(POLY_XLU_DISP++, D_80AFA3D8);
+#if PLATFORM_PSP
+    gOotPspShadowMask(POLY_XLU_DISP++, shadowTexture);
+#endif
     gDPLoadTextureBlock(POLY_XLU_DISP++, shadowTexture, G_IM_FMT_I, G_IM_SIZ_8b, 0x40, 0x40, 0,
                         G_TX_NOMIRROR | G_TX_CLAMP, G_TX_NOMIRROR | G_TX_CLAMP, 6, 6, G_TX_NOLOD, G_TX_NOLOD);
     gSPDisplayList(POLY_XLU_DISP++, D_80AFA3F8);

@@ -18,10 +18,12 @@
  *   0x28: packed RGBA
  *   0x2C: clip flags byte
  *   0x2D: fog alpha byte
- *   sizeof(LoadedVertex) == 0x30
+ *   0x30: modelview-space normal vec3
+ *   0x3C: lighting snapshot index
+ *   sizeof(LoadedVertex) == 0x40
  */
 
-#define LOADED_VERTEX_SIZE 48
+#define LOADED_VERTEX_SIZE 64
 #define LOADED_VERTEX_MODEL_POS 0
 #define LOADED_VERTEX_CLIP_POS 16
 #define LOADED_VERTEX_UV 32
@@ -42,14 +44,13 @@ gfx_clip_to_hyperplane_vfpu:
 	mtv     $t0, S700
 
 	or      $t2, $a1, $zero
-	sll     $t1, $a3, 4
-	sll     $t0, $a3, 5
-	addu    $t1, $t1, $t0
+	sll     $t1, $a3, 6
 	addu    $t1, $a1, $t1
 
 	lv.q    C300, LOADED_VERTEX_MODEL_POS($a1)
 	lv.q    C310, LOADED_VERTEX_CLIP_POS($a1)
 	lv.q    C320, LOADED_VERTEX_UV($a1)
+	lv.q    C330, 48($a1)
 	lw      $t4, LOADED_VERTEX_COLOR($a1)
 	lbu     $t8, LOADED_VERTEX_FOG_ALPHA($a1)
 	addiu   $a1, $a1, LOADED_VERTEX_SIZE
@@ -66,6 +67,7 @@ gfx_clip_to_hyperplane_vfpu:
 	lv.q    C200, LOADED_VERTEX_MODEL_POS($a1)
 	vdot.q  S701, C210, C000
 	lv.q    C220, LOADED_VERTEX_UV($a1)
+	lv.q    C230, 48($a1)
 	vcmp.s  GT, S701, S700
 	lw      $t3, LOADED_VERTEX_COLOR($a1)
 	lbu     $t9, LOADED_VERTEX_FOG_ALPHA($a1)
@@ -103,6 +105,11 @@ gfx_clip_to_hyperplane_vfpu:
 	sv.q    C110, LOADED_VERTEX_CLIP_POS($a0)
 	sv.s    S120, LOADED_VERTEX_UV($a0)
 	sv.s    S121, LOADED_VERTEX_V($a0)
+	vsub.t  C130, C230, C330
+	vscl.t  C130, C130, S703
+	vadd.t  C130, C330, C130
+	vmov.s  S133, S333
+	sv.q    C130, 48($a0)
 	mfv     $t0, S703
 	mtc1    $t0, $f0
 	b       .Linterpolate_color
@@ -116,6 +123,7 @@ gfx_clip_to_hyperplane_vfpu:
 	sv.q    C200, LOADED_VERTEX_MODEL_POS($a0)
 	sv.q    C210, LOADED_VERTEX_CLIP_POS($a0)
 	sv.q    C220, LOADED_VERTEX_UV($a0)
+	sv.q    C230, 48($a0)
 
 	addiu   $a0, $a0, LOADED_VERTEX_SIZE
 	b       .Lfinished_vertex
@@ -151,6 +159,11 @@ gfx_clip_to_hyperplane_vfpu:
 	sv.q    C110, LOADED_VERTEX_CLIP_POS($a0)
 	sv.s    S120, LOADED_VERTEX_UV($a0)
 	sv.s    S121, LOADED_VERTEX_V($a0)
+	vsub.t  C130, C230, C330
+	vscl.t  C130, C130, S703
+	vadd.t  C130, C330, C130
+	vmov.s  S133, S333
+	sv.q    C130, 48($a0)
 	mfv     $t0, S703
 	mtc1    $t0, $f0
 	b       .Linterpolate_color
@@ -260,6 +273,7 @@ gfx_clip_to_hyperplane_vfpu:
 	vmov.q  C300, C200
 	vmov.q  C310, C210
 	vmov.q  C320, C220
+	vmov.q  C330, C230
 	or      $t4, $t3, $zero
 	or      $t8, $t9, $zero
 	vmov.s  S702, S701

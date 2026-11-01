@@ -133,7 +133,16 @@ s32 TransitionFade_IsDone(void* thisx) {
 void TransitionFade_SetColor(void* thisx, u32 color) {
     TransitionFade* this = (TransitionFade*)thisx;
 
+#if PLATFORM_PSP
+    /* RGBA8 uses N64 byte order. Unpack it before accessing the channels
+     * through this union on the little-endian PSP. */
+    this->color.r = (color >> 24) & 0xFF;
+    this->color.g = (color >> 16) & 0xFF;
+    this->color.b = (color >> 8) & 0xFF;
+    this->color.a = color & 0xFF;
+#else
     this->color.rgba = color;
+#endif
 }
 
 void TransitionFade_SetType(void* thisx, s32 type) {

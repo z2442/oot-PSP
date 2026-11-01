@@ -1,4 +1,10 @@
 #include "z_boss_ganon.h"
+
+#if PLATFORM_PSP
+#include "oot_psp_shadow.h"
+#include "oot_psp_gfx_ext.h"
+#endif
+
 #include "overlays/actors/ovl_En_Ganon_Mant/z_en_ganon_mant.h"
 #include "overlays/actors/ovl_En_Zl3/z_en_zl3.h"
 #include "overlays/actors/ovl_Bg_Ganon_Otyuka/z_bg_ganon_otyuka.h"
@@ -3677,6 +3683,9 @@ void func_808E0254(BossGanon* this, u8* tex, f32 arg2) {
             baseX = (s16)(sp5C.x + 32.0f);
             baseY = (s16)sp5C.y * 64;
 
+#if PLATFORM_PSP
+            OotPspShadow_Add(tex, baseX, baseY / 64, D_808E4E58[i]);
+#else
             if (D_808E4E58[i] == 2) {
                 for (y = 0, addY = -0x180; y < 12; y++, addY += 0x40) {
                     for (x = -D_808E4E20[y]; x < D_808E4E20[y]; x++) {
@@ -3714,6 +3723,7 @@ void func_808E0254(BossGanon* this, u8* tex, f32 arg2) {
                     }
                 }
             }
+#endif
         }
     }
 }
@@ -3731,9 +3741,14 @@ void BossGanon_GenShadowTexture(u8* tex, BossGanon* this, PlayState* play) {
     Vec3f sp70;
     s32* ptr = (s32*)tex;
 
+#if PLATFORM_PSP
+    OotPspShadow_Begin(tex, OOT_PSP_SHADOW_WRAP_ROWS);
+#else
     for (i = 0; i < 64 * 64 / 4; i++, ptr++) {
         *ptr = 0;
     }
+
+#endif
 
     Matrix_RotateX(1.0f, MTXMODE_NEW);
 
@@ -3755,6 +3770,9 @@ void BossGanon_GenShadowTexture(u8* tex, BossGanon* this, PlayState* play) {
             baseX = (s32)(sp70.x + 32.0f);
             baseY = (s16)sp70.y * 0x40;
 
+#if PLATFORM_PSP
+            OotPspShadow_Add(tex, baseX, baseY / 64, sCape->strands[i].torn[j] ? 6 : 5);
+#else
             if (!sCape->strands[i].torn[j]) {
                 for (y = -1, addY = -0x40; y <= 1; y++, addY += 0x40) {
                     for (x = -3; x <= 3; x++) {
@@ -3774,6 +3792,7 @@ void BossGanon_GenShadowTexture(u8* tex, BossGanon* this, PlayState* play) {
                     }
                 }
             }
+#endif
         }
     }
 }
@@ -3799,6 +3818,9 @@ void BossGanon_DrawShadowTexture(void* tex, BossGanon* this, PlayState* play) {
     Matrix_Scale(0.95000005f, 1.0f, 0.95000005f, MTXMODE_APPLY);
     MATRIX_FINALIZE_AND_LOAD(POLY_OPA_DISP++, gameState->gfxCtx, "../z_boss_ganon.c", 8396);
     gSPDisplayList(POLY_OPA_DISP++, gGanondorfShadowSetupDL);
+#if PLATFORM_PSP
+    gOotPspShadowMask(POLY_OPA_DISP++, tex);
+#endif
     gDPLoadTextureBlock(POLY_OPA_DISP++, tex, G_IM_FMT_I, G_IM_SIZ_8b, 64, 64, 0, G_TX_NOMIRROR | G_TX_CLAMP,
                         G_TX_NOMIRROR | G_TX_CLAMP, 6, 6, G_TX_NOLOD, G_TX_NOLOD);
     gSPDisplayList(POLY_OPA_DISP++, gGanondorfShadowModelDL);

@@ -43,6 +43,7 @@ static struct {
 static struct { uint32_t geometry_mode; struct VertexColor loaded_vertices_2D[2]; } rsp;
 static struct XYWidthHeight drawn_scissor,drawn_viewport;
 static int scissor_calls;
+static int sScissorBounds[4];
 static void sceGuViewport(int x,int y,int w,int h) { (void)x;(void)y;(void)w;(void)h; }
 static void sceGuScissor(int x,int y,int r,int b) { (void)x;(void)y;(void)r;(void)b;scissor_calls++; }
 static void gfx_mark_tri_pipeline_dirty(void) {}

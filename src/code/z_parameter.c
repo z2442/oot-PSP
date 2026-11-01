@@ -3356,8 +3356,22 @@ void func_8008A8B8(PlayState* play, s32 topY, s32 bottomY, s32 leftX, s32 rightX
 }
 
 void func_8008A994(InterfaceContext* interfaceCtx) {
+#if PLATFORM_PSP
+    f32 savedNear = interfaceCtx->view.zNear;
+    f32 savedFar = interfaceCtx->view.zFar;
+
+    /* The A-button perspective view leaves a 10..60 depth range. Flat HUD
+     * quads, including the flying equip icon, lie at z=0 and would all be
+     * rejected by the PSP near-plane clipper. */
+    interfaceCtx->view.zNear = -1.0f;
+    interfaceCtx->view.zFar = 1.0f;
+#endif
     SET_FULLSCREEN_VIEWPORT(&interfaceCtx->view);
     View_ApplyOrthoToOverlay(&interfaceCtx->view);
+#if PLATFORM_PSP
+    interfaceCtx->view.zNear = savedNear;
+    interfaceCtx->view.zFar = savedFar;
+#endif
 }
 
 void Interface_Draw(PlayState* play) {

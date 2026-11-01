@@ -32,6 +32,8 @@ enum {
 #define SHADER_OPT_NOISE (1 << 27)
 #define SHADER_OPT_TEXTURE_BLEND (1 << 28)
 #define SHADER_OPT_TEXTURE_BLEND_SHADE (1 << 29)
+/* The tint modes use either bit individually; both together select addition. */
+#define SHADER_OPT_TEXTURE_ADD (SHADER_OPT_TEXTURE_BLEND | SHADER_OPT_TEXTURE_BLEND_SHADE)
 #define SHADER_OPT_ALPHA_THRESHOLD (1 << 30)
 #define SHADER_OPT_DEPTH_ONLY (1U << 31)
 
@@ -43,6 +45,7 @@ struct CCFeatures {
     bool opt_noise;
     bool opt_texture_blend;
     bool opt_texture_blend_shade;
+    bool opt_texture_add;
     bool used_textures[2];
     int num_inputs;
     bool do_single[2];

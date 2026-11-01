@@ -484,6 +484,25 @@ struct PSP_Texture *texman_reserve_memory(int width, int height, unsigned int ty
     return current;
 }
 
+struct PSP_Texture *texman_prepare_gpu_texture(unsigned int num, int width, int height, unsigned int type) {
+    if ((num == 0) || (num > psp_tex_number) || (num >= TEXMAN_MAX_TEXTURES)) {
+        return NULL;
+    }
+    psp_tex_bound = num;
+    struct PSP_Texture* texture = texman_reserve_memory(width, height, type);
+    if (texture != NULL) {
+        texture->width = width;
+        texture->height = height;
+        texture->type = type;
+        texture->swizzled = GU_FALSE;
+        /* GE writes bypass CPU caches. Discard old cached storage before the
+         * transfer, and force TEXMODE/TEXIMAGE after the offscreen pass. */
+        sceKernelDcacheWritebackInvalidateRange(texture->location, texman_storage_size(width, height, type));
+        texman_invalidate_binding();
+    }
+    return texture;
+}
+
 static void texman_ensure_intensity_clut(void) {
     unsigned int i;
 

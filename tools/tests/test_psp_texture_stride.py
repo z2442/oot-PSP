@@ -52,6 +52,8 @@ static unsigned int image_width, image_height, image_stride, image_calls;
 static const unsigned char* image_buffer;
 static void OotPsp_MemcpyVfpu(void* out, const void* in, size_t n) { memcpy(out, in, n); }
 static void sceKernelDcacheWritebackRange(void* p, unsigned n) { (void)p; (void)n; }
+static unsigned invalidated;
+static void sceKernelDcacheWritebackInvalidateRange(void* p, unsigned n) { assert(p); invalidated=n; }
 static void sceGuClutMode(int a, int b, int c, int d) { (void)a; (void)b; (void)c; (void)d; }
 static void sceGuClutLoad(int n, const void* p) { (void)n; (void)p; }
 static void sceGuTexMode(unsigned a, int b, int c, unsigned d) { (void)a; (void)b; (void)c; (void)d; }
@@ -109,6 +111,19 @@ int main(void) {
     texman_upload_swizzle(8,8,GU_PSM_T8,pixels);
     assert(textures[id].width==0 && psp_tex_buffer==vram);
     assert(texman_storage_size(8,8,GU_PSM_T8)==128);
+    static unsigned char gpuStorage[32768] __attribute__((aligned(64)));
+    texman_reset(gpuStorage,sizeof(gpuStorage));
+    unsigned first=texman_create(), second=texman_create();
+    struct PSP_Texture* firstGpu=texman_prepare_gpu_texture(first,64,64,GU_PSM_8888);
+    assert(firstGpu && firstGpu->location==gpuStorage && invalidated==16384);
+    assert(firstGpu->swizzled==GU_FALSE && firstGpu->type==GU_PSM_8888);
+    struct PSP_Texture* secondGpu=texman_prepare_gpu_texture(second,64,64,GU_PSM_8888);
+    assert(secondGpu && secondGpu->location==gpuStorage+16384);
+    memset(firstGpu->location,99,16384);
+    assert(texman_prepare_gpu_texture(second,64,64,GU_PSM_8888)==secondGpu);
+    assert(firstGpu->location[0]==99); // Updating another mask never overwrites a retained texture.
+    assert(psp_tex_buffer==gpuStorage+sizeof(gpuStorage));
+    assert(texman_prepare_gpu_texture(0,64,64,GU_PSM_8888)==NULL);
     puts("texture stride tests passed");
 }
 '''

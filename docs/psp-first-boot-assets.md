@@ -31,6 +31,12 @@ current session, while **Save video.ini** writes the selection beside
 `EBOOT.PBP` for later launches. TV output remains unavailable on a PSP-1000, if
 no cable is detected, or if `Plugins/dvemgr.prx` is missing.
 
+**VSync** defaults to **On** and can be toggled with Left/Right or Cross in
+**Video Settings**. It takes effect immediately for gameplay and the custom HOME
+menu. **Save video.ini** persists the choice (`vsync = on` or `vsync = off`),
+and **Reset defaults** turns VSync back on. Older configuration files without
+a `vsync` entry also default to on.
+
 On the first launch, the port validates the ROM and atomically creates
 `data/segments/oot_psp_assets.bin`. It also fills the executable's zero
 placeholders from that user-supplied ROM. A failed or interrupted conversion

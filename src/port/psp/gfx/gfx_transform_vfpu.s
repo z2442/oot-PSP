@@ -12,7 +12,8 @@
  *     const struct GfxVfpuTransformState *state);
  *
  * Vtx is 16 bytes, with signed object coordinates at offsets 0, 2, and 4.
- * LoadedVertex is 48 bytes; its model and clip vectors start at 0 and 16.
+ * LoadedVertex is 64 bytes; its model and clip vectors start at 0 and 16.
+ * Its modelview-transformed normal starts at 48; GE normalizes it for lighting.
  * Matrices use the renderer's row-vector layout, so each VFPU dot product is
  * made against one matrix column. Surface alpha remains at offset 43. When
  * N64 fog is enabled, the separate fog alpha at offset 45 receives
@@ -20,7 +21,7 @@
  */
 
 #define VTX_SIZE 16
-#define LOADED_VERTEX_SIZE 48
+#define LOADED_VERTEX_SIZE 64
 #define LOADED_VERTEX_MODEL_POS 0
 #define LOADED_VERTEX_CLIP_POS 16
 #define LOADED_VERTEX_ALPHA 43
@@ -29,6 +30,7 @@
 #define TRANSFORM_STATE_FOG_MUL 8
 #define TRANSFORM_STATE_FOG_OFFSET 12
 #define TRANSFORM_STATE_FOG_ENABLED 16
+#define TRANSFORM_STATE_LIGHTING_ENABLED 20
 
 .globl gfx_transform_vertices_vfpu
 gfx_transform_vertices_vfpu:
@@ -37,6 +39,7 @@ gfx_transform_vertices_vfpu:
 	lw      $t8, 0($a3)
 	lw      $t9, 4($a3)
 	lw      $t7, TRANSFORM_STATE_FOG_ENABLED($a3)
+	lw      $t6, TRANSFORM_STATE_LIGHTING_ENABLED($a3)
 
 	/* Model matrix columns. */
 	lv.s    S000, 0($t8)
@@ -139,6 +142,24 @@ gfx_transform_vertices_vfpu:
 
 .Lstore_fog_alpha:
 	sb      $t0, LOADED_VERTEX_FOG_ALPHA($a0)
+
+	vzero.q C330
+	beq     $t6, $zero, .Lstore_normal
+	nop
+	/* Transform signed object normals with the same load-time limb matrix.
+	 * Translation is excluded. Lighting accumulation is left to the GE. */
+	lb      $t0, 12($a1)
+	lb      $t1, 13($a1)
+	lb      $t2, 14($a1)
+	mtv     $t0, S320
+	mtv     $t1, S321
+	mtv     $t2, S322
+	vi2f.t C320, C320, 0
+	vdot.t S330, C000, C320
+	vdot.t S331, C010, C320
+	vdot.t S332, C020, C320
+.Lstore_normal:
+	sv.q    C330, 48($a0)
 
 	addiu   $a1, $a1, VTX_SIZE
 	addiu   $a0, $a0, LOADED_VERTEX_SIZE

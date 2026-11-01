@@ -29,11 +29,15 @@ preamble = r'''
 #include <stdio.h>
 #include <string.h>
 #define TARGET_PSP 1
+#include "gfx_psp_lighting.h"
+static struct GfxPspLighting sBatchLighting;
+static bool sBatchUsesLighting;
+void gfx_scegu_set_lighting(const struct GfxPspLighting* state) { (void)state; }
 struct RGBA { uint8_t r,g,b,a; };
-typedef struct { float u,v; struct RGBA color; float x,y,z; } psp_fast_t;
+typedef struct { float u,v; struct RGBA color; float normal[3]; float x,y,z; } psp_fast_t;
 typedef struct { float u,v; uint8_t alpha; } psp_uv_t;
 typedef struct { struct RGBA color; float x,y,z; } psp_fog_color_t;
-typedef psp_fast_t psp_fog_textured_t;
+typedef struct { float u,v; struct RGBA color; float x,y,z; } psp_fog_textured_t;
 union { psp_fog_color_t color[12]; psp_fog_textured_t textured[12]; } buf_vbo_fog;
 static psp_fast_t buf_vbo[12];
 static psp_uv_t buf_vbo_tex1[12];
@@ -96,7 +100,7 @@ static void prepare(unsigned mode,uint8_t alpha,uint8_t mix,bool mixed,bool tran
     sBatchHasVisibleFog=false;
     for (unsigned i=0;i<9;i++) {
         buf_num_vert=i;
-        buf_vbo[i]=(psp_fast_t){i,i,{200,150,100,255},i,i,i};
+        buf_vbo[i]=(psp_fast_t){i,i,{200,150,100,255},{0,0,0},i,i,i};
         buf_vbo_tex1[i]=(psp_uv_t){i+10,i+20,128};
         struct LoadedVertex vertex={i,i,i,mixed && i!=8 ? 0 : alpha};
         emit(&vertex,transparent ? 0 : 255);
@@ -134,6 +138,6 @@ with tempfile.TemporaryDirectory(prefix="oot-zero-fog-test-") as directory:
     cfile = Path(directory) / "test.c"
     binary = Path(directory) / "test"
     cfile.write_text(preamble + common + reference + flush + tests)
-    subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-O2", "-Wall", "-Wextra",
+    subprocess.run([os.environ.get("CC", "cc"), "-I", str(ROOT / "src/port/psp/gfx"), "-std=c11", "-O2", "-Wall", "-Wextra",
                     str(cfile), "-o", str(binary)], check=True)
     subprocess.run([str(binary)], check=True)

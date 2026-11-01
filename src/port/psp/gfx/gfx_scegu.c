@@ -39,10 +39,8 @@
 #include "oot_psp_dve.h"
 #include "oot_psp_memory.h"
 #include "oot_psp_video.h"
+#include "oot_psp_shadow.h"
 
-#ifndef OOT_PSP_WAIT_VBLANK
-#define OOT_PSP_WAIT_VBLANK 1
-#endif
 #include "oot_port_macros.h"
 
 #define LCD_BUFFER_WIDTH 512
@@ -223,6 +221,7 @@ static size_t getStaticVramBytesRemaining(void) {
 
 #include "gfx_cc.h"
 #include "gfx_rendering_api.h"
+#include "gfx_psp_lighting.h"
 #include "oot_port_macros.h"
 
 enum MixType {
@@ -259,8 +258,10 @@ struct SamplerState {
 typedef struct Vertex {
     float u, v;
     unsigned int color;
+    float normal[3];
     float x, y, z;
 } Vertex;
+typedef char Vertex_size_check[(sizeof(Vertex) == 36) ? 1 : -1];
 
 typedef struct FogVertex {
     float u, v;
@@ -300,6 +301,8 @@ static unsigned int sTextureEnvColor = 0xffffffff;
 static void *sDrawBuffer;
 static void *sDisplayBuffer;
 static void *sDepthBuffer;
+static void *sShadowMaskBuffer;
+static int sScissorBounds[4];
 static void *sPrimaryBuffer;
 static void *sSecondaryBuffer;
 static bool sInterlacedOutput;
@@ -1159,12 +1162,12 @@ static void gfx_scegu_render_video_settings(int selectedIndex, const char* statu
 
 #if OOT_PSP_USE_INTRAFONT
     if (gfx_scegu_ensure_home_menu_font()) {
-        for (row = 0; row < 7; row++) {
-            int y = 76 + (row * 22);
+        for (row = 0; row < 8; row++) {
+            int y = 74 + (row * 20);
             unsigned int color = gfx_scegu_rgba(218, 224, 218, 255);
 
             if (selectedIndex == row) {
-                gfx_scegu_draw_rect(54, y - 17, 372, 22,
+                gfx_scegu_draw_rect(54, y - 16, 372, 20,
                                     gfx_scegu_rgba(highlightRed, highlightGreen, highlightBlue, 205));
                 color = gfx_scegu_rgba(255, 255, 245, 255);
             }
@@ -1180,12 +1183,15 @@ static void gfx_scegu_render_video_settings(int selectedIndex, const char* statu
                     snprintf(line, sizeof(line), "Aspect Ratio: %s", OotPspVideo_GetAspectName());
                     break;
                 case 3:
-                    snprintf(line, sizeof(line), "Apply video mode");
+                    snprintf(line, sizeof(line), "VSync: %s", OotPspVideo_IsVSyncEnabled() ? "On" : "Off");
                     break;
                 case 4:
-                    snprintf(line, sizeof(line), "Save video.ini");
+                    snprintf(line, sizeof(line), "Apply video mode");
                     break;
                 case 5:
+                    snprintf(line, sizeof(line), "Save video.ini");
+                    break;
+                case 6:
                     snprintf(line, sizeof(line), "Reset defaults");
                     break;
                 default:
@@ -1263,6 +1269,10 @@ static inline int texenv_set_texture(UNUSED struct ShaderProgram *prg) {
 
 static inline int texenv_set_texture_color(struct ShaderProgram *prg) {
     int mode;
+
+    if (prg->cc.opt_texture_add) {
+        return GU_TFX_ADD;
+    }
 
     if (prg->cc.opt_texture_blend) {
         return GU_TFX_BLEND;
@@ -1658,8 +1668,11 @@ static void gfx_scegu_set_scissor(int x, int y, int width, int height) {
     int originX = (SCR_WIDTH - (int)gfx_current_dimensions.width) / 2;
     int originY = (SCR_HEIGHT - (int)gfx_current_dimensions.height) / 2;
 
-    sceGuScissor(originX + x, SCR_HEIGHT - originY - y - height, originX + x + width,
-                 SCR_HEIGHT - originY - y);
+    sScissorBounds[0] = originX + x;
+    sScissorBounds[1] = SCR_HEIGHT - originY - y - height;
+    sScissorBounds[2] = originX + x + width;
+    sScissorBounds[3] = SCR_HEIGHT - originY - y;
+    sceGuScissor(sScissorBounds[0], sScissorBounds[1], sScissorBounds[2], sScissorBounds[3]);
 }
 
 static void gfx_scegu_set_use_alpha(bool use_alpha) {
@@ -1672,6 +1685,38 @@ static void gfx_scegu_set_use_alpha(bool use_alpha) {
     }
 }
 
+#include "gfx_psp_shadow.inc.c"
+
+void gfx_scegu_set_lighting(const struct GfxPspLighting* lighting) {
+    if (lighting == NULL) {
+        sceGuDisable(GU_LIGHTING);
+        return;
+    }
+
+    sceGuEnable(GU_LIGHTING);
+    sceGuLightMode(GU_SINGLE_COLOR);
+    /* Ambient material alpha tracks the per-vertex surface/pass alpha.
+     * The global ambient alpha must stay opaque, independent of its RGB. */
+    sceGuColorMaterial(GU_AMBIENT | GU_DIFFUSE);
+    sceGuModelColor(0, 0xffffffffU, 0xffffffffU, 0);
+    sceGuAmbient(lighting->ambient | 0xff000000U);
+    for (uint32_t i = 0; i < GFX_PSP_MAX_LIGHTS; i++) {
+        if (i < lighting->count) {
+            const struct GfxPspDirectionalLight* light = &lighting->lights[i];
+            const ScePspFVector3 direction = {
+                light->direction[0], light->direction[1], light->direction[2]
+            };
+            sceGuLight(i, GU_DIRECTIONAL, GU_AMBIENT_AND_DIFFUSE, &direction);
+            sceGuLightColor(i, GU_AMBIENT, 0);
+            sceGuLightColor(i, GU_DIFFUSE, light->color);
+            sceGuLightColor(i, GU_SPECULAR, 0);
+            sceGuEnable(GU_LIGHT0 + i);
+        } else {
+            sceGuDisable(GU_LIGHT0 + i);
+        }
+    }
+}
+
 static void gfx_scegu_draw_triangles(float buf_vbo[], UNUSED size_t buf_vbo_len, size_t buf_vbo_num_tris) {
     if (!is_shader_enabled(cur_shader->shader_id)) {
         gfx_scegu_apply_shader(get_shader_from_id(get_shader_remap(cur_shader->shader_id)));
@@ -1680,7 +1725,8 @@ static void gfx_scegu_draw_triangles(float buf_vbo[], UNUSED size_t buf_vbo_len,
     gfx_scegu_reserve_list_memory(sizeof(Vertex) * 3 * buf_vbo_num_tris);
     void *buf = sceGuGetMemory(sizeof(Vertex) * 3 * buf_vbo_num_tris);
     OotPsp_MemcpyVfpu(buf, buf_vbo, sizeof(Vertex) * 3 * buf_vbo_num_tris);
-    sceGuDrawArray(GU_TRIANGLES, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D, 3 * buf_vbo_num_tris, 0, buf);
+    sceGuDrawArray(GU_TRIANGLES, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_NORMAL_32BITF |
+                   GU_VERTEX_32BITF | GU_TRANSFORM_3D, 3 * buf_vbo_num_tris, 0, buf);
 }
 
 /* Retained buffers must remain pinned until finish_render completes. */
@@ -1690,6 +1736,7 @@ void gfx_scegu_draw_native_mesh(const void* vertices, const uint16_t* indices,
         gfx_scegu_apply_shader(get_shader_from_id(get_shader_remap(cur_shader->shader_id)));
     }
     gfx_scegu_reserve_list_memory(256);
+    gfx_scegu_set_lighting(NULL);
     /* The software test retains CCW faces for G_CULL_BACK. The normal path
      * disables GU culling because its CPU has already made that decision. */
     if (cull) {
@@ -1697,7 +1744,7 @@ void gfx_scegu_draw_native_mesh(const void* vertices, const uint16_t* indices,
         sceGuEnable(GU_CULL_FACE);
     }
     sceGuSetMatrix(GU_MODEL, (const ScePspFMatrix4*)model);
-    sceGuDrawArray(GU_TRIANGLES, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF |
+    sceGuDrawArray(GU_TRIANGLES, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_NORMAL_32BITF | GU_VERTEX_32BITF |
                    GU_INDEX_16BIT | GU_TRANSFORM_3D, count, indices, vertices);
     sceGuSetMatrix(GU_MODEL, (const ScePspFMatrix4*)identity_matrix);
     if (cull) {
@@ -1718,6 +1765,8 @@ static void gfx_scegu_draw_fog_triangles(float buf_vbo[], size_t buf_vbo_len,
     void *buf = sceGuGetMemory(buf_vbo_len);
 
     OotPsp_MemcpyVfpu(buf, buf_vbo, buf_vbo_len);
+
+    gfx_scegu_set_lighting(NULL);
 
     /* N64 fog is an RDP blend after texture/color combining. Re-draw the same
      * geometry as fog RGB with the VFPU-computed shade alpha. */
@@ -1767,6 +1816,8 @@ void gfx_scegu_draw_triangles_2d(float buf_vbo[], UNUSED size_t buf_vbo_len, UNU
     VertexColor *quad;
     int originX;
     int originY;
+
+    gfx_scegu_set_lighting(NULL);
 
     if (!is_shader_enabled(cur_shader->shader_id)) {
         gfx_scegu_apply_shader(get_shader_from_id(get_shader_remap(cur_shader->shader_id)));
@@ -1829,6 +1880,9 @@ static int gfx_scegu_set_hardware_video_mode(const OotPspVideoMode *mode) {
 }
 
 static void gfx_scegu_configure_gu_buffers(void) {
+    /* VSync waits at frame end before an immediate swap, so the old display
+     * buffer is safe to reuse when the next frame starts rendering. */
+    guSwapBuffersBehaviour(PSP_DISPLAY_SETBUF_IMMEDIATE);
     sceGuStart(GU_DIRECT, list);
     sceGuDrawBuffer(sColorPixelFormat, sDrawBuffer, BUF_WIDTH);
     sceGuDispBuffer(SCR_WIDTH, SCR_HEIGHT, sDisplayBuffer, BUF_WIDTH);
@@ -1837,6 +1891,9 @@ static void gfx_scegu_configure_gu_buffers(void) {
     sceGuViewport(2048, 2048, SCR_WIDTH, SCR_HEIGHT);
     sceGuDepthRange(0xffff, 0);
     sceGuScissor(0, 0, SCR_WIDTH, SCR_HEIGHT);
+    sScissorBounds[0] = sScissorBounds[1] = 0;
+    sScissorBounds[2] = SCR_WIDTH;
+    sScissorBounds[3] = SCR_HEIGHT;
     sceGuEnable(GU_SCISSOR_TEST);
     sceGuEnable(GU_DEPTH_TEST);
     sceGuDepthFunc(GU_GEQUAL);
@@ -2008,6 +2065,9 @@ static void gfx_scegu_init(void) {
     sCrt240pOutput = false;
     gfx_scegu_reset_framebuffers();
     sDepthBuffer = zbp;
+    /* Keep the render target in EDRAM even when TV texture storage uses RAM. */
+    staticOffset = (staticOffset + 8191U) & ~8191U;
+    sShadowMaskBuffer = getStaticVramBuffer(64, 64, GU_PSM_8888);
 
     gfx_scegu_configure_gu_buffers();
     sceDisplaySetFrameBuf(gfx_scegu_vram_cpu_addr(sDisplayBuffer), BUF_WIDTH, sColorPixelFormat,
@@ -2173,6 +2233,9 @@ static void gfx_scegu_end_frame(void) {
 
     sceGuFinish();
     sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
+    if (OotPspVideo_IsVSyncEnabled()) {
+        sceDisplayWaitVblankStart();
+    }
     if (sInterlacedOutput) {
         gfx_scegu_present_interlaced();
     } else {

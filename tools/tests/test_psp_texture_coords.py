@@ -31,11 +31,16 @@ preamble = r'''
 #define G_TX_NOMASK 0
 #define MAX_BUFFERED 16
 struct RGBA { uint8_t r, g, b, a; };
-struct ColorCombiner { int unused; };
-struct LoadedVertex { float x, y, z, u, v; };
+struct ColorCombiner { int vertex_color_source[2]; };
+#define CC_SHADE 4
+#include "gfx_psp_lighting.h"
+static struct GfxPspLighting sBatchLighting,sLightingStates[66];
+static bool sBatchUsesLighting;
+static uint32_t sBatchLightingId;
+struct LoadedVertex { float x, y, z, u, v; float normal[3]; uint32_t lighting; };
 struct TextureHashmapNode { uint16_t upload_width, upload_height; };
 struct ShaderProgram { uint32_t shader_id; };
-typedef struct { float u, v; struct RGBA color; float x, y, z; } psp_fast_t;
+typedef struct { float u, v; struct RGBA color; float normal[3]; float x, y, z; } psp_fast_t;
 static psp_fast_t buf_vbo[48], buf_vbo_tex1[48];
 static size_t buf_num_vert, buf_vbo_len, buf_vbo_num_tris;
 static void gfx_flush(void) { assert(false); }
@@ -80,6 +85,8 @@ static void close_to(float actual, float expected) {
 }
 int main(void) {
     struct ShaderProgram shader = {0};
+    struct ColorCombiner comb={0};
+    rendering_state.tri_pipeline.comb=&comb;
     rendering_state.shader_program = &shader;
     rendering_state.tri_pipeline.use_texture = true;
     /* gMoonVtx uses 0 and 0x1000, scaled by SPTexture(0xffff). */
@@ -120,6 +127,6 @@ with tempfile.TemporaryDirectory(prefix="oot-texture-coords-") as directory:
     path = Path(directory)
     (path / "test.c").write_text(preamble + declarations + globals_and_stubs +
                                   preparation + helper + wrapper + tests)
-    subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra",
+    subprocess.run([os.environ.get("CC", "cc"), "-I", str(ROOT / "src/port/psp/gfx"), "-std=c11", "-Wall", "-Wextra",
                     "-Wno-unused-variable", str(path / "test.c"), "-lm", "-o", str(path / "test")], check=True)
     subprocess.run([str(path / "test")], check=True)
