@@ -17,7 +17,8 @@
  * Matrices use the renderer's row-vector layout, so each VFPU dot product is
  * made against one matrix column. Surface alpha remains at offset 43. When
  * N64 fog is enabled, the separate fog alpha at offset 45 receives
- * clamp((clip_z / clip_w) * fog_mul + fog_offset, 0, 255).
+ * clamp((clip_z / clip_w) * fog_mul + fog_offset, 0, 255). The state carries
+ * float factors, including any correction for a shorter clipping near plane.
  */
 
 #define VTX_SIZE 16
@@ -83,8 +84,6 @@ gfx_transform_vertices_vfpu:
 	lw      $t1, TRANSFORM_STATE_FOG_OFFSET($a3)
 	mtv     $t0, S220
 	mtv     $t1, S221
-	vi2f.s  S220, S220, 0
-	vi2f.s  S221, S221, 0
 	vzero.s S222
 	li      $t0, 0x437f0000
 	mtv     $t0, S223

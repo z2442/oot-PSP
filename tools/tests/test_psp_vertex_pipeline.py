@@ -173,7 +173,7 @@ for lighting in (0, 1):
         model[15] = 1
         m.store(0x4000, "16f", *model)
         m.store(0x4100, "16f", *projection)
-        m.store(0x3000, "IIiiII", 0x4000, 0x4100, 32, 64, 1, lighting)
+        m.store(0x3000, "IIffII", 0x4000, 0x4100, 32, 64, 1, lighting)
         inputs = []
         for i in range(count):
             position = [rng.randrange(-20, 20) for _ in range(3)]

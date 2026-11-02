@@ -15,6 +15,8 @@ ortho = ortho[ortho.index("void guOrthoF("):ortho.index("\nvoid guOrtho(")]
 actor = (ROOT / "src/code/z_actor.c").read_text()
 reticle_z = re.search(r"^#define LOCK_ON_RETICLE_Z .*$", actor, re.M)[0]
 assert "Matrix_Translate(reticle->pos.x, reticle->pos.y, LOCK_ON_RETICLE_Z," in actor
+map_source = (ROOT / "src/code/z_map_exp.c").read_text()
+compass_z = re.search(r"^#define COMPASS_ARROW_Z .*$", map_source, re.M)[0]
 
 preamble = r'''
 #include <assert.h>
@@ -38,7 +40,7 @@ static void View_ApplyOrthoToOverlay(View* view) {
     assert(view->fullscreen);
     guOrthoF(projection,-160,160,-120,120,view->zNear,view->zFar,1);
 }
-''' + setup + "\n" + reticle_z + r'''
+''' + setup + "\n" + reticle_z + "\n" + compass_z + r'''
 int main(void) {
     const float farPlanes[]={60,12800}; // A-button view and the initial HUD view.
     for (unsigned i=0;i<2;i++) {
@@ -50,6 +52,15 @@ int main(void) {
             assert(hud.view.zNear==10 && hud.view.zFar==farPlanes[i]);
             float reticleZ=LOCK_ON_RETICLE_Z*projection[2][2]+projection[3][2];
             assert(fabsf(reticleZ)<=1); // The old PSP z=-50 workaround clips this entire reticle.
+            // Actual compass-arrow model vertices, scaled and flattened
+            // by Minimap_DrawCompassIcons before yawing with the player.
+            const float arrows[3][3]={{0,0,10},{-5,0,-10},{5,0,-10}};
+            for (unsigned yaw=0;yaw<32;yaw++) for (unsigned a=0;a<3;a++) {
+                float angle=yaw*(6.28318530718f/32);
+                float z=(arrows[a][2]*cosf(angle)-arrows[a][0]*sinf(angle))*cosf(-1.6f)*0.4f;
+                float clipZ=(COMPASS_ARROW_Z+z)*projection[2][2]+projection[3][2];
+                assert(fabsf(clipZ)<=1);
+            }
             // Inventory slot (-108,58) to C-right (114,110), shrinking 32->24.
             float t=frame/10.0f,x=-108+(114+108)*t,y=58+(110-58)*t,size=32-8*t;
             for (unsigned vertex=0;vertex<4;vertex++) {
@@ -62,12 +73,12 @@ int main(void) {
             }
         }
     }
-    puts("HUD projection: equip icons and targeting reticle remain visible; perspective settings preserved");
+    puts("HUD projection: equip icons, targeting reticle and minimap compass arrows remain visible");
 }
 '''
 with tempfile.TemporaryDirectory(prefix="oot-equip-projection-") as directory:
     path = Path(directory)
     (path / "test.c").write_text(preamble + ortho + tests)
     subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
-                    str(path / "test.c"), "-o", str(path / "test")], check=True)
+                    str(path / "test.c"), "-lm", "-o", str(path / "test")], check=True)
     subprocess.run([str(path / "test")], check=True)

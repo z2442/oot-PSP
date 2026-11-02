@@ -139,8 +139,8 @@ typedef char Vtx_vfpu_size_check[(sizeof(Vtx) == 16) ? 1 : -1];
 struct GfxVfpuTransformState {
     const float (*model)[4];
     const float (*projection)[4];
-    int32_t fog_mul;
-    int32_t fog_offset;
+    float fog_mul;
+    float fog_offset;
     uint32_t fog_enabled;
     uint32_t lighting_enabled;
 };
@@ -330,6 +330,7 @@ static struct RDP {
     void *color_image_address;
 } rdp  __attribute__((aligned(4)));
 static const OotPspShadowMask* sPendingShadowMask;
+static OotPspFogProjection sFogProjection = { 1.0f, 0.0f };
 
 static struct RenderingState {
     struct XYWidthHeight viewport, scissor;
@@ -3997,8 +3998,8 @@ static bool gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
         const struct GfxVfpuTransformState transformState = {
             rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1],
             rsp.P_matrix,
-            rsp.fog_mul,
-            rsp.fog_offset,
+            rsp.fog_mul * sFogProjection.scale,
+            rsp.fog_offset + rsp.fog_mul * sFogProjection.offset,
             (geometryMode & G_FOG) != 0,
             (geometryMode & G_LIGHTING) != 0,
         };
@@ -6116,6 +6117,12 @@ static void gfx_dp_set_other_mode(uint32_t mode_h, uint32_t mode_l) {
     gfx_mark_tri_pipeline_dirty();
 }
 
+static void gfx_set_fog_projection(const OotPspFogProjection* projection) {
+    /* Fog is captured at vertex load, like G_MW_FOG. Keep raw N64 factors in
+     * rsp so actor/room overrides receive the same projection correction. */
+    sFogProjection = projection != NULL ? *projection : (OotPspFogProjection){ 1.0f, 0.0f };
+}
+
 static void gfx_dp_noop(uint32_t tag) {
     if (tag == OOT_PSP_VISMONO_TAG) {
         gfx_flush();
@@ -7227,6 +7234,8 @@ static void gfx_run_dl(Gfx* cmd) {
                 if ((cmd->words.w0 & 0x00ffffffU) == OOT_PSP_SHADOW_CMD) {
                     gfx_flush();
                     sPendingShadowMask = (const OotPspShadowMask*)seg_addr(cmd->words.w1);
+                } else if ((cmd->words.w0 & 0x00ffffffU) == OOT_PSP_FOG_PROJECTION_CMD) {
+                    gfx_set_fog_projection((const OotPspFogProjection*)seg_addr(cmd->words.w1));
                 } else {
                     gfx_dp_noop(cmd->words.w1);
                 }
@@ -7337,6 +7346,7 @@ static void gfx_run_dl(Gfx* cmd) {
 
 static void gfx_sp_reset() {
     sPendingShadowMask = NULL;
+    gfx_set_fog_projection(NULL);
 #if defined(TARGET_PSP) && defined(F3DEX_GBI_2) && OOT_PSP_NATIVE_MESH_ENTRIES > 0
     /* Preserve the renderer's cross-run slot semantics before resetting RSP state. */
     gfx_native_materialize(UINT64_MAX);

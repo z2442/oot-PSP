@@ -16,6 +16,9 @@
 #include "play_state.h"
 #include "player.h"
 #include "save.h"
+#if PLATFORM_PSP
+#include "oot_psp_gfx_ext.h"
+#endif
 
 #include "assets/objects/gameplay_keep/compass_arrow.h"
 #include "assets/textures/parameter_static/parameter_static.h"
@@ -27,13 +30,8 @@ s16 sPlayerInitialPosZ = 0;
 s16 sPlayerInitialDirection = 0;
 s16 sEntranceIconMapIndex = 0;
 
-#if PLATFORM_PSP
-/* The original NoN microcode draws these at z = 0 without near clipping.
- * Keep them inside the PSP GU's HUD projection instead. */
-#define COMPASS_ARROW_Z -50.0f
-#else
+/* The HUD's corrected orthographic range includes the original z=0. */
 #define COMPASS_ARROW_Z 0.0f
-#endif
 
 void Map_SavePlayerInitialInfo(PlayState* play) {
     Player* player = GET_PLAYER(play);
@@ -423,6 +421,12 @@ void Minimap_Draw(PlayState* play) {
     s32 mapIndex = gSaveContext.mapIndex;
 
     OPEN_DISPS(play->state.gfxCtx, "../z_map_exp.c", 626);
+
+#if PLATFORM_PSP
+    /* Keep the map image, entrance/chest markers and compass arrows in the
+     * same uniformly scaled right-anchored HUD space in 4:3 and 16:9. */
+    gOotPspSetHudAnchor(OVERLAY_DISP++, OOT_PSP_HUD_ANCHOR_RIGHT);
+#endif
 
     if (play->pauseCtx.state <= PAUSE_STATE_INIT) {
         switch (play->sceneId) {

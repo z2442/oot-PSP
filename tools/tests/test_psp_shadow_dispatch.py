@@ -29,6 +29,9 @@ preamble = r'''
 #define GFX_CAPTURE_CMD(a,b) ((void)0)
 #define G_TX_LOADTILE 7
 #define OOT_PSP_SHADOW_CMD 0x534844U
+#define OOT_PSP_FOG_PROJECTION_CMD 0x464F47U
+typedef void OotPspFogProjection;
+static void gfx_set_fog_projection(const OotPspFogProjection* p) { (void)p;abort(); }
 #define G_NOOP 0xc0
 #define _SHIFTL(v,s,w) ((uint32_t)(v)<<(s))
 #define _UNUSED(v) ((void)(v))

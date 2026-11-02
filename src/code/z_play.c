@@ -47,6 +47,7 @@
 #include "save.h"
 #include "vis.h"
 #if PLATFORM_PSP
+#include "oot_psp_gfx_ext.h"
 #include "oot_psp_performance.h"
 #include "oot_psp_renderer.h"
 #endif
@@ -1274,6 +1275,46 @@ void Play_DrawOverlayElements(PlayState* this) {
     }
 }
 
+#if PLATFORM_PSP
+static f32 Play_GetPspPerspectiveNear(PlayState* play) {
+    Camera* camera = GET_ACTIVE_CAM(play);
+    f32 near = play->view.zNear;
+
+    /* OoT's NoN microcode tolerates foreground weapons inside the nominal
+     * near plane. Give aiming and cinematic close-ups a smaller GU plane;
+     * retain the normal depth range when returning to ordinary gameplay. */
+    if (near <= 1.0f) return near;
+    /* Player blocking states also cover doors and ocarina use; those do not
+     * need the foreground plane used by scripted camera close-ups. */
+    if (play->csCtx.state != CS_STATE_IDLE) return 1.0f;
+    if (camera != NULL) {
+        switch (camera->mode) {
+            case CAM_MODE_FIRST_PERSON:
+            case CAM_MODE_AIM_ADULT:
+            case CAM_MODE_AIM_CHILD:
+            case CAM_MODE_Z_AIM:
+            case CAM_MODE_AIM_BOOMERANG:
+                return 1.0f;
+        }
+    }
+    return near;
+}
+
+static void Play_GetPspFogProjection(View* view, f32 originalNear, OotPspFogProjection* fog) {
+    Mtx reference;
+    MtxF referenceF;
+    MtxF currentF;
+
+    /* Use the same Q16 depth coefficients as the submitted projection. FOV
+     * and aspect affect only x/y, so the reference aspect can be one. */
+    guPerspective(&reference, NULL, view->fovy, 1.0f, originalNear, view->zFar, view->scale);
+    Matrix_MtxToMtxF(&reference, &referenceF);
+    Matrix_MtxToMtxF(&view->projection, &currentF);
+    fog->scale = referenceF.mf[3][2] / currentF.mf[3][2];
+    fog->offset = (fog->scale * currentF.mf[2][2] - referenceF.mf[2][2]) / -currentF.mf[2][3];
+}
+#endif
+
 void Play_Draw(PlayState* this) {
     GraphicsContext* gfxCtx = this->state.gfxCtx;
     Lights* sp228;
@@ -1316,8 +1357,26 @@ void Play_Draw(PlayState* this) {
         POLY_OPA_DISP = Play_SetFog(this, POLY_OPA_DISP);
         POLY_XLU_DISP = Play_SetFog(this, POLY_XLU_DISP);
 
+#if PLATFORM_PSP
+        {
+            f32 savedNear = this->view.zNear;
+            OotPspFogProjection* fogProjection = NULL;
+
+            View_SetPerspective(&this->view, this->view.fovy, Play_GetPspPerspectiveNear(this), this->lightCtx.zFar);
+            View_Apply(&this->view, VIEW_ALL);
+            if (this->view.zNear != savedNear) {
+                fogProjection = GRAPH_ALLOC(gfxCtx, sizeof(*fogProjection));
+                Play_GetPspFogProjection(&this->view, savedNear, fogProjection);
+            }
+            gOotPspSetFogProjection(POLY_OPA_DISP++, fogProjection);
+            gOotPspSetFogProjection(POLY_XLU_DISP++, fogProjection);
+            gOotPspSetFogProjection(OVERLAY_DISP++, NULL);
+            this->view.zNear = savedNear;
+        }
+#else
         View_SetPerspective(&this->view, this->view.fovy, this->view.zNear, this->lightCtx.zFar);
         View_Apply(&this->view, VIEW_ALL);
+#endif
 
         // The billboard matrix temporarily stores the viewing matrix
         Matrix_MtxToMtxF(&this->view.viewing, &this->billboardMtxF);

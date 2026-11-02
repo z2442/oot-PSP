@@ -12248,6 +12248,27 @@ void Player_DrawGameplay(PlayState* play, Player* this, s32 lod, Gfx* cullDList,
     CLOSE_DISPS(play->state.gfxCtx, "../z_player.c", 19328);
 }
 
+#if PLATFORM_PSP
+static f32 Player_GetPspHeadClipZ(PlayState* play, Player* player) {
+    MtxF viewing;
+    Vec3f headViewPos;
+    f32 near = play->view.zNear;
+    f32 far = play->view.zFar;
+    f32 zScale = ((near + far) / (near - far)) * play->view.scale;
+    f32 zOffset = (2.0f * near * far / (near - far)) * play->view.scale;
+
+    /* Model selection uses the requested near plane, not the shorter PSP
+     * foreground plane. Otherwise the head crosses the -4 threshold too
+     * late and its hair becomes visible in first-person looking/aiming.
+     * Match the original projection's Q16 depth coefficients. */
+    zScale = (s32)(zScale * 65536.0f) * (1.0f / 65536.0f);
+    zOffset = (s32)(zOffset * 65536.0f) * (1.0f / 65536.0f);
+    Matrix_MtxToMtxF(&play->view.viewing, &viewing);
+    SkinMatrix_Vec3fMtxFMultXYZ(&viewing, &player->actor.focus.pos, &headViewPos);
+    return headViewPos.z * zScale + zOffset;
+}
+#endif
+
 void Player_Draw(Actor* thisx, PlayState* play2) {
     PlayState* play = play2;
     Player* this = (Player*)thisx;
@@ -12281,7 +12302,11 @@ void Player_Draw(Actor* thisx, PlayState* play2) {
         if (this->unk_6AD != 0) {
             Vec3f projectedHeadPos;
 
+#if PLATFORM_PSP
+            projectedHeadPos.z = Player_GetPspHeadClipZ(play, this);
+#else
             SkinMatrix_Vec3fMtxFMultXYZ(&play->viewProjectionMtxF, &this->actor.focus.pos, &projectedHeadPos);
+#endif
             if (projectedHeadPos.z < -4.0f) {
                 overrideLimbDraw = Player_OverrideLimbDrawGameplayFirstPerson;
             }

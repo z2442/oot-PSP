@@ -75,6 +75,39 @@ the same correction used in the Majora's Mask port.
 The targeting reticle also uses z=0. The old PSP z=-50 workaround lay outside
 this corrected HUD depth range and has been removed.
 
+Gameplay minimaps explicitly select the right HUD anchor before drawing the
+map, entrance/chest markers and compass arrows. Rectangles and projected
+arrows use the same uniform HUD scale in 4:3 and widescreen on LCD and TV.
+Compass arrows use their original z=0 rather than the obsolete z=-50
+workaround, keeping them inside the HUD projection throughout their rotation.
+
+Close-up cutscenes and first-person/weapon-aiming views temporarily use a
+one-unit perspective near plane on PSP. The nominal ten-unit plane clips
+foreground weapons that OoT's NoN microcode normally permits, including the
+Master Sword placement and slingshot string. Both CPU clipping and GU receive
+the same updated projection. The view's requested near value is restored
+after matrix generation, so ordinary gameplay retains its normal depth
+precision. Side, far and behind-camera clipping remain enabled.
+
+The foreground plane is selected by scripted cutscenes and aiming camera
+modes, rather than the broader player-blocking state used by doors and
+ocarina interaction. When it is active (including scripted warps), fog still
+uses the original near plane's depth curve. A display-list extension carries
+an affine depth correction derived from the two Q16 projection matrices to
+both world streams. The vertex transform applies that correction to each
+room/actor's raw fog factors using floats, avoiding signed-16-bit overflow.
+Zero-multiplier fog fades retain their original opacity. Ordinary world
+frames, the overlay stream and renderer frame reset restore identity fog
+correction, so the close-up setting cannot leak into later drawing.
+
+Link's first-person model selection also depends on projected head depth.
+On PSP it now evaluates the head in view space and applies the requested
+near/far plane's Q16 depth coefficients. The shorter foreground plane
+therefore cannot delay the switch to the existing first-person limb callback.
+Looking hides the body; aiming retains the weapon/arm meshes while hiding
+the head, hair and hat. The original transition threshold remains in effect
+as the camera approaches and leaves Link.
+
 Host regression checks:
 
 - `python3 tools/tests/test_psp_arrow_glow.py`
@@ -82,6 +115,9 @@ Host regression checks:
 - `python3 tools/tests/test_psp_get_item_materials.py`
 - `python3 tools/tests/test_psp_frustum.py`
 - `python3 tools/tests/test_psp_decal_depth.py`
+- `python3 tools/tests/test_psp_close_camera.py`
+- `python3 tools/tests/test_psp_first_person.py`
+- `python3 tools/tests/test_psp_rectangle_scissor.py`
 
 The checks cover mask extents, scrolling coordinates, arrow rim coverage,
 Freezard cloud-mask selection, particle opacity and the icon's projected
@@ -93,4 +129,14 @@ Decal tests reproduce fixed-offset failures for slightly sunken road meshes
 and check bounded displacement, feet two units above the ground, bias
 isolation/reset and matching color/fog depths. HUD checks include reticle
 depth, and material checks cover both Temple floor crossfade variants.
+Close-camera checks exercise blocked-player and scripted/aiming transitions,
+normal-projection restoration and both world fog streams with the actual Q16
+perspective matrix. Fog sweeps cover multiple far distances, matrix scales,
+room factors and constant-opacity fades; the generated float factors also
+run through the actual VFPU transform assembly interpreter. Minimap checks include
+rectangles, compass depth and marker alignment in LCD/TV aspect modes.
+First-person model checks sweep camera/head positions, original depth ranges
+and matrix scales against the nominal projection, reproducing the head
+visibility regression and checking the actual looking/aiming limb callback
+for both ages.
 Appearance and blending still require verification on PSP hardware.
