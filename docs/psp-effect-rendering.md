@@ -42,19 +42,55 @@ timer, while texture alpha continues to mask the silhouette. Both texture
 tint option bits together encode addition; either bit on its own keeps the
 existing primitive/environment or shade tint mode.
 
+Ground paths in Hyrule Field and Hyrule Castle use overlays. CPU frustum
+clipping now uses the same horizontal projection as GU: aspect/anchor
+adjustments apply only to anchored fullscreen HUD geometry. World geometry
+retains the existing GU projection, and native meshes materialize their
+vertices in that same clip space. Near-plane rejection (`z < -w`) clips
+against `-z - w`, while far-plane rejection (`z > w`) clips against `z - w`.
+This prevents crossing ground overlays from reaching GU with vertices
+outside the view volume.
+
+Comparing road and terrain meshes finds road samples about 0.54 game units
+below the grass after vertex rounding. A fixed GE offset could lose that
+comparison; a slope-based screen-depth offset also let distant paths cover
+Link's feet. Upward-facing lit floor decals now move one world unit along
+their surface normal, with only two GE depth units for rounding. CPU clip
+coordinates and submitted positions both receive that displacement before
+clipping. Other decals retain their 32-unit offset, and batches flush when
+switching offset classes. Color and fog share the same depth; ordinary
+geometry uses zero bias and depth testing remains enabled. Decals bypass
+the native mesh shortcut so the bounded displacement is applied.
+
+The Temple of Time crossfades normal and blue floor textures using
+environment alpha. Its room lists use both SHADE and PRIMITIVE as their
+second-cycle multiplier. Both now use the two-texture GU path, preserving
+the selected multiplier and the transition's blue color across all sections.
+
 The inventory equip icon is an orthographic quad at z=0. After drawing the
 A button, the HUD view still has perspective near/far settings of 10..60.
 The PSP HUD orthographic setup temporarily uses -1..1 so the equip animation
 passes near-plane clipping, then restores the saved depth settings. This is
 the same correction used in the Majora's Mask port.
+The targeting reticle also uses z=0. The old PSP z=-50 workaround lay outside
+this corrected HUD depth range and has been removed.
 
 Host regression checks:
 
 - `python3 tools/tests/test_psp_arrow_glow.py`
 - `python3 tools/tests/test_psp_equip_projection.py`
 - `python3 tools/tests/test_psp_get_item_materials.py`
+- `python3 tools/tests/test_psp_frustum.py`
+- `python3 tools/tests/test_psp_decal_depth.py`
 
 The checks cover mask extents, scrolling coordinates, arrow rim coverage,
 Freezard cloud-mask selection, particle opacity and the icon's projected
 flight, plus the Odd Mushroom/Potion shaders and additive bomb flashes.
+Frustum checks compare CPU clipping to the uploaded GU projection and sweep
+road quads across side, bottom and near boundaries, including positions
+behind the camera.
+Decal tests reproduce fixed-offset failures for slightly sunken road meshes
+and check bounded displacement, feet two units above the ground, bias
+isolation/reset and matching color/fog depths. HUD checks include reticle
+depth, and material checks cover both Temple floor crossfade variants.
 Appearance and blending still require verification on PSP hardware.

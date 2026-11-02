@@ -39,6 +39,7 @@ preamble = r'''
 #define G_CULL_BACK 0x400
 #define G_CULL_BOTH (G_CULL_FRONT | G_CULL_BACK)
 #define G_BL_CLR_FOG 3
+#define ZMODE_DEC 0xc00
 #define G_IM_FMT_CI 2
 #define CC_0 0
 #define CC_SHADE 4
@@ -56,7 +57,7 @@ typedef struct { int16_t ob[3]; uint16_t flag; int16_t tc[2]; uint8_t cn[4]; } V
 typedef union { Vtx_t v; uint64_t align[2]; } Vtx;
 typedef struct { struct { uint32_t w0; uintptr_t w1; } words; } Gfx;
 typedef struct { float u,v; struct RGBA color; float normal[3]; float x,y,z; } psp_fast_t;
-struct LoadedVertex { float x,y,z,w,_x,_y,_z,_w,u,v; struct RGBA color; uint8_t clip_rej,fog_alpha; float normal[3]; uint32_t lighting; };
+struct LoadedVertex { float x,y,z,w,_x,_y,_z,_w,u,v; struct RGBA color; uint8_t clip_rej,fog_alpha; uint16_t decal_lifted; float normal[3]; uint32_t lighting; };
 struct GfxVfpuTransformState { const float (*model)[4], (*projection)[4]; int fog_mul, fog_offset; unsigned fog_enabled,lighting_enabled; };
 struct { float modelview_matrix_stack[1][4][4], P_matrix[4][4]; unsigned modelview_matrix_stack_size;
     unsigned geometry_mode; void* segments[16]; struct { uint16_t s,t; } texture_scaling_factor;
@@ -110,6 +111,9 @@ int main(void) {
     comb.vertex_color_source[0]=comb.vertex_color_source[1]=CC_SHADE;
     rendering_state.tri_pipeline.comb=&comb;
     Gfx* cursor=commands;
+    rdp.other_mode_l=ZMODE_DEC;
+    assert(!gfx_native_try(&cursor)); // Decals need the per-triangle depth-slope path.
+    rdp.other_mode_l=0;
     assert(gfx_native_try(&cursor)); assert(cursor==commands+2 && draws==1 && transforms==0);
     unsigned validations=validation_calls;
     commands[1].words.w0=0x02000000; /* Poison original commands: a hit must not decode. */

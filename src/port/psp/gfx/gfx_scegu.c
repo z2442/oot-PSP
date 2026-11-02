@@ -297,6 +297,7 @@ static bool sAppliedSamplerStateValid;
 static bool gl_blend = false;
 static bool sDepthTestEnabled = true;
 static bool sDepthWriteEnabled = true;
+static unsigned int sAppliedDepthBias = ~0U;
 static unsigned int sTextureEnvColor = 0xffffffff;
 static void *sDrawBuffer;
 static void *sDisplayBuffer;
@@ -1646,11 +1647,11 @@ static void gfx_scegu_set_depth_mask(bool z_upd) {
     sceGuDepthMask(z_upd ? GU_FALSE : GU_TRUE);
 }
 
-static void gfx_scegu_set_zmode_decal(bool zmode_decal) {
-    if (zmode_decal) {
-        sceGuDepthOffset(32); /* I think we need a little more on psp because of 16bit depth buffer */
-    } else {
-        sceGuDepthOffset(0);
+static void gfx_scegu_set_depth_bias(unsigned int bias) {
+    if (sAppliedDepthBias != bias) {
+        /* GE uses reversed depth: positive offsets pull decals forward. */
+        sceGuDepthOffset(bias);
+        sAppliedDepthBias = bias;
     }
 }
 
@@ -1917,6 +1918,7 @@ static void gfx_scegu_configure_gu_buffers(void) {
 }
 
 static void gfx_scegu_invalidate_mode_state(void) {
+    sAppliedDepthBias = ~0U;
     sPauseBgCaptureRequested = false;
     sPauseBgCaptured = false;
     sHomeMenuBgCaptureRequested = false;
@@ -2045,6 +2047,7 @@ static void gfx_scegu_init(void) {
     (void)sceDisplaySetMode(0, LCD_SCREEN_WIDTH, LCD_SCREEN_HEIGHT);
     sDepthTestEnabled = true;
     sDepthWriteEnabled = true;
+    sAppliedDepthBias = ~0U;
     sTextureEnvColor = 0xffffffff;
     active_texture_tile = -1;
     sAppliedShader = NULL;
@@ -2263,7 +2266,7 @@ struct GfxRenderingAPI gfx_scegu_api = {
     gfx_scegu_set_texture_env_color,
     gfx_scegu_set_depth_test,
     gfx_scegu_set_depth_mask,
-    gfx_scegu_set_zmode_decal,
+    gfx_scegu_set_depth_bias,
     gfx_scegu_set_viewport,
     gfx_scegu_set_scissor,
     gfx_scegu_set_use_alpha,

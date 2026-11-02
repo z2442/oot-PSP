@@ -22,7 +22,7 @@ struct GfxRenderingAPI {
     void (*set_texture_env_color)(uint8_t r, uint8_t g, uint8_t b, uint8_t a);
     void (*set_depth_test)(bool depth_test);
     void (*set_depth_mask)(bool z_upd);
-    void (*set_zmode_decal)(bool zmode_decal);
+    void (*set_depth_bias)(unsigned int bias);
     void (*set_viewport)(int x, int y, int width, int height);
     void (*set_scissor)(int x, int y, int width, int height);
     void (*set_use_alpha)(bool use_alpha);

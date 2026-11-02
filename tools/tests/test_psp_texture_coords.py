@@ -27,6 +27,8 @@ preamble = r'''
 #include <string.h>
 #include <math.h>
 #define TARGET_PSP 1
+#define HALF_SCREEN_WIDTH 160
+#define HALF_SCREEN_HEIGHT 120
 #define GFX_DL_HANDLER
 #define G_TX_NOMASK 0
 #define MAX_BUFFERED 16
@@ -37,7 +39,8 @@ struct ColorCombiner { int vertex_color_source[2]; };
 static struct GfxPspLighting sBatchLighting,sLightingStates[66];
 static bool sBatchUsesLighting;
 static uint32_t sBatchLightingId;
-struct LoadedVertex { float x, y, z, u, v; float normal[3]; uint32_t lighting; };
+static unsigned int sBatchDepthBias;
+struct LoadedVertex { float x, y, z, u, v, _x, _y, _z, _w; float normal[3]; uint32_t lighting; uint16_t decal_lifted; };
 struct TextureHashmapNode { uint16_t upload_width, upload_height; };
 struct ShaderProgram { uint32_t shader_id; };
 typedef struct { float u, v; struct RGBA color; float normal[3]; float x, y, z; } psp_fast_t;
@@ -52,6 +55,8 @@ static struct {
     struct TriPipelineState tri_pipeline;
     struct TextureHashmapNode* textures[2];
     struct ShaderProgram* shader_program;
+    bool decal_mode;
+    struct { unsigned int width,height; } viewport;
 } rendering_state;
 static TextureTileState* gfx_get_texture_tile(int slot) { return &rdp.texture_tile[slot]; }
 static void gfx_prepare_tri_pipeline_state(void) {}

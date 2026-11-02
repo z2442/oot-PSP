@@ -125,7 +125,7 @@ struct LoadedVertex {
     struct RGBA color;
     uint8_t clip_rej;
     uint8_t fog_alpha;
-    uint16_t padding;
+    uint16_t decal_lifted; /* Load-time metadata; triangle setup reads original RSP slots. */
     float normal[3];
     uint32_t lighting;
 } __attribute__((packed, aligned(16)));
@@ -936,6 +936,7 @@ static size_t buf_num_vert;
 static size_t buf_vbo_num_tris;
 #if defined(TARGET_PSP)
 static bool sBatchHasVisibleFog;
+static unsigned int sBatchDepthBias;
 #endif
 /* One immutable snapshot per live RSP slot, plus one spare. Queued batches
  * own a copy, so snapshots can be reused without modifying queued GE work. */
@@ -1320,12 +1321,12 @@ void gfx_clip_interpolate_vert(struct LoadedVertex* out, const struct  LoadedVer
 //*****************************************************************************
 static const float NDCPlane[6][4] __attribute__((aligned(16))) =
 {
-	{  0.f,  0.f,  1.f, -1.f },	// near
+	{  0.f,  0.f, -1.f, -1.f },	// near: z >= -w
 	{  1.f,  0.f,  0.f, -1.f },	// left
 	{ -1.f,  0.f,  0.f, -1.f },	// right
 	{  0.f,  1.f,  0.f, -1.f },	// bottom
 	{  0.f, -1.f,  0.f, -1.f },	// top
-	{  0.f,  0.f, -1.f, -1.f }	// far
+	{  0.f,  0.f,  1.f, -1.f }	// far: z <= w
 };
 
 static uint32_t clipToHyperPlane( struct LoadedVertex *dest, const struct LoadedVertex *source, uint32_t inCount, const float plane[4] )
@@ -1538,6 +1539,7 @@ static void gfx_flush(void) {
             gfx_rapi->set_use_alpha(true);
         }
 #endif
+        gfx_rapi->set_depth_bias(sBatchDepthBias);
         gfx_scegu_set_lighting(sBatchUsesLighting ? &sBatchLighting : NULL);
         gfx_rapi->draw_triangles((float *)buf_vbo, buf_vbo_len, buf_vbo_num_tris);
 #if defined(TARGET_PSP)
@@ -1607,6 +1609,7 @@ static void gfx_flush(void) {
         buf_vbo_num_tris = 0;
 #if defined(TARGET_PSP)
         sBatchHasVisibleFog = false;
+        sBatchDepthBias = 0;
 #endif
         //unsigned long t1 = get_time();
         /*if (t1 - t0 > 1000) {
@@ -3311,7 +3314,7 @@ static void gfx_prepare_tri_pipeline_state(void) {
     bool zmode_decal = (rdp.other_mode_l & ZMODE_DEC) == ZMODE_DEC;
     if (backend_state_dirty || zmode_decal != rendering_state.decal_mode) {
         gfx_flush();
-        gfx_rapi->set_zmode_decal(zmode_decal);
+        gfx_rapi->set_depth_bias(zmode_decal ? 32 : 0);
         rendering_state.decal_mode = zmode_decal;
     }
 
@@ -3885,6 +3888,17 @@ static bool gfx_hud_anchor_enabled(void) {
     return sHudAnchor != OOT_PSP_HUD_ANCHOR_NONE;
 }
 
+static inline float gfx_transform_clip_x(float x, float w) {
+    /* Match gfx_apply_projection_matrix exactly. World and sub-viewport
+     * geometry use the original projection on GU; only anchored fullscreen
+     * HUD geometry receives the aspect/anchor adjustment. A wider CPU clip
+     * volume leaves crossing road overlays to the GE's coarse clipping. */
+    if (gfx_hud_anchor_enabled() && sHudViewportFullscreen) {
+        return x * sNdcAspectScale + sHudAnchorOffsetNdc * w;
+    }
+    return x;
+}
+
 static void gfx_update_screen_metrics(void) {
     const float width = (float)gfx_current_dimensions.width;
     const float height = gfx_current_dimensions.height != 0 ? (float)gfx_current_dimensions.height : 1.0f;
@@ -3930,13 +3944,33 @@ static void gfx_native_materialize(uint64_t mask);
 #define gfx_native_materialize(mask) ((void)0)
 #endif
 
+static bool gfx_lift_floor_decal(struct LoadedVertex* v, const float projection[4][4]) {
+    const float nx = v->normal[0], ny = v->normal[1], nz = v->normal[2];
+    const float lengthSq = nx * nx + ny * ny + nz * nz;
+    /* Terrain paths are upward-facing lit decals. A fixed one-world-unit
+     * separation covers the measured half-unit mesh rounding while avoiding
+     * a screen-depth offset that grows into several world units at distance. */
+    if (!(ny > 0.0f && ny * ny > 0.25f * lengthSq)) return false;
+    const float scale = 1.0f / sqrtf(lengthSq);
+    const float dx = nx * scale, dy = ny * scale, dz = nz * scale;
+    v->x += dx;
+    v->y += dy;
+    v->z += dz;
+    /* Update the CPU clip coordinates before clipping. GU projects the same
+     * displaced positions, so screen-edge intersections remain consistent. */
+    v->_x += dx * projection[0][0] + dy * projection[1][0] + dz * projection[2][0];
+    v->_y += dx * projection[0][1] + dy * projection[1][1] + dz * projection[2][1];
+    v->_z += dx * projection[0][2] + dy * projection[1][2] + dz * projection[2][2];
+    v->_w += dx * projection[0][3] + dy * projection[1][3] + dz * projection[2][3];
+    return true;
+}
+
 static bool gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *vertices) {
 #if !defined(TARGET_PSP)
     float temp_vec[4] __attribute__((aligned(16)));
     float model_vec[4] __attribute__((aligned(16)));
     float proj_vec[4] __attribute__((aligned(16)));
 #endif
-    const float hudAnchorOffsetNdc = sHudViewportFullscreen ? sHudAnchorOffsetNdc : 0.0f;
     const uint32_t geometryMode = rsp.geometry_mode;
     uint32_t lighting = 0;
 #if defined(TARGET_PSP)
@@ -3986,10 +4020,15 @@ static bool gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
         const Vtx_tn *vn = &vertices[i].n;
         struct LoadedVertex *d = &rsp.loaded_vertices[dest_index];
         d->lighting = lighting;
+        d->decal_lifted = 0;
 
 #if defined(TARGET_PSP)
+        if ((rdp.other_mode_l & ZMODE_DEC) == ZMODE_DEC &&
+            (geometryMode & G_LIGHTING) && !(geometryMode & G_TEXTURE_GEN)) {
+            d->decal_lifted = gfx_lift_floor_decal(d, rsp.P_matrix);
+        }
         float w = d->_w;
-        float x = gfx_adjust_x_for_aspect_ratio(d->_x);
+        float x = gfx_transform_clip_x(d->_x, w);
         const float y = d->_y;
         const float z = d->_z;
 #else
@@ -4002,14 +4041,10 @@ static bool gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
         gfx_transform_vec4(proj_vec, rsp.P_matrix, model_vec);
 
         float w = proj_vec[3];
-        float x = gfx_adjust_x_for_aspect_ratio(proj_vec[0]);
+        float x = gfx_transform_clip_x(proj_vec[0], w);
         const float y = proj_vec[1];
         const float z = proj_vec[2];
 #endif
-
-        if (hudAnchorOffsetNdc != 0.0f) {
-            x += hudAnchorOffsetNdc * w;
-        }
 
         short U = v->tc[0] * rsp.texture_scaling_factor.s >> 16;
         short V = v->tc[1] * rsp.texture_scaling_factor.t >> 16;
@@ -4311,6 +4346,12 @@ static void gfx_sp_triangles(uint32_t packed0, uint32_t packed1, uint8_t triangl
 
     if ((buf_vbo_num_tris + new_tri_count) > MAX_BUFFERED) {
         gfx_flush();
+    }
+
+    if (rendering_state.decal_mode) {
+        const unsigned int bias = v1->decal_lifted && v2->decal_lifted && v3->decal_lifted ? 2 : 32;
+        if (sBatchDepthBias != 0 && sBatchDepthBias != bias) gfx_flush();
+        sBatchDepthBias = bias;
     }
 
     size_t i;
@@ -5203,12 +5244,12 @@ static bool gfx_cc_is_two_cycle_texture_shade_prim_tint(uint32_t a0, uint32_t b0
            (c1 == G_CCMUX_COMBINED) && (d1 == G_CCMUX_PRIMITIVE);
 }
 
-static bool gfx_cc_is_two_cycle_texture_blend_mul_shade(uint32_t a0, uint32_t b0, uint32_t c0, uint32_t d0,
+static bool gfx_cc_is_two_cycle_texture_blend_mul_color(uint32_t a0, uint32_t b0, uint32_t c0, uint32_t d0,
                                                         uint32_t a1, uint32_t b1, uint32_t c1, uint32_t d1,
                                                         uint32_t mixSource) {
     return (a0 == G_CCMUX_TEXEL1) && (b0 == G_CCMUX_TEXEL0) && (c0 == mixSource) &&
            (d0 == G_CCMUX_TEXEL0) && (a1 == G_CCMUX_COMBINED) && (b1 == (G_CCMUX_0 & 0xF)) &&
-           (c1 == G_CCMUX_SHADE) && (d1 == (G_CCMUX_0 & 0x7));
+           ((c1 == G_CCMUX_SHADE) || (c1 == G_CCMUX_PRIMITIVE)) && (d1 == (G_CCMUX_0 & 0x7));
 }
 
 static bool gfx_cc_is_alpha_two_texture_blend(uint32_t a, uint32_t b, uint32_t c, uint32_t d,
@@ -5460,16 +5501,19 @@ static GFX_DL_HANDLER void gfx_dp_set_combine(uint32_t w0, uint32_t w1) {
         alphaComb = color_comb(G_ACMUX_0, G_ACMUX_0, G_ACMUX_0, G_ACMUX_PRIMITIVE);
     }
 
-    if (gfx_cc_is_two_cycle_texture_blend_mul_shade(rgbA0, rgbB0, rgbC0, rgbD0, rgbA1, rgbB1, rgbC1,
+    if (gfx_cc_is_two_cycle_texture_blend_mul_color(rgbA0, rgbB0, rgbC0, rgbD0, rgbA1, rgbB1, rgbC1,
                                                     rgbD1, G_CCMUX_ENV_ALPHA) ||
-        gfx_cc_is_two_cycle_texture_blend_mul_shade(rgbA0, rgbB0, rgbC0, rgbD0, rgbA1, rgbB1, rgbC1,
+        gfx_cc_is_two_cycle_texture_blend_mul_color(rgbA0, rgbB0, rgbC0, rgbD0, rgbA1, rgbB1, rgbC1,
                                                     rgbD1, G_CCMUX_LOD_FRACTION)) {
         twoTextureBlend = true;
         /* The PSP has no RDP LOD/tile combiner. OoT's fixed two-tile materials
          * program prim_lod_frac alongside LOD_FRACTION, so use that value as
          * the blend factor for the two GU passes. */
         twoTextureBlendUsesPrimLod = rgbC0 == G_CCMUX_LOD_FRACTION;
-        rgbComb = color_comb(G_CCMUX_TEXEL0, G_CCMUX_0, G_CCMUX_SHADE, G_CCMUX_0);
+        /* Temple of Time floors use both SHADE and PRIMITIVE variants of
+         * this crossfade. Preserve the multiplier instead of losing the
+         * second texture (or replacing its blue lighting with vertex RGB). */
+        rgbComb = color_comb(G_CCMUX_TEXEL0, G_CCMUX_0, rgbC1, G_CCMUX_0);
         if (gfx_cc_is_combined_mul_primitive(alphaA1, alphaB1, alphaC1, alphaD1)) {
             alphaComb = color_comb(G_ACMUX_0, G_ACMUX_0, G_ACMUX_0, G_ACMUX_PRIMITIVE);
         }
@@ -6780,6 +6824,7 @@ static void gfx_native_materialize(uint64_t mask) {
             d->v = (int16_t)((v->tc[1] * p->t) >> 16);
             memcpy(&d->color, v->cn, sizeof(d->color));
             d->lighting = 0;
+            d->decal_lifted = 0;
             d->clip_rej = 0;
             if (d->_x < -d->_w) d->clip_rej |= X_POS;
             if (d->_x > d->_w) d->clip_rej |= X_NEG;
@@ -6872,7 +6917,7 @@ static bool gfx_native_visible(const struct NativeMesh* mesh) {
         gfx_transform_vec4(model, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], v);
         gfx_transform_vec4(clip, rsp.P_matrix, model);
         const float w = clip[3];
-        if (!(w > 0.001f && fabsf(clip[0]) < w && fabsf(clip[0] * sNdcAspectScale) < w &&
+        if (!(w > 0.001f && fabsf(clip[0]) < w &&
               fabsf(clip[1]) < w && fabsf(clip[2]) < w)) return false;
     }
     return true;
@@ -6884,6 +6929,7 @@ static GFX_DL_HANDLER bool gfx_native_try(Gfx** cursor) {
     /* Cheap rejection before touching the ordinary state preparer. */
     if (rdp.combine_color_mul_env || rdp.combine_color_mul_prim || rdp.combine_alpha_mul_env ||
         rdp.combine_two_texture_blend || rdp.combine_flame_texture_atlas ||
+        (rdp.other_mode_l & ZMODE_DEC) == ZMODE_DEC ||
         (rdp.other_mode_l >> 30) == G_BL_CLR_FOG) return false;
     gfx_prepare_tri_pipeline_state();
     const struct TriPipelineState* state = &rendering_state.tri_pipeline;
@@ -6961,7 +7007,7 @@ static GFX_DL_HANDLER bool gfx_native_try(Gfx** cursor) {
         mesh->pending_groups++;
         memcpy(p->model, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], sizeof(p->model));
         memcpy(p->projection, rsp.P_matrix, sizeof(p->projection));
-        p->aspect = sNdcAspectScale;
+        p->aspect = 1.0f; /* Native meshes use the unadjusted world projection. */
         p->s = rsp.texture_scaling_factor.s;
         p->t = rsp.texture_scaling_factor.t;
         break;

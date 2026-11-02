@@ -44,6 +44,7 @@ static psp_uv_t buf_vbo_tex1[12];
 static uint8_t buf_vbo_fog_tex1_alpha[12];
 static size_t buf_vbo_len,buf_num_vert,buf_vbo_num_tris;
 static bool sBatchHasVisibleFog;
+static unsigned int sBatchDepthBias;
 struct ColorCombiner { int active_texture; } comb;
 struct TriPipelineState {
     bool used_textures[2];
@@ -57,8 +58,9 @@ static struct { struct TriPipelineState tri_pipeline; struct Texture* textures[2
 static struct { struct RGBA fog_color,env_color; uint8_t prim_lod_frac; } rdp;
 static unsigned sTextureCacheFrameSerial=1;
 struct LoadedVertex { float x,y,z; uint8_t fog_alpha; };
-typedef struct { unsigned baseCalls,fogCalls,baseHash,fogHash,visibleFogCalls; } Trace;
+typedef struct { unsigned baseCalls,fogCalls,baseHash,fogHash,visibleFogCalls,baseBias,fogBias; } Trace;
 static Trace trace;
+static unsigned appliedDepthBias;
 static unsigned hash(const void* buffer,size_t size) {
     unsigned h=2166136261U;
     const uint8_t* bytes=buffer;
@@ -67,6 +69,7 @@ static unsigned hash(const void* buffer,size_t size) {
 }
 static void base(float* buffer,size_t bytes,size_t tris) {
     assert(tris==3); trace.baseCalls++; trace.baseHash=trace.baseHash*31+hash(buffer,bytes);
+    trace.baseBias=appliedDepthBias;
 }
 static void fog(float* buffer,size_t bytes,size_t tris,bool textured,bool restore) {
     (void)restore; assert(tris==3);
@@ -74,13 +77,16 @@ static void fog(float* buffer,size_t bytes,size_t tris,bool textured,bool restor
     for (unsigned i=0;i<9;i++) alpha+=textured ? ((psp_fog_textured_t*)buffer)[i].color.a :
                                                ((psp_fog_color_t*)buffer)[i].color.a;
     trace.fogCalls++;
+    trace.fogBias=appliedDepthBias;
     if (alpha) { trace.visibleFogCalls++; trace.fogHash=trace.fogHash*31+hash(buffer,bytes); }
 }
 static void set_alpha(bool b) { (void)b; }
 static void select_texture(int slot,unsigned id) { (void)slot;(void)id; }
+static void set_depth_bias(unsigned int bias) { appliedDepthBias=bias; }
 static struct { void (*draw_triangles)(float*,size_t,size_t); void (*set_use_alpha)(bool);
-    void (*select_texture)(int,unsigned); void (*draw_fog_triangles)(float*,size_t,size_t,bool,bool); }
-    api={base,set_alpha,select_texture,fog},*gfx_rapi=&api;
+    void (*select_texture)(int,unsigned); void (*draw_fog_triangles)(float*,size_t,size_t,bool,bool);
+    void (*set_depth_bias)(unsigned int); }
+    api={base,set_alpha,select_texture,fog,set_depth_bias},*gfx_rapi=&api;
 '''
 common = function("gfx_color_mul_channel") + function("gfx_two_texture_blend_pass_alphas")
 common += "static void emit(struct LoadedVertex* vertex,uint8_t surfaceAlpha) {\n"
@@ -98,6 +104,7 @@ static void prepare(unsigned mode,uint8_t alpha,uint8_t mix,bool mixed,bool tran
     rdp.fog_color=(struct RGBA){42,85,128,255}; rdp.env_color.a=mix; rdp.prim_lod_frac=mix;
     memset(buf_vbo,0,sizeof(buf_vbo)); memset(&buf_vbo_fog,0,sizeof(buf_vbo_fog));
     sBatchHasVisibleFog=false;
+    sBatchDepthBias=0;
     for (unsigned i=0;i<9;i++) {
         buf_num_vert=i;
         buf_vbo[i]=(psp_fast_t){i,i,{200,150,100,255},{0,0,0},i,i,i};
@@ -128,6 +135,11 @@ int main(void) {
     // One regular clear batch produces only the base draw; visible fog retains both.
     prepare(1,0,0,false,false); gfx_flush(); assert(trace.baseCalls==1 && trace.fogCalls==0);
     prepare(1,1,0,false,false); gfx_flush(); assert(trace.baseCalls==1 && trace.fogCalls==1);
+    // A decal's base and fog must compare at exactly the same biased depth.
+    prepare(3,100,128,false,false);sBatchDepthBias=120;gfx_flush();
+    assert(trace.baseBias==120 && trace.fogBias==120 && sBatchDepthBias==0);
+    prepare(1,100,0,false,false);gfx_flush();
+    assert(trace.baseBias==0 && trace.fogBias==0); // No bias leaks into normal geometry.
     prepare(1,0,0,false,false); gfx_flush(); assert(trace.fogCalls==0);
     printf("Fog batches: %u comparisons passed; visible fog passes and base geometry unchanged\n",tests);
     puts("Zero-opacity fog batch: GPU draw submissions 2 -> 1");

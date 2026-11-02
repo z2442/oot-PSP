@@ -57,6 +57,9 @@ texture_alpha = section(backend, "static bool gfx_scegu_shader_uses_texture_alph
 vertex_color = section(source, "static inline struct RGBA gfx_get_vertex_color(",
                        "static inline uint8_t gfx_color_mul_channel(")
 prim_color = section(source, "static void gfx_dp_set_prim_color(", "static void gfx_dp_set_fog_color(")
+alpha_start = re.search(r"^static inline .*?void gfx_two_texture_blend_pass_alphas\([^;]*?\)\s*\{",
+                        source, re.M).start()
+pass_alphas = source[alpha_start:source.index("\n}", alpha_start) + 2]
 tests = r'''
 int main(void) {
     rdp.other_mode_h=G_CYC_2CYCLE;
@@ -123,13 +126,39 @@ int main(void) {
     assert(shadeTint.opt_texture_blend && shadeTint.opt_texture_blend_shade && !shadeTint.opt_texture_add);
     gfx_dp_set_combine(0xfc61ffff,0xfffcf239); // Different second-cycle alpha cannot use the bomb fallback.
     assert((rdp.combine_mode&SHADER_OPT_TEXTURE_ADD)!=SHADER_OPT_TEXTURE_ADD);
-    puts("Odd Mushroom/Potion: GU reflection/tint and solid shells; bombs: additive red pulse and texture alpha passed");
+    // Temple of Time floor lists use identical texture crossfades with
+    // either PRIMITIVE or SHADE as their final color multiplier. The former
+    // was dropped, leaving sections of the blue floor transition unlit.
+    for (unsigned shade=0;shade<2;shade++) {
+        gfx_dp_set_combine(shade ? 0xfc267e04 : 0xfc267e03,0x1ffcfdf8);
+        assert(rdp.combine_two_texture_blend && !rdp.combine_two_texture_blend_uses_prim_lod);
+        assert(!rdp.combine_two_texture_alpha_blend && !rdp.combine_arrow_glow);
+        struct ColorCombiner floor;gfx_generate_cc(&floor,rdp.combine_mode & ~0xfff000U);
+        assert(floor.vertex_color_source[0]==(shade ? CC_SHADE : CC_PRIM));
+        assert(!shader.cc.opt_texture_add && !floor.texture_blend);
+        rdp.prim_color=(struct RGBA){82,110,150,255};
+        for (unsigned phase=0;phase<256;phase++) {
+            uint8_t base,overlay;
+            gfx_two_texture_blend_pass_alphas(255,phase,false,false,&base,&overlay);
+            assert(base==(phase==255 ? 0 : 255) && overlay==phase);
+            const unsigned day[3]={200,190,175},blue[3]={60,100,180};
+            struct RGBA color=gfx_get_vertex_color(&floor,false,&white_color,0,true);
+            for (unsigned c=0;c<3;c++) {
+                unsigned tint=((uint8_t*)&color)[c];
+                unsigned t0=(day[c]*tint+127)/255,t1=(blue[c]*tint+127)/255;
+                unsigned rendered=(t0*(255-overlay)+t1*overlay+127)/255;
+                if (!phase) assert(rendered==t0);
+                if (phase==255) assert(rendered==t1); // All sections reach their blue texture.
+            }
+        }
+    }
+    puts("Item materials, bomb red pulses and both Temple of Time floor crossfade variants passed");
 }
 '''
 with tempfile.TemporaryDirectory(prefix="oot-get-item-materials-") as directory:
     path = Path(directory)
     (path / "test.c").write_text(preamble + combiner + generate + decode + texture_mode +
-                                  texture_alpha + vertex_color + prim_color + tests)
+                                  texture_alpha + vertex_color + prim_color + pass_alphas + tests)
     subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
                     "-I", str(ROOT / "src/port/psp/gfx"), str(path / "test.c"),
                     str(ROOT / "src/port/psp/gfx/gfx_cc.c"), "-o", str(path / "test")], check=True)
