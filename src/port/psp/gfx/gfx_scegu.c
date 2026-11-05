@@ -232,6 +232,8 @@ static size_t getStaticVramBytesRemaining(void) {
 #include "gfx_psp_lighting.h"
 #include "oot_port_macros.h"
 
+static void gfx_scegu_invalidate_lighting(void);
+
 enum MixType {
     SH_MT_NONE,
     SH_MT_TEXTURE,
@@ -851,7 +853,7 @@ static void gfx_scegu_prepare_home_menu_draw(void) {
     sceGuDisable(GU_DEPTH_TEST);
     sceGuDisable(GU_ALPHA_TEST);
     sceGuDisable(GU_FOG);
-    sceGuDisable(GU_LIGHTING);
+    gfx_scegu_set_lighting(NULL);
     sceGuDisable(GU_CULL_FACE);
     sceGuEnable(GU_BLEND);
     sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
@@ -1732,34 +1734,63 @@ static void gfx_scegu_set_use_alpha(bool use_alpha) {
 
 #include "gfx_psp_shadow.inc.c"
 
+/* Material batches and fog passes change the lighting enable bit much more
+ * often than the lights themselves. Disabling lighting retains GE registers. */
+static struct GfxPspLighting sAppliedLighting;
+static bool sAppliedLightingValid;
+static int sAppliedLightingEnabled = -1;
+
+static void gfx_scegu_invalidate_lighting(void) {
+    sAppliedLightingValid = false;
+    sAppliedLightingEnabled = -1;
+}
+
 void gfx_scegu_set_lighting(const struct GfxPspLighting* lighting) {
     if (lighting == NULL) {
-        sceGuDisable(GU_LIGHTING);
+        if (sAppliedLightingEnabled != 0) {
+            sceGuDisable(GU_LIGHTING);
+            sAppliedLightingEnabled = 0;
+        }
         return;
     }
 
-    sceGuEnable(GU_LIGHTING);
-    sceGuLightMode(GU_SINGLE_COLOR);
-    /* Ambient material alpha tracks the per-vertex surface/pass alpha.
-     * The global ambient alpha must stay opaque, independent of its RGB. */
-    sceGuColorMaterial(GU_AMBIENT | GU_DIFFUSE);
-    sceGuModelColor(0, 0xffffffffU, 0xffffffffU, 0);
-    sceGuAmbient(lighting->ambient | 0xff000000U);
+    if (sAppliedLightingEnabled != 1) {
+        sceGuEnable(GU_LIGHTING);
+        sAppliedLightingEnabled = 1;
+    }
+    if (!sAppliedLightingValid) {
+        sceGuLightMode(GU_SINGLE_COLOR);
+        /* Ambient material alpha tracks the per-vertex surface/pass alpha.
+         * The global ambient alpha must stay opaque, independent of its RGB. */
+        sceGuColorMaterial(GU_AMBIENT | GU_DIFFUSE);
+        sceGuModelColor(0, 0xffffffffU, 0xffffffffU, 0);
+    }
+    if (!sAppliedLightingValid || sAppliedLighting.ambient != lighting->ambient) {
+        sceGuAmbient(lighting->ambient | 0xff000000U);
+    }
     for (uint32_t i = 0; i < GFX_PSP_MAX_LIGHTS; i++) {
         if (i < lighting->count) {
             const struct GfxPspDirectionalLight* light = &lighting->lights[i];
-            const ScePspFVector3 direction = {
-                light->direction[0], light->direction[1], light->direction[2]
-            };
-            sceGuLight(i, GU_DIRECTIONAL, GU_AMBIENT_AND_DIFFUSE, &direction);
-            sceGuLightColor(i, GU_AMBIENT, 0);
-            sceGuLightColor(i, GU_DIFFUSE, light->color);
-            sceGuLightColor(i, GU_SPECULAR, 0);
-            sceGuEnable(GU_LIGHT0 + i);
-        } else {
+            const struct GfxPspDirectionalLight* applied = &sAppliedLighting.lights[i];
+            const bool newLight = !sAppliedLightingValid || i >= sAppliedLighting.count;
+            if (newLight || memcmp(applied->direction, light->direction, sizeof(light->direction)) != 0) {
+                const ScePspFVector3 direction = {
+                    light->direction[0], light->direction[1], light->direction[2]
+                };
+                sceGuLight(i, GU_DIRECTIONAL, GU_AMBIENT_AND_DIFFUSE, &direction);
+            }
+            if (newLight) {
+                sceGuLightColor(i, GU_AMBIENT, 0);
+                sceGuLightColor(i, GU_SPECULAR, 0);
+            }
+            if (newLight || applied->color != light->color) sceGuLightColor(i, GU_DIFFUSE, light->color);
+            if (newLight) sceGuEnable(GU_LIGHT0 + i);
+        } else if (!sAppliedLightingValid || i < sAppliedLighting.count) {
             sceGuDisable(GU_LIGHT0 + i);
         }
     }
+    sAppliedLighting = *lighting;
+    sAppliedLightingValid = true;
 }
 
 static void gfx_scegu_draw_triangles(float buf_vbo[], UNUSED size_t buf_vbo_len, size_t buf_vbo_num_tris) {
@@ -1975,6 +2006,7 @@ static void gfx_scegu_configure_gu_buffers(void) {
 }
 
 static void gfx_scegu_invalidate_mode_state(void) {
+    gfx_scegu_invalidate_lighting();
     sAppliedDepthBias = ~0U;
     sPauseBgCaptureRequested = false;
     sPauseBgCaptured = false;
@@ -2177,6 +2209,7 @@ static void gfx_scegu_start_frame(void) {
     bool hasStaticBackground;
 
     OotPspVideoThread_Wait();
+    gfx_scegu_invalidate_lighting();
 
     /* GU state can be changed by intraFont and other callback rendering between
      * game frames. Revalidate once per frame, then suppress redundant texture

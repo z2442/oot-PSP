@@ -44,7 +44,11 @@ static uint8_t buf_vbo_fog_tex1_alpha[32];
 static union { psp_fog_color_t color[32];psp_fog_textured_t textured[32]; } buf_vbo_fog;
 static size_t buf_num_vert,buf_vbo_len;
 static bool sBatchHasVisibleFog;
-static struct { struct RGBA prim_color,env_color,fog_color;uint8_t prim_lod_frac; } rdp;
+static struct { struct RGBA prim_color,env_color,fog_color;uint8_t prim_lod_frac;
+    bool combine_color_mul_env,combine_color_mul_prim,combine_alpha_mul_env,
+         combine_texture_tint_uses_prim_lod,combine_texture_tint_uses_env_alpha; } rdp;
+static bool pipelineDirty;
+static void gfx_mark_tri_pipeline_dirty(void) { pipelineDirty=true; }
 struct TriPipelineState {
     struct ColorCombiner* comb;
     float tex_u_scale[2],tex_v_scale[2],tex_u_bias[2],tex_v_bias[2];
@@ -57,7 +61,8 @@ struct TriPipelineState {
 common = ''.join(function(name) for name in ('gfx_get_vertex_color','gfx_color_mul_channel',
     'gfx_arrow_shimmer_alpha','gfx_color_mul_env','gfx_color_mul_prim',
     'gfx_two_texture_blend_pass_alphas','gfx_get_vertex_rgba'))
-helpers = function('gfx_emit_simple_base_vertex')+function('gfx_emit_simple_vertices')
+helpers = function('gfx_prepare_color_multipliers')+function('gfx_dp_set_env_color')
+helpers += function('gfx_emit_simple_base_vertex')+function('gfx_emit_simple_vertices')
 start = source.index('    size_t i;\n    for (i = 0; i < clipped_vertices_num; i++) {',
                      source.index('static void gfx_sp_triangles('))
 loop = source[start:source.index('    buf_vbo_num_tris += new_tri_count;',start)]
@@ -82,6 +87,23 @@ int main(void) {
     struct LoadedVertex input[21],*vertices[21];
     psp_fast_t expected[32]; unsigned char expectedFog[sizeof(buf_vbo_fog)];
     struct ColorCombiner comb={{CC_SHADE,CC_SHADE}};
+    // Environment factors are baked into the prepared flags now. White ->
+    // tinted -> white transitions must invalidate state without a new combiner.
+    struct TriPipelineState colorState={0};
+    rdp.combine_color_mul_env=rdp.combine_alpha_mul_env=true;
+    gfx_dp_set_env_color(255,255,255,255);
+    assert(pipelineDirty);pipelineDirty=false;
+    gfx_prepare_color_multipliers(&colorState);
+    assert(!colorState.color_mul_env && !colorState.alpha_mul_env);
+    gfx_dp_set_env_color(90,0,140,127);
+    assert(pipelineDirty);pipelineDirty=false;
+    gfx_prepare_color_multipliers(&colorState);
+    assert(colorState.color_mul_env && colorState.alpha_mul_env);
+    gfx_dp_set_env_color(255,255,255,255);
+    assert(pipelineDirty);pipelineDirty=false;
+    gfx_prepare_color_multipliers(&colorState);
+    assert(!colorState.color_mul_env && !colorState.alpha_mul_env);
+    gfx_dp_set_env_color(255,255,255,255);assert(!pipelineDirty);
     for (unsigned iteration=0;iteration<100000;iteration++) {
         size_t count=3*(1+iteration%7),prefix=3*(iteration%3);
         bool priorFog=(iteration%11)==0;
@@ -125,6 +147,40 @@ int main(void) {
         assert(buf_num_vert==prefix && buf_vbo_len==prefix*sizeof(psp_fast_t));
         assert(sBatchHasVisibleFog==priorFog);
         comb.vertex_color_source[0]=CC_SHADE;
+    }
+    // Compare the original material flags against the prepared flags through
+    // actual vertex output. White factors must unlock the shade loop without
+    // changing RGB, alpha, UVs, normals or either fog stream.
+    comb.vertex_color_source[0]=comb.vertex_color_source[1]=CC_SHADE;
+    for (unsigned iteration=0;iteration<10000;iteration++) {
+        size_t count=3*(1+iteration%7);
+        struct TriPipelineState state={.comb=&comb,.use_alpha=(iteration&1)!=0,
+            .use_texture=(iteration&2)!=0,.use_fog=(iteration&4)!=0,
+            .fog_uses_texture_alpha=(iteration&8)!=0,
+            .color_mul_env=true,.color_mul_prim=true,.alpha_mul_env=true,
+            .tex_u_scale={0.25f},.tex_v_scale={0.5f},.tex_u_bias={0.1f},.tex_v_bias={-0.5f}};
+        rdp.combine_color_mul_env=rdp.combine_color_mul_prim=rdp.combine_alpha_mul_env=true;
+        rdp.env_color=(iteration&16) ? (struct RGBA){255,255,255,255} :
+                                      (struct RGBA){next(),next(),next(),next()};
+        rdp.prim_color=(iteration&32) ? (struct RGBA){255,255,255,255} :
+                                       (struct RGBA){next(),next(),next(),next()};
+        for (size_t i=0;i<count;i++) {
+            input[i]=(struct LoadedVertex){.x=value(),.y=value(),.z=value(),.w=value(),
+                .u=value(),.v=value(),.normal={value(),value(),value()},
+                .color={next(),next(),next(),next()},.fog_alpha=next()};
+            vertices[i]=&input[i];
+        }
+        clear(0,false);reference_emit(vertices,count,&state);
+        memcpy(expected,buf_vbo,sizeof(expected));memcpy(expectedFog,&buf_vbo_fog,sizeof(expectedFog));
+        bool expectedVisible=sBatchHasVisibleFog;
+        gfx_prepare_color_multipliers(&state);
+        clear(0,false);
+        bool simple=gfx_emit_simple_vertices(vertices,count,&state);
+        if (!simple) reference_emit(vertices,count,&state);
+        if ((iteration&48)==48) assert(simple);
+        assert(memcmp(expected,buf_vbo,sizeof(expected))==0);
+        assert(memcmp(expectedFog,&buf_vbo_fog,sizeof(expectedFog))==0);
+        assert(sBatchHasVisibleFog==expectedVisible && buf_num_vert==count);
     }
     puts("Triangle output: 100000 shade/UV/fog equivalence cases, clipped polygons and material fallback passed");
 }

@@ -34,6 +34,9 @@ the former 2 MiB list. UI and shadow inline data remain uncached.
 Shade-only materials use a separate output loop. It selects textured/untextured
 output outside the vertex loop, copies the shade color directly, emits the
 appropriate fog stream separately, and updates batch counters once per polygon.
+White RGB multipliers and fully opaque alpha multipliers are removed when
+preparing material state, so these exact identities do not force character
+surfaces through the general output loop.
 Multipass materials, color tints, environment/primitive multiplication, LOD color
 and independent alpha sources continue through the general emitter. Clipping,
 winding, lighting, triangle order and animation timing are unchanged.
@@ -45,7 +48,9 @@ winding, lighting, triangle order and animation timing are unchanged.
   cache-line alignment, immutable multipass uploads and fenced rollover.
 - `tools/tests/test_psp_triangle_output.py` compares 100,000 randomized output
   cases byte-for-byte with the general emitter, including clipped polygons,
-  texture coordinates, surface alpha and both fog vertex formats.
+  texture coordinates, surface alpha and both fog vertex formats. Another
+  10,000 material cases compare output before and after removing identity
+  multipliers, including non-white tints that must retain their multiplication.
 - The existing PSP rendering and frame-pacing tests cover the surrounding paths.
 
 For a synthetic workload of 120 small uploaded draws, the old allocation/draw

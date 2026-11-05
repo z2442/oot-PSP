@@ -51,20 +51,23 @@ enum { GU_LIGHTING,GU_LIGHT0=11,GU_DIRECTIONAL=20,GU_AMBIENT_AND_DIFFUSE,
 typedef struct { float x,y,z; } ScePspFVector3;
 static bool enabled[32];
 static unsigned colors[4][8],ambient,material,mode;
+static unsigned guCalls,directionWrites,colorWrites,ambientWrites;
 static ScePspFVector3 directions[4];
-static void sceGuEnable(unsigned state) { enabled[state]=true; }
-static void sceGuDisable(unsigned state) { enabled[state]=false; }
-static void sceGuLightMode(unsigned value) { mode=value; }
-static void sceGuColorMaterial(unsigned value) { material=value; }
+static void sceGuEnable(unsigned state) { guCalls++;enabled[state]=true; }
+static void sceGuDisable(unsigned state) { guCalls++;enabled[state]=false; }
+static void sceGuLightMode(unsigned value) { guCalls++;mode=value; }
+static void sceGuColorMaterial(unsigned value) { guCalls++;material=value; }
 static void sceGuModelColor(unsigned e,unsigned a,unsigned d,unsigned s) {
+    guCalls++;
     assert(e==0 && a==0xffffffffU && d==0xffffffffU && s==0);
 }
-static void sceGuAmbient(unsigned value) { ambient=value; }
+static void sceGuAmbient(unsigned value) { guCalls++;ambientWrites++;ambient=value; }
 static void sceGuLight(unsigned i,unsigned type,unsigned components,const ScePspFVector3* direction) {
     assert(i<4 && type==GU_DIRECTIONAL && components==GU_AMBIENT_AND_DIFFUSE);
+    guCalls++;directionWrites++;
     directions[i]=*direction;
 }
-static void sceGuLightColor(unsigned i,unsigned component,unsigned color) { colors[i][component]=color; }
+static void sceGuLightColor(unsigned i,unsigned component,unsigned color) { guCalls++;colorWrites++;colors[i][component]=color; }
 '''
 tests = r'''
 static void prepare_batch(struct LoadedVertex* v1,struct LoadedVertex* v2,struct LoadedVertex* v3,
@@ -148,11 +151,81 @@ int main(void) {
         assert(enabled[GU_LIGHT0+i] && colors[i][GU_DIFFUSE]==state.lights[i].color);
         assert(colors[i][GU_AMBIENT]==0 && colors[i][GU_SPECULAR]==0);
     }
+    // A character's consecutive material batches must not rebuild identical
+    // light registers. Separate structs with equal values also reuse them.
+    unsigned calls=guCalls,lightWrites=directionWrites;
+    for (unsigned i=0;i<44;i++) {
+        struct GfxPspLighting same=state;
+        gfx_scegu_set_lighting(&same);
+    }
+    assert(guCalls==calls && directionWrites==lightWrites);
+    // Fog/UI disable lighting without clearing its registers. Re-enabling
+    // the same set emits only the enable bit, even with frequent alternation.
+    for (unsigned i=0;i<44;i++) {
+        gfx_scegu_set_lighting(NULL);
+        gfx_scegu_set_lighting(NULL);
+        gfx_scegu_set_lighting(&state);
+    }
+    assert(guCalls==calls+88 && directionWrites==lightWrites);
+    struct GfxPspLighting changed=state;
+    calls=guCalls;
+    unsigned ambientBefore=ambientWrites;
+    changed.ambient^=1;
+    gfx_scegu_set_lighting(&changed);
+    assert(guCalls==calls+1 && ambientWrites==ambientBefore+1);
+    calls=guCalls;
+    unsigned colorBefore=colorWrites;
+    changed.lights[1].color^=1;
+    gfx_scegu_set_lighting(&changed);
+    assert(guCalls==calls+1 && colorWrites==colorBefore+1);
+    calls=guCalls;
+    changed.lights[1].direction[0]+=1;
+    gfx_scegu_set_lighting(&changed);
+    assert(guCalls==calls+1 && directionWrites==lightWrites+1);
     gfx_scegu_set_lighting(&ambientOnly);
     assert(enabled[GU_LIGHTING]);
     for (unsigned i=0;i<4;i++) assert(!enabled[GU_LIGHT0+i]);
     gfx_scegu_set_lighting(NULL);
     assert(!enabled[GU_LIGHTING]);
+    // A previously inactive slot may contain foreign state. Activating it
+    // must establish all of its light registers, not just diffuse RGB.
+    colors[2][GU_AMBIENT]=colors[2][GU_SPECULAR]=0xff;
+    gfx_scegu_set_lighting(&state);
+    assert(colors[2][GU_AMBIENT]==0 && colors[2][GU_SPECULAR]==0);
+    // Callbacks/route changes invalidate the cache. Force a complete rebuild
+    // after external code changes light registers and the enable bit.
+    enabled[GU_LIGHTING]=false;
+    colors[0][GU_DIFFUSE]=0;
+    directions[0]=(ScePspFVector3){0};
+    gfx_scegu_invalidate_lighting();
+    gfx_scegu_set_lighting(&state);
+    assert(enabled[GU_LIGHTING] && colors[0][GU_DIFFUSE]==state.lights[0].color);
+    assert(memcmp(&directions[0],state.lights[0].direction,sizeof(directions[0]))==0);
+    // Exercise light-count growth/shrinkage, mutable caller storage, fog
+    // toggles and invalidation across many different actor light sets.
+    uint32_t rng=1;
+    for (unsigned trial=0;trial<10000;trial++) {
+        rng=rng*1664525+1013904223;
+        changed.count=rng%5;
+        changed.ambient=rng;
+        for (unsigned i=0;i<4;i++) {
+            changed.lights[i].color=rng^(i*12345);
+            for (unsigned axis=0;axis<3;axis++) changed.lights[i].direction[axis]=(int8_t)(rng>>(axis*8+i));
+        }
+        if (trial%7==0) gfx_scegu_set_lighting(NULL);
+        if (trial%13==0) gfx_scegu_invalidate_lighting();
+        gfx_scegu_set_lighting(&changed);
+        assert(enabled[GU_LIGHTING] && ambient==(changed.ambient|0xff000000U));
+        assert(material==(GU_AMBIENT|GU_DIFFUSE) && mode==GU_SINGLE_COLOR);
+        for (unsigned i=0;i<4;i++) {
+            assert(enabled[GU_LIGHT0+i]==(i<changed.count));
+            if (i>=changed.count) continue;
+            assert(colors[i][GU_AMBIENT]==0 && colors[i][GU_SPECULAR]==0);
+            assert(colors[i][GU_DIFFUSE]==changed.lights[i].color);
+            assert(memcmp(&directions[i],changed.lights[i].direction,sizeof(directions[i]))==0);
+        }
+        calls=guCalls;gfx_scegu_set_lighting(&changed);assert(guCalls==calls);
+    }
     // Clipped normals interpolate independently from alpha; snapshot stays an integer ID.
     struct LoadedVertex a={.color={10,20,30,80},.fog_alpha=0,.normal={1,0,0},.lighting=17};
     struct LoadedVertex b={.color={30,40,50,160},.fog_alpha=200,.normal={0,1,0},.lighting=17},out;
@@ -163,7 +236,9 @@ int main(void) {
 }
 '''
 code = preamble + function(source, "gfx_clamp_num_lights") + function(source, "gfx_capture_lighting")
-code += function(source, "gfx_clip_interpolate_vert") + function(backend, "gfx_scegu_set_lighting") + tests
+lighting = backend[backend.index("/* Material batches and fog passes"):
+                   backend.index("static void gfx_scegu_draw_triangles(")]
+code += function(source, "gfx_clip_interpolate_vert") + lighting + tests
 with tempfile.TemporaryDirectory(prefix="oot-gpu-lighting-") as directory:
     cfile = Path(directory) / "test.c"
     binary = Path(directory) / "test"

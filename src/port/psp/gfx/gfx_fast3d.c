@@ -3273,6 +3273,17 @@ static void gfx_prepare_flame_atlas_coord_state(struct TriPipelineState* state) 
 }
 #endif
 
+static inline void gfx_prepare_color_multipliers(struct TriPipelineState* state) {
+    /* White material factors are exact identities. Keeping these flags set
+     * makes ordinary character skin/hair use the general per-vertex combiner
+     * instead of the shade-copy loop, even though the tint changes nothing. */
+    state->color_mul_env = rdp.combine_color_mul_env &&
+        (rdp.env_color.r != 255 || rdp.env_color.g != 255 || rdp.env_color.b != 255);
+    state->color_mul_prim = rdp.combine_color_mul_prim &&
+        (rdp.prim_color.r != 255 || rdp.prim_color.g != 255 || rdp.prim_color.b != 255);
+    state->alpha_mul_env = rdp.combine_alpha_mul_env && rdp.env_color.a != 255;
+}
+
 static void gfx_prepare_tri_pipeline_state(void) {
     if (!rendering_state.tri_pipeline_dirty) {
         return;
@@ -3511,9 +3522,7 @@ static void gfx_prepare_tri_pipeline_state(void) {
     state->texture_tint_colors_corrected = textureTintColorsCorrected;
     state->two_texture_uncompensated_alpha = twoTextureUncompensatedAlpha;
     state->texture_tint_env_color = textureTintEnvColor;
-    state->color_mul_env = rdp.combine_color_mul_env;
-    state->color_mul_prim = rdp.combine_color_mul_prim;
-    state->alpha_mul_env = rdp.combine_alpha_mul_env;
+    gfx_prepare_color_multipliers(state);
     for (int i = 0; i < 2; i++) {
         state->tex_u_scale[i] = 0.0f;
         state->tex_v_scale[i] = 0.0f;
@@ -5805,7 +5814,8 @@ static void gfx_dp_set_env_color(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     rdp.env_color.g = g;
     rdp.env_color.b = b;
     rdp.env_color.a = a;
-    if (rdp.combine_texture_tint_uses_prim_lod || rdp.combine_texture_tint_uses_env_alpha) {
+    if (rdp.combine_texture_tint_uses_prim_lod || rdp.combine_texture_tint_uses_env_alpha ||
+        rdp.combine_color_mul_env || rdp.combine_alpha_mul_env) {
         gfx_mark_tri_pipeline_dirty();
     }
 }

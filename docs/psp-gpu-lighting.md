@@ -21,6 +21,12 @@ fog alpha independently. A saved light set stays attached to each loaded vertex,
 and changing batch lighting flushes queued geometry before updating GE state.
 Snapshots and ranking are reused until a light command changes the light set.
 
+The GU backend also retains the applied lighting registers across material
+batches. Equal light sets emit no repeated setup commands; fog and UI passes
+toggle lighting without discarding those registers. Changes update only the
+affected ambient value, light direction, color or enable bit. Frame boundaries
+and video mode changes invalidate this cache for callback/SDK rendering.
+
 Vertex RGB supplies the GE ambient/diffuse material tint, and vertex alpha
 continues to supply surface opacity and two-texture pass weights. Fog overlays,
 HUD rectangles and unlit native meshes explicitly disable GE lighting.
@@ -62,7 +68,8 @@ python3 tools/tests/test_psp_zero_fog.py
 ```
 
 The lighting test exercises the actual selection, snapshot, batch and GU setup
-functions with sanitizers. The assembly test interprets the actual transform and
+functions with sanitizers, including repeated material/fog transitions and
+10,000 changing light sets. The assembly test interprets the actual transform and
 clipping instructions, including limb normals, vertex stride, alpha and fog.
 Neither replaces a PSP visual/performance check. Check Link's animated joints,
 torch/fairy lighting with more than four nearby lights, reflective equipment,
