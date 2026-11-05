@@ -29,6 +29,7 @@
 #include "gfx_screen_config.h"
 #if defined(TARGET_PSP)
 #include "buffers.h"
+#include "oot_psp_frame_interpolation.h"
 #endif
 #include "oot_port_macros.h"
 #include "oot_psp_asset_loader.h"
@@ -3831,6 +3832,9 @@ static GFX_DL_HANDLER void gfx_sp_matrix(uint8_t parameters, const int32_t *addr
     memcpy(matrix, addr, sizeof(matrix));
 #endif
 
+#if defined(TARGET_PSP)
+    OotPspFrameInterpolation_Resolve(addr, matrix);
+#endif
     if (parameters & G_MTX_PROJECTION) {
         /*
          * Pending vertices still use the projection currently installed in the
@@ -4197,6 +4201,84 @@ static inline __attribute__((always_inline)) float gfx_triangle_cross_homogeneou
 #define GFX_TRI_INDEX_DIVISOR 10
 #endif
 
+static inline __attribute__((always_inline)) void gfx_emit_simple_base_vertex(
+    psp_fast_t* out, const struct LoadedVertex* vertex, bool textured,
+    float uScale, float vScale, float uBias, float vBias) {
+    out->u = textured ? vertex->u * uScale + uBias : 0.0f;
+    out->v = textured ? vertex->v * vScale + vBias : 0.0f;
+    out->color = vertex->color;
+    memcpy(out->normal, vertex->normal, sizeof(out->normal));
+    out->x = vertex->x;
+    out->y = vertex->y;
+    out->z = vertex->z;
+}
+
+static bool gfx_emit_simple_vertices(struct LoadedVertex* const* vertices, size_t count,
+                                     const struct TriPipelineState* state) {
+    const struct ColorCombiner* comb = state->comb;
+    psp_fast_t* output;
+    const float uScale = state->tex_u_scale[0], vScale = state->tex_v_scale[0];
+    const float uBias = state->tex_u_bias[0], vBias = state->tex_v_bias[0];
+
+    if (comb->vertex_color_source[0] != CC_SHADE ||
+        (state->use_alpha && comb->vertex_color_source[1] != CC_SHADE) ||
+        state->texture_tint_colors_corrected || state->color_mul_env || state->color_mul_prim ||
+        state->alpha_mul_env || state->two_texture_blend) {
+        return false;
+    }
+
+    /* Decode the material once for this polygon. Common shade batches avoid
+     * combiner switches and optional effect tests at every output vertex. */
+    output = &buf_vbo[buf_num_vert];
+    if (state->use_texture) {
+        for (size_t i = 0; i < count; i++) {
+            gfx_emit_simple_base_vertex(output + i, vertices[i], true, uScale, vScale, uBias, vBias);
+        }
+    } else {
+        for (size_t i = 0; i < count; i++) {
+            gfx_emit_simple_base_vertex(output + i, vertices[i], false, uScale, vScale, uBias, vBias);
+        }
+    }
+    if (state->use_fog) {
+        const struct RGBA color = rdp.fog_color;
+        uint8_t visibleAlpha = 0;
+
+        if (state->fog_uses_texture_alpha) {
+            psp_fog_textured_t* fog = &buf_vbo_fog.textured[buf_num_vert];
+            for (size_t i = 0; i < count; i++) {
+                const struct LoadedVertex* vertex = vertices[i];
+                const uint8_t alpha = state->use_alpha
+                    ? gfx_color_mul_channel(vertex->fog_alpha, vertex->color.a) : vertex->fog_alpha;
+                fog[i].u = output[i].u;
+                fog[i].v = output[i].v;
+                fog[i].color = color;
+                fog[i].color.a = alpha;
+                fog[i].x = vertex->x;
+                fog[i].y = vertex->y;
+                fog[i].z = vertex->z;
+                visibleAlpha |= alpha;
+            }
+        } else {
+            psp_fog_color_t* fog = &buf_vbo_fog.color[buf_num_vert];
+            for (size_t i = 0; i < count; i++) {
+                const struct LoadedVertex* vertex = vertices[i];
+                const uint8_t alpha = state->use_alpha
+                    ? gfx_color_mul_channel(vertex->fog_alpha, vertex->color.a) : vertex->fog_alpha;
+                fog[i].color = color;
+                fog[i].color.a = alpha;
+                fog[i].x = vertex->x;
+                fog[i].y = vertex->y;
+                fog[i].z = vertex->z;
+                visibleAlpha |= alpha;
+            }
+        }
+        sBatchHasVisibleFog |= visibleAlpha != 0;
+    }
+    buf_num_vert += count;
+    buf_vbo_len += count * sizeof(psp_fast_t);
+    return true;
+}
+
 static void gfx_sp_triangles(uint32_t packed0, uint32_t packed1, uint8_t triangleCount) {
     /* Most model geometry uses G_TRI2. Keep both triangles in one handler invocation so the PSP pays the large
      * clip/material setup prologue once per command while retaining independent culling and clipping. */
@@ -4353,6 +4435,12 @@ static void gfx_sp_triangles(uint32_t packed0, uint32_t packed1, uint8_t triangl
         const unsigned int bias = v1->decal_lifted && v2->decal_lifted && v3->decal_lifted ? 2 : 32;
         if (sBatchDepthBias != 0 && sBatchDepthBias != bias) gfx_flush();
         sBatchDepthBias = bias;
+    }
+
+    if (gfx_emit_simple_vertices(clipped_vertices, clipped_vertices_num, state)) {
+        buf_vbo_num_tris += new_tri_count;
+        if (buf_vbo_num_tris >= MAX_BUFFERED) gfx_flush();
+        continue;
     }
 
     size_t i;

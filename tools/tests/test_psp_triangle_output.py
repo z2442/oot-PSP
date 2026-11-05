@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""Compare the new shade output loop byte-for-byte with the general emitter."""
+from pathlib import Path
+import os
+import re
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[2]
+source = (ROOT/'src/port/psp/gfx/gfx_fast3d.c').read_text()
+
+def function(name):
+    start = re.search(r'^static [^\n]*\b'+name+r'\([^;]*?\)\s*\{', source, re.M).start()
+    return source[start:source.index('\n}', source.index('{',start))+2]+'\n'
+
+preamble = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#define CC_0 0
+#define CC_PRIM 3
+#define CC_SHADE 4
+#define CC_ENV 5
+#define CC_LOD 6
+struct RGBA { uint8_t r,g,b,a; };
+static const struct RGBA white_color={255,255,255,255};
+struct ColorCombiner { unsigned vertex_color_source[2]; };
+struct LoadedVertex {
+    float x,y,z,w,_x,_y,_z,_w,u,v;
+    struct RGBA color;
+    uint8_t clip_rej,fog_alpha;
+    uint16_t decal_lifted;
+    float normal[3];uint32_t lighting;
+};
+typedef struct { float u,v;struct RGBA color;float normal[3];float x,y,z; } psp_fast_t;
+typedef struct { float u,v;uint8_t alpha; } psp_uv_t;
+typedef struct { struct RGBA color;float x,y,z; } psp_fog_color_t;
+typedef struct { float u,v;struct RGBA color;float x,y,z; } psp_fog_textured_t;
+static psp_fast_t buf_vbo[32];
+static psp_uv_t buf_vbo_tex1[32];
+static uint8_t buf_vbo_fog_tex1_alpha[32];
+static union { psp_fog_color_t color[32];psp_fog_textured_t textured[32]; } buf_vbo_fog;
+static size_t buf_num_vert,buf_vbo_len;
+static bool sBatchHasVisibleFog;
+static struct { struct RGBA prim_color,env_color,fog_color;uint8_t prim_lod_frac; } rdp;
+struct TriPipelineState {
+    struct ColorCombiner* comb;
+    float tex_u_scale[2],tex_v_scale[2],tex_u_bias[2],tex_v_bias[2];
+    bool use_alpha,use_texture,use_fog,fog_uses_texture_alpha,texture_tint_colors_corrected,
+         color_mul_env,color_mul_prim,alpha_mul_env,two_texture_blend,
+         two_texture_blend_uses_prim_lod,two_texture_alpha_blend,two_texture_uncompensated_alpha,arrow_glow;
+    struct RGBA texture_tint_env_color;
+};
+'''
+common = ''.join(function(name) for name in ('gfx_get_vertex_color','gfx_color_mul_channel',
+    'gfx_arrow_shimmer_alpha','gfx_color_mul_env','gfx_color_mul_prim',
+    'gfx_two_texture_blend_pass_alphas','gfx_get_vertex_rgba'))
+helpers = function('gfx_emit_simple_base_vertex')+function('gfx_emit_simple_vertices')
+start = source.index('    size_t i;\n    for (i = 0; i < clipped_vertices_num; i++) {',
+                     source.index('static void gfx_sp_triangles('))
+loop = source[start:source.index('    buf_vbo_num_tris += new_tri_count;',start)]
+reference = r'''
+static void reference_emit(struct LoadedVertex* const* clipped_vertices,size_t clipped_vertices_num,
+                           const struct TriPipelineState* state) {
+    struct ColorCombiner* comb=state->comb;
+    bool use_alpha=state->use_alpha,use_texture=state->use_texture;
+    const float *tex_u_scale=state->tex_u_scale,*tex_v_scale=state->tex_v_scale;
+    const float *tex_u_bias=state->tex_u_bias,*tex_v_bias=state->tex_v_bias;
+    unsigned shader_program_id=0;
+'''+loop+'}\n'
+tests = r'''
+static uint32_t seed=124893;
+static uint32_t next(void) { seed=seed*1664525U+1013904223U;return seed; }
+static float value(void) { return ((int)(next()%65536)-32768)*0.03125f; }
+static void clear(size_t prefix,bool fog) {
+    memset(buf_vbo,0xcc,sizeof(buf_vbo));memset(&buf_vbo_fog,0xcc,sizeof(buf_vbo_fog));
+    buf_num_vert=prefix;buf_vbo_len=prefix*sizeof(psp_fast_t);sBatchHasVisibleFog=fog;
+}
+int main(void) {
+    struct LoadedVertex input[21],*vertices[21];
+    psp_fast_t expected[32]; unsigned char expectedFog[sizeof(buf_vbo_fog)];
+    struct ColorCombiner comb={{CC_SHADE,CC_SHADE}};
+    for (unsigned iteration=0;iteration<100000;iteration++) {
+        size_t count=3*(1+iteration%7),prefix=3*(iteration%3);
+        bool priorFog=(iteration%11)==0;
+        struct TriPipelineState state={.comb=&comb,.use_alpha=(iteration&1)!=0,
+            .use_texture=(iteration&2)!=0,.use_fog=(iteration&4)!=0,
+            .fog_uses_texture_alpha=(iteration&8)!=0,
+            .tex_u_scale={value(),value()},.tex_v_scale={value(),value()},
+            .tex_u_bias={value(),value()},.tex_v_bias={value(),value()}};
+        comb.vertex_color_source[1]=state.use_alpha ? CC_SHADE : iteration%7;
+        for (size_t i=0;i<count;i++) {
+            input[i]=(struct LoadedVertex){.x=value(),.y=value(),.z=value(),.w=value(),
+                .u=value(),.v=value(),.normal={value(),value(),value()},
+                .color={next(),next(),next(),next()},.fog_alpha=(iteration%9)==0 ? 0 : next()};
+            vertices[i]=&input[i];
+        }
+        rdp.fog_color=(struct RGBA){next(),next(),next(),next()};
+        clear(prefix,priorFog);reference_emit(vertices,count,&state);
+        memcpy(expected,buf_vbo,sizeof(expected));memcpy(expectedFog,&buf_vbo_fog,sizeof(expectedFog));
+        bool expectedVisible=sBatchHasVisibleFog;
+        clear(prefix,priorFog);assert(gfx_emit_simple_vertices(vertices,count,&state));
+        assert(memcmp(expected,buf_vbo,sizeof(expected))==0);
+        assert(memcmp(expectedFog,&buf_vbo_fog,sizeof(expectedFog))==0);
+        assert(buf_num_vert==prefix+count && buf_vbo_len==(prefix+count)*sizeof(psp_fast_t));
+        assert(sBatchHasVisibleFog==expectedVisible);
+        // All special materials must retain the general emitter with no writes.
+        clear(prefix,priorFog);memcpy(expected,buf_vbo,sizeof(expected));
+        memcpy(expectedFog,&buf_vbo_fog,sizeof(expectedFog));
+        switch (iteration%8) {
+            case 0:state.color_mul_env=true;break;
+            case 1:state.color_mul_prim=true;break;
+            case 2:state.alpha_mul_env=true;break;
+            case 3:state.two_texture_blend=true;break;
+            case 4:state.texture_tint_colors_corrected=true;break;
+            case 5:comb.vertex_color_source[0]=CC_LOD;break;
+            case 6:comb.vertex_color_source[0]=CC_ENV;break;
+            case 7:state.use_alpha=true;comb.vertex_color_source[1]=CC_PRIM;break;
+        }
+        assert(!gfx_emit_simple_vertices(vertices,count,&state));
+        assert(memcmp(expected,buf_vbo,sizeof(expected))==0);
+        assert(memcmp(expectedFog,&buf_vbo_fog,sizeof(expectedFog))==0);
+        assert(buf_num_vert==prefix && buf_vbo_len==prefix*sizeof(psp_fast_t));
+        assert(sBatchHasVisibleFog==priorFog);
+        comb.vertex_color_source[0]=CC_SHADE;
+    }
+    puts("Triangle output: 100000 shade/UV/fog equivalence cases, clipped polygons and material fallback passed");
+}
+'''
+with tempfile.TemporaryDirectory(prefix='oot-triangle-output-') as directory:
+    path=Path(directory)
+    (path/'test.c').write_text(preamble+common+helpers+reference+tests)
+    subprocess.run([os.environ.get('CC','cc'),'-std=c11','-O2','-ffp-contract=off',
+                    '-Wall','-Wextra','-Werror',str(path/'test.c'),'-o',str(path/'test')],check=True)
+    subprocess.run([str(path/'test')],check=True)

@@ -7,6 +7,7 @@
 #include "gfx/gfx_window_psp.h"
 #include "oot_psp_performance.h"
 #include "oot_psp_video.h"
+#include "oot_psp_frame_interpolation.h"
 
 extern struct GfxRenderingAPI gfx_scegu_api;
 extern void gfx_scegu_request_pause_background(void);
@@ -135,6 +136,7 @@ int OotPspRenderer_ApplyVideoSettings(void) {
     int result;
 
     OotPspRenderer_Init();
+    OotPspFrameInterpolation_Reset();
     result = gfx_scegu_apply_video_mode();
     /* The DVE transition reinitializes the GU and can invalidate texture data
      * already resident in the upper half of Slim EDRAM. Rebuild the cache on
@@ -150,6 +152,7 @@ void OotPspRenderer_RenderHomeMenu(int selectedIndex, int screen, int submenuSel
     OotPspHomeMenuRenderArgs args;
 
     OotPspRenderer_Init();
+    OotPspFrameInterpolation_Reset();
     args.selectedIndex = selectedIndex;
     args.screen = screen;
     args.submenuSelectedIndex = submenuSelectedIndex;

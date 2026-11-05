@@ -47,6 +47,8 @@ int OotPspVideo_IsTvSelected(void);
 void OotPspVideo_CycleOutput(int direction);
 void OotPspVideo_CycleResolution(int direction);
 void OotPspVideo_CycleAspect(int direction);
+int OotPspVideo_GetFrameRate(void);
+void OotPspVideo_SetFrameRate(int fps);
 int OotPspVideo_IsVSyncEnabled(void);
 void OotPspVideo_SetVSyncEnabled(int enabled);
 const char* OotPspVideo_GetOutputName(void);

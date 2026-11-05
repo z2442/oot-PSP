@@ -1428,6 +1428,7 @@ PSP_PORT_RUNTIME_SOURCES := \
 	src/port/psp/gfx/gfx_cc.c \
 	src/port/psp/gfx/gfx_fast3d.c \
 	src/port/psp/gfx/gfx_scegu.c \
+	src/port/psp/gfx/gfx_psp_submit.c \
 	src/port/psp/gfx/gfx_window_psp.c \
 	src/port/psp/gfx/psp_texture_manager.c \
 	src/port/psp/oot_psp_asset_builder.c \
@@ -1437,6 +1438,7 @@ PSP_PORT_RUNTIME_SOURCES := \
 	src/port/psp/oot_psp_controls.c \
 	src/port/psp/oot_psp_dve.c \
 	src/port/psp/oot_psp_game.c \
+	src/port/psp/oot_psp_frame_interpolation.c \
 	src/port/psp/oot_psp_home_menu.c \
 	src/port/psp/oot_psp_memory.c \
 	src/port/psp/oot_psp_mixer.c \

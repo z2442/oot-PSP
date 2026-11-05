@@ -25,6 +25,9 @@
 #include "sfx.h"
 #include "sys_math3d.h"
 #include "sys_matrix.h"
+#if PLATFORM_PSP
+#include "oot_psp_frame_interpolation.h"
+#endif
 #include "terminal.h"
 #include "title_setup_state.h"
 #include "transition_circle.h"
@@ -264,6 +267,7 @@ void Play_Destroy(GameState* thisx) {
     Player* player = GET_PLAYER(this);
 
 #if PLATFORM_PSP
+    OotPspFrameInterpolation_Reset();
     OotPspRenderer_SetJpegBackgroundResolution(false, 0, 0);
 #endif
 
@@ -1329,6 +1333,11 @@ void Play_Draw(PlayState* this) {
     }
 #endif
 
+#if PLATFORM_PSP
+    OotPspFrameInterpolation_SetContext(this->sceneId, this->roomCtx.curRoom.num,
+        this->activeCamId | ((u16)GET_ACTIVE_CAM(this)->setting << 4) | ((u16)GET_ACTIVE_CAM(this)->mode << 12));
+    OotPspFrameInterpolation_SetWorldScope(this->pauseCtx.state == 0 && this->transitionMode == TRANS_MODE_OFF);
+#endif
     OPEN_DISPS(gfxCtx, "../z_play.c", 3907);
 
     gSegments[4] = OS_K0_TO_PHYSICAL(this->objectCtx.slots[this->objectCtx.mainKeepSlot].segment);
@@ -1609,12 +1618,18 @@ void Play_Draw(PlayState* this) {
         }
 
     Play_Draw_DrawOverlayElements:
+#if PLATFORM_PSP
+        OotPspFrameInterpolation_SetWorldScope(0);
+#endif
         if (!DEBUG_FEATURES || (R_HREG_MODE != HREG_MODE_PLAY) || R_PLAY_DRAW_OVERLAY_ELEMENTS) {
             Play_DrawOverlayElements(this);
         }
     }
 
 Play_Draw_skip:
+#if PLATFORM_PSP
+    OotPspFrameInterpolation_SetWorldScope(0);
+#endif
 
     if (this->view.unk_124 != 0) {
         Camera_Update(GET_ACTIVE_CAM(this));

@@ -2,6 +2,9 @@
 #include "printf.h"
 #include "translation.h"
 #include "effect.h"
+#if PLATFORM_PSP
+#include "oot_psp_frame_interpolation.h"
+#endif
 #include "frame_advance.h"
 #include "play_state.h"
 
@@ -154,6 +157,9 @@ void Effect_Add(PlayState* play, s32* pIndex, s32 type, u8 arg3, u8 arg4, void* 
                    type);
             PRINTF(T("エフェクト追加せずに終了します。\n", "Exit without adding the effect.\n"));
         } else {
+#if PLATFORM_PSP
+            OotPspFrameInterpolation_ForgetIdentity(effect);
+#endif
             sEffectInfoTable[type].init(effect, initParams);
             status->unk_02 = arg3;
             status->unk_01 = arg4;
@@ -169,6 +175,9 @@ void Effect_DrawAll(GraphicsContext* gfxCtx) {
         if (!sEffectContext.sparks[i].status.active) {
             continue;
         }
+#if PLATFORM_PSP
+        OotPspFrameInterpolation_SetIdentity(&sEffectContext.sparks[i].effect);
+#endif
         sEffectInfoTable[EFFECT_SPARK].draw(&sEffectContext.sparks[i].effect, gfxCtx);
     }
 
@@ -176,6 +185,9 @@ void Effect_DrawAll(GraphicsContext* gfxCtx) {
         if (!sEffectContext.blures[i].status.active) {
             continue;
         }
+#if PLATFORM_PSP
+        OotPspFrameInterpolation_SetIdentity(&sEffectContext.blures[i].effect);
+#endif
         sEffectInfoTable[EFFECT_BLURE1].draw(&sEffectContext.blures[i].effect, gfxCtx);
     }
 
@@ -183,8 +195,14 @@ void Effect_DrawAll(GraphicsContext* gfxCtx) {
         if (!sEffectContext.shieldParticles[i].status.active) {
             continue;
         }
+#if PLATFORM_PSP
+        OotPspFrameInterpolation_SetIdentity(&sEffectContext.shieldParticles[i].effect);
+#endif
         sEffectInfoTable[EFFECT_SHIELD_PARTICLE].draw(&sEffectContext.shieldParticles[i].effect, gfxCtx);
     }
+#if PLATFORM_PSP
+    OotPspFrameInterpolation_SetIdentity(NULL);
+#endif
 }
 
 void Effect_UpdateAll(PlayState* play) {

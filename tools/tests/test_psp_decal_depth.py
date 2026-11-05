@@ -17,7 +17,7 @@ def function(text, name):
 
 
 start = source.index("    if (rendering_state.decal_mode) {", source.index("static void gfx_sp_triangles("))
-batch = source[start:source.index("    size_t i;", start)]
+batch = source[start:source.index("\n    }", start) + len("\n    }")]
 preamble = r'''
 #include <assert.h>
 #include <stdbool.h>

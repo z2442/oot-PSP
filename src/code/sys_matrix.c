@@ -5,6 +5,9 @@
 #endif
 #include "printf.h"
 #include "sys_matrix.h"
+#if PLATFORM_PSP
+#include "oot_psp_frame_interpolation.h"
+#endif
 #include "ultra64.h"
 #include "z_lib.h"
 #include "game.h"
@@ -703,7 +706,13 @@ Mtx* Matrix_ToMtx(Mtx* dest, const char* file, int line) {
 }
 
 Mtx* Matrix_Finalize(GraphicsContext* gfxCtx, const char* file, int line) {
+#if PLATFORM_PSP
+    Mtx* result = Matrix_ToMtx(GRAPH_ALLOC(gfxCtx, sizeof(Mtx)), file, line);
+    OotPspFrameInterpolation_Record(result, sCurrentMatrix->mf, __builtin_return_address(0));
+    return result;
+#else
     return Matrix_ToMtx(GRAPH_ALLOC(gfxCtx, sizeof(Mtx)), file, line);
+#endif
 }
 
 #else
@@ -713,7 +722,13 @@ Mtx* Matrix_ToMtx(Mtx* dest) {
 }
 
 Mtx* Matrix_Finalize(GraphicsContext* gfxCtx) {
+#if PLATFORM_PSP
+    Mtx* result = Matrix_ToMtx(GRAPH_ALLOC(gfxCtx, sizeof(Mtx)));
+    OotPspFrameInterpolation_Record(result, sCurrentMatrix->mf, __builtin_return_address(0));
+    return result;
+#else
     return Matrix_ToMtx(GRAPH_ALLOC(gfxCtx, sizeof(Mtx)));
+#endif
 }
 
 #endif /* DEBUG_FEATURES */

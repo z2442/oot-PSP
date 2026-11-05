@@ -15,6 +15,7 @@ RUNTIME_FILES = ("EBOOT.PBP", "Plugins/dvemgr.prx")
 def package(build_dir: Path, output: Path) -> None:
     files = [(build_dir / name, f"OOT_PSP/{name}") for name in RUNTIME_FILES]
     files.append((ROOT / "docs/psp-install.txt", "OOT_PSP/README.txt"))
+    files.append((ROOT / "docs/PSPSDK-LICENSE.txt", "OOT_PSP/PSPSDK-LICENSE.txt"))
     for source, _ in files:
         if not source.is_file() or source.stat().st_size == 0:
             raise ValueError(f"required package file is missing or empty: {source}")

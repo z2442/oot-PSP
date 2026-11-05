@@ -50,3 +50,9 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+HOME > Video Settings > Frame Rate selects 20 FPS (default) or 60 FPS.
+Select Save video.ini to keep the setting. Game logic retains its original
+update rate; 60 FPS adds interpolated presentations. LCD/240p use triple
+buffering; 480i/480p keep double buffering to fit VRAM. Actual FPS depends on
+the scene and hardware. See docs/psp-frame-presentation.md in the source tree.

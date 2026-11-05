@@ -35,6 +35,13 @@
 
 #include "psp_texture_manager.h"
 #include "gfx_fast3d.h"
+#include "gfx_psp_submit.h"
+
+/* Limit batching to this backend, including its shadow pass. SDK/intraFont
+ * entry points retain their normal behavior; all arena uploads are already
+ * coherent if one of those calls publishes our pending draws early. */
+#define sceGuDrawArray gfx_psp_submit_draw_array
+#define sceGuGetMemory gfx_psp_submit_get_memory
 #include "oot_psp_controls.h"
 #include "oot_psp_dve.h"
 #include "oot_psp_memory.h"
@@ -136,14 +143,14 @@ printf("%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n", shader_id,
 // clang-format off
 // clang-format on
 
-unsigned int __attribute__((aligned(64))) list[262144 * 2];
+unsigned int __attribute__((aligned(64))) list[GFX_PSP_COMMAND_LIST_BYTES / sizeof(unsigned int)];
 
-/* sceGuGetMemory stores transient vertices inside the display list. Fog adds a
- * second vertex stream, so dense scenes can otherwise run past the fixed list
- * buffer and corrupt later texture commands on real hardware. Leave room for
- * the draw/state commands emitted after each allocation and safely continue in
- * a fresh list when necessary. GE state and the frame/depth buffers persist
- * across direct lists. */
+static void gfx_scegu_start_list(void);
+
+/* 3D/fog uploads live in the cached arena. UI and shadow sprites still use
+ * inline uncached allocations. Reserve room for subsequent draw/state commands
+ * and fence both kinds of storage before reusing a full list or vertex arena.
+ * GE state and the frame/depth buffers persist across direct lists. */
 #define GU_LIST_COMMAND_RESERVE 4096
 
 static void gfx_scegu_reserve_list_memory(size_t dataSize) {
@@ -156,7 +163,7 @@ static void gfx_scegu_reserve_list_memory(size_t dataSize) {
 
     sceGuFinish();
     sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
-    sceGuStart(GU_DIRECT, list);
+    gfx_scegu_start_list();
 }
 
 void gfx_scegu_sync_texture_cache(void) {
@@ -165,7 +172,7 @@ void gfx_scegu_sync_texture_cache(void) {
      * the allocator overwrites them, then continue the frame in a fresh list. */
     sceGuFinish();
     sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
-    sceGuStart(GU_DIRECT, list);
+    gfx_scegu_start_list();
 }
 
 static unsigned int staticOffset = 0;
@@ -306,6 +313,9 @@ static void *sShadowMaskBuffer;
 static int sScissorBounds[4];
 static void *sPrimaryBuffer;
 static void *sSecondaryBuffer;
+static void *sColorBuffers[3];
+static void *sPendingBuffer;
+static int sColorBufferCount;
 static bool sInterlacedOutput;
 static bool sCrt240pOutput;
 static bool sPauseBgActive;
@@ -348,6 +358,33 @@ static struct ShaderProgram *gfx_scegu_lookup_shader(uint32_t shader_id) {
     struct ShaderProgram *prg = gfx_scegu_probe_shader_cache(shader_id, &found);
 
     return found ? prg : NULL;
+}
+
+static void gfx_scegu_start_list(void) {
+    sceGuStart(GU_DIRECT, list);
+    gfx_psp_submit_reset();
+    /* sceGuStart restores the SDK's saved draw target. A triple-buffered
+     * frame may be using a different one, including after a mid-frame fence. */
+    sceGuDrawBufferList(sColorPixelFormat, sDrawBuffer, BUF_WIDTH);
+}
+
+static void* gfx_scegu_upload_vertices(const void* source, size_t bytes) {
+    void* vertices;
+
+    gfx_scegu_reserve_list_memory(0);
+    vertices = gfx_psp_submit_alloc_vertices(bytes);
+    if (vertices == NULL) {
+        /* No upload can be recycled while an older PRIM still reads it. */
+        gfx_scegu_sync_texture_cache();
+        vertices = gfx_psp_submit_alloc_vertices(bytes);
+    }
+    if (vertices == NULL) {
+        /* Current batches are bounded by MAX_BUFFERED and fit the arena. */
+        abort();
+    }
+    OotPsp_MemcpyVfpu(vertices, source, bytes);
+    gfx_psp_submit_writeback_vertices(vertices, bytes);
+    return vertices;
 }
 
 static void *gfx_scegu_vram_cpu_addr(const void *vramBuffer) {
@@ -460,7 +497,7 @@ void gfx_scegu_apply_vismono(uint8_t primR, uint8_t primG, uint8_t primB, uint8_
             }
         }
 
-        sceGuStart(GU_DIRECT, list);
+        gfx_scegu_start_list();
         return;
     }
 
@@ -485,7 +522,7 @@ void gfx_scegu_apply_vismono(uint8_t primR, uint8_t primG, uint8_t primB, uint8_
                 row[x] = (uint16_t)((intensity5 << 11) | (intensity6 << 5) | intensity5);
             }
         }
-        sceGuStart(GU_DIRECT, list);
+        gfx_scegu_start_list();
         return;
     }
 
@@ -509,7 +546,7 @@ void gfx_scegu_apply_vismono(uint8_t primR, uint8_t primG, uint8_t primB, uint8_
         }
     }
 
-    sceGuStart(GU_DIRECT, list);
+    gfx_scegu_start_list();
 }
 
 static void gfx_scegu_accum_rgb565(uint16_t color, unsigned int *r, unsigned int *g, unsigned int *b) {
@@ -1163,8 +1200,8 @@ static void gfx_scegu_render_video_settings(int selectedIndex, const char* statu
 
 #if OOT_PSP_USE_INTRAFONT
     if (gfx_scegu_ensure_home_menu_font()) {
-        for (row = 0; row < 8; row++) {
-            int y = 74 + (row * 20);
+        for (row = 0; row < 9; row++) {
+            int y = 70 + (row * 18);
             unsigned int color = gfx_scegu_rgba(218, 224, 218, 255);
 
             if (selectedIndex == row) {
@@ -1187,12 +1224,15 @@ static void gfx_scegu_render_video_settings(int selectedIndex, const char* statu
                     snprintf(line, sizeof(line), "VSync: %s", OotPspVideo_IsVSyncEnabled() ? "On" : "Off");
                     break;
                 case 4:
-                    snprintf(line, sizeof(line), "Apply video mode");
+                    snprintf(line, sizeof(line), "Frame Rate: %d FPS", OotPspVideo_GetFrameRate());
                     break;
                 case 5:
-                    snprintf(line, sizeof(line), "Save video.ini");
+                    snprintf(line, sizeof(line), "Apply video mode");
                     break;
                 case 6:
+                    snprintf(line, sizeof(line), "Save video.ini");
+                    break;
+                case 7:
                     snprintf(line, sizeof(line), "Reset defaults");
                     break;
                 default:
@@ -1723,9 +1763,7 @@ static void gfx_scegu_draw_triangles(float buf_vbo[], UNUSED size_t buf_vbo_len,
         gfx_scegu_apply_shader(get_shader_from_id(get_shader_remap(cur_shader->shader_id)));
     }
 
-    gfx_scegu_reserve_list_memory(sizeof(Vertex) * 3 * buf_vbo_num_tris);
-    void *buf = sceGuGetMemory(sizeof(Vertex) * 3 * buf_vbo_num_tris);
-    OotPsp_MemcpyVfpu(buf, buf_vbo, sizeof(Vertex) * 3 * buf_vbo_num_tris);
+    void *buf = gfx_scegu_upload_vertices(buf_vbo, sizeof(Vertex) * 3 * buf_vbo_num_tris);
     sceGuDrawArray(GU_TRIANGLES, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_NORMAL_32BITF |
                    GU_VERTEX_32BITF | GU_TRANSFORM_3D, 3 * buf_vbo_num_tris, 0, buf);
 }
@@ -1762,10 +1800,7 @@ static void gfx_scegu_draw_fog_triangles(float buf_vbo[], size_t buf_vbo_len,
     const int vertexFormat = (useTextureAlpha ? GU_TEXTURE_32BITF : 0) |
                              GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D;
 
-    gfx_scegu_reserve_list_memory(buf_vbo_len);
-    void *buf = sceGuGetMemory(buf_vbo_len);
-
-    OotPsp_MemcpyVfpu(buf, buf_vbo, buf_vbo_len);
+    void *buf = gfx_scegu_upload_vertices(buf_vbo, buf_vbo_len);
 
     gfx_scegu_set_lighting(NULL);
 
@@ -1853,8 +1888,26 @@ static bool gfx_scegu_mode_is_interlaced(const OotPspVideoMode *mode) {
 }
 
 static void gfx_scegu_reset_framebuffers(void) {
+    int i;
+
+    /* Repack color/depth storage for the active output. Three 32-bit TV color
+     * buffers plus depth exceed Slim's 4 MiB; LCD and native 240p fit three.
+     * Slim textures live in RAM. Phat has one fixed LCD allocation, so its
+     * EDRAM texture cache must stay at the same address on mode changes. */
+    staticOffset = 0;
+    sColorBufferCount = (BUF_WIDTH == TV_BUFFER_WIDTH) ? 2 : 3;
+    for (i = 0; i < sColorBufferCount; i++) {
+        sColorBuffers[i] = getStaticVramBuffer(BUF_WIDTH,
+            sInterlacedOutput && i == 1 ? TV_INTERLACED_BUFFER_HEIGHT : SCR_HEIGHT, sColorPixelFormat);
+    }
+    sPrimaryBuffer = sColorBuffers[0];
+    sSecondaryBuffer = sColorBuffers[1];
+    sDepthBuffer = getStaticVramBuffer(BUF_WIDTH, SCR_HEIGHT, GU_PSM_4444);
+    staticOffset = (staticOffset + 8191U) & ~8191U;
+    sShadowMaskBuffer = getStaticVramBuffer(64, 64, GU_PSM_8888);
     sDrawBuffer = sPrimaryBuffer;
     sDisplayBuffer = sSecondaryBuffer;
+    sPendingBuffer = NULL;
 }
 
 static void gfx_scegu_log_display_mode(const OotPspVideoMode *requestedMode, int result) {
@@ -1881,10 +1934,10 @@ static int gfx_scegu_set_hardware_video_mode(const OotPspVideoMode *mode) {
 }
 
 static void gfx_scegu_configure_gu_buffers(void) {
-    /* VSync waits at frame end before an immediate swap, so the old display
-     * buffer is safe to reuse when the next frame starts rendering. */
+    /* Full-resolution TV uses GU's immediate double-buffer swap. The triple
+     * buffer path queues scanout explicitly and sets its own draw target. */
     guSwapBuffersBehaviour(PSP_DISPLAY_SETBUF_IMMEDIATE);
-    sceGuStart(GU_DIRECT, list);
+    gfx_scegu_start_list();
     sceGuDrawBuffer(sColorPixelFormat, sDrawBuffer, BUF_WIDTH);
     sceGuDispBuffer(SCR_WIDTH, SCR_HEIGHT, sDisplayBuffer, BUF_WIDTH);
     sceGuDepthBuffer(sDepthBuffer, BUF_WIDTH);
@@ -1940,6 +1993,11 @@ int gfx_scegu_apply_video_mode(void) {
         return -1000;
     }
 
+    sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
+    if (sPendingBuffer != NULL) {
+        sceDisplayWaitVblankStart();
+        sPendingBuffer = NULL;
+    }
     /* Daedalus enters the replacement route with GU output still enabled.
      * Disabling it here leaves some Slim firmwares in LCD scanout mode; using
      * the Display button then only mirrors the old 480x272 surface. */
@@ -1990,9 +2048,6 @@ static void gfx_scegu_init(void) {
     OotPspVideoMode mode;
     OotPspVideoMode initialMode;
     void *backgroundStorage;
-    void *fbp0;
-    void *fbp1;
-    void *zbp;
     size_t texmanSize;
 
     sVramSize = OotPspDve_GetEdramSize();
@@ -2054,23 +2109,9 @@ static void gfx_scegu_init(void) {
     sAppliedSamplerStateValid = false;
     memset(tmu_state, 0, sizeof(tmu_state));
 
-    fbp0 = getStaticVramBuffer((unsigned int)sMaxBufferWidth, (unsigned int)sMaxScreenHeight, sColorPixelFormat);
-    fbp1 = getStaticVramBuffer((unsigned int)sMaxBufferWidth,
-                               (unsigned int)((sMaxBufferWidth == TV_BUFFER_WIDTH)
-                                                  ? TV_INTERLACED_BUFFER_HEIGHT
-                                                  : sMaxScreenHeight),
-                               sColorPixelFormat);
-    zbp = getStaticVramBuffer((unsigned int)sMaxBufferWidth, (unsigned int)sMaxScreenHeight, GU_PSM_4444);
-
-    sPrimaryBuffer = fbp0;
-    sSecondaryBuffer = fbp1;
     sInterlacedOutput = false;
     sCrt240pOutput = false;
     gfx_scegu_reset_framebuffers();
-    sDepthBuffer = zbp;
-    /* Keep the render target in EDRAM even when TV texture storage uses RAM. */
-    staticOffset = (staticOffset + 8191U) & ~8191U;
-    sShadowMaskBuffer = getStaticVramBuffer(64, 64, GU_PSM_8888);
 
     gfx_scegu_configure_gu_buffers();
     sceDisplaySetFrameBuf(gfx_scegu_vram_cpu_addr(sDisplayBuffer), BUF_WIDTH, sColorPixelFormat,
@@ -2163,7 +2204,7 @@ static void gfx_scegu_start_frame(void) {
         gfx_scegu_copy_framebuffer_to_vram(sDrawBuffer, sPauseBgBuffer);
     }
 
-    sceGuStart(GU_DIRECT, list);
+    gfx_scegu_start_list();
     sceGuDisable(GU_SCISSOR_TEST);
     sceGuDepthMask(GU_TRUE); // Must be set to clear Z-buffer
     sceGuClearDepth(0);
@@ -2216,7 +2257,7 @@ static void gfx_scegu_present_interlaced(void) {
     /* The DVE's 480i modes expose two 240-line fields in one 503-line
      * framebuffer. Odd source lines occupy rows 0..239; even lines start at
      * row 262. Native 320x240 bypasses this conversion entirely. */
-    sceGuStart(GU_DIRECT, list);
+    gfx_scegu_start_list();
     sceGuCopyImage(sColorPixelFormat, 0, 0, TV_SCREEN_WIDTH, TV_SCREEN_HEIGHT / 2, BUF_WIDTH * 2,
                    (void *)(src + (uintptr_t)rowBytes), 0, 0, BUF_WIDTH, (void *)dst);
     sceGuTexSync();
@@ -2231,11 +2272,43 @@ static void gfx_scegu_present_interlaced(void) {
     sDisplayBuffer = sSecondaryBuffer;
 }
 
+static void gfx_scegu_present_triple(void) {
+    void *front = NULL;
+    int width, format, i;
+    int vsync = OotPspVideo_IsVSyncEnabled();
+
+    /* Never overwrite a queued scanout target. With three buffers the CPU/GE
+     * can render the next frame while this one waits for the next vblank. */
+    if (sPendingBuffer != NULL) {
+        sceDisplayGetFrameBuf(&front, &width, &format, PSP_DISPLAY_SETBUF_IMMEDIATE);
+        while (((uintptr_t)front & 0x00FFFFFFU) != ((uintptr_t)sPendingBuffer & 0x00FFFFFFU)) {
+            sceDisplayWaitVblankStart();
+            sceDisplayGetFrameBuf(&front, &width, &format, PSP_DISPLAY_SETBUF_IMMEDIATE);
+        }
+        sPendingBuffer = NULL;
+    }
+    sceDisplayGetFrameBuf(&front, &width, &format, PSP_DISPLAY_SETBUF_IMMEDIATE);
+    sceDisplaySetFrameBuf(gfx_scegu_vram_cpu_addr(sDrawBuffer), BUF_WIDTH, sColorPixelFormat,
+                          vsync ? PSP_DISPLAY_SETBUF_NEXTFRAME : PSP_DISPLAY_SETBUF_IMMEDIATE);
+    sDisplayBuffer = sDrawBuffer;
+    sPendingBuffer = vsync ? sDrawBuffer : NULL;
+    for (i = 0; i < sColorBufferCount; i++) {
+        if (sColorBuffers[i] != sDisplayBuffer && ((uintptr_t)sColorBuffers[i] & 0x00FFFFFFU) != ((uintptr_t)front & 0x00FFFFFFU)) {
+            sDrawBuffer = sColorBuffers[i];
+            break;
+        }
+    }
+}
+
 static void gfx_scegu_end_frame(void) {
     void *previousDrawBuffer = sDrawBuffer;
 
     sceGuFinish();
     sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
+    if (sColorBufferCount == 3) {
+        gfx_scegu_present_triple();
+        return;
+    }
     if (OotPspVideo_IsVSyncEnabled()) {
         sceDisplayWaitVblankStart();
     }

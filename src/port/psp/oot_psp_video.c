@@ -13,6 +13,7 @@ static OotPspVideoOutput sOotPspVideoOutput;
 static OotPspVideoResolution sOotPspVideoResolution;
 static OotPspVideoAspect sOotPspVideoAspect;
 static int sOotPspVideoVSync = 1;
+static int sOotPspVideoFrameRate = 20;
 static OotPspVideoOutput sOotPspVideoActiveOutput;
 static OotPspVideoResolution sOotPspVideoActiveResolution;
 static OotPspVideoAspect sOotPspVideoActiveAspect;
@@ -89,6 +90,7 @@ void OotPspVideo_ResetDefaults(void) {
     sOotPspVideoResolution = OOT_PSP_VIDEO_RESOLUTION_480P;
     sOotPspVideoAspect = OOT_PSP_VIDEO_ASPECT_16_9;
     sOotPspVideoVSync = 1;
+    sOotPspVideoFrameRate = 20;
 }
 
 void OotPspVideo_ForceLcd(void) {
@@ -167,6 +169,8 @@ void OotPspVideo_Init(const char* executablePath) {
         } else if (OotPspVideo_StrIcmp(key, "aspect") == 0) {
             sOotPspVideoAspect = (OotPspVideo_StrIcmp(value, "4:3") == 0) ? OOT_PSP_VIDEO_ASPECT_4_3
                                                                           : OOT_PSP_VIDEO_ASPECT_16_9;
+        } else if (OotPspVideo_StrIcmp(key, "fps") == 0) {
+            OotPspVideo_SetFrameRate(OotPspVideo_StrIcmp(value, "60") == 0 ? 60 : 20);
         } else if (OotPspVideo_StrIcmp(key, "vsync") == 0) {
             OotPspVideo_SetVSyncEnabled((OotPspVideo_StrIcmp(value, "off") != 0) &&
                                       (OotPspVideo_StrIcmp(value, "false") != 0) &&
@@ -202,10 +206,10 @@ int OotPspVideo_Save(void) {
     resolutionName = (sOotPspVideoResolution == OOT_PSP_VIDEO_RESOLUTION_480I)
                          ? "480i"
                          : ((sOotPspVideoResolution == OOT_PSP_VIDEO_RESOLUTION_240P) ? "240p" : "480p");
-    length = snprintf(buffer, sizeof(buffer), "[video]\noutput = %s\nresolution = %s\naspect = %s\nvsync = %s\n",
+    length = snprintf(buffer, sizeof(buffer), "[video]\noutput = %s\nresolution = %s\naspect = %s\nvsync = %s\nfps = %d\n",
                       (sOotPspVideoOutput == OOT_PSP_VIDEO_OUTPUT_TV) ? "tv" : "lcd", resolutionName,
                       (sOotPspVideoAspect == OOT_PSP_VIDEO_ASPECT_4_3) ? "4:3" : "16:9",
-                      sOotPspVideoVSync ? "on" : "off");
+                      sOotPspVideoVSync ? "on" : "off", sOotPspVideoFrameRate);
     if ((length < 0) || ((size_t)length >= sizeof(buffer))) {
         return -1;
     }
@@ -282,6 +286,14 @@ void OotPspVideo_CycleAspect(int direction) {
     }
     sOotPspVideoAspect = (sOotPspVideoAspect == OOT_PSP_VIDEO_ASPECT_4_3) ? OOT_PSP_VIDEO_ASPECT_16_9
                                                                           : OOT_PSP_VIDEO_ASPECT_4_3;
+}
+
+int OotPspVideo_GetFrameRate(void) {
+    return sOotPspVideoFrameRate;
+}
+
+void OotPspVideo_SetFrameRate(int fps) {
+    sOotPspVideoFrameRate = (fps == 60) ? 60 : 20;
 }
 
 int OotPspVideo_IsVSyncEnabled(void) {

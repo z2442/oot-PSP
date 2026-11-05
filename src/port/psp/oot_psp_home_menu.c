@@ -30,11 +30,12 @@
 #define OOT_PSP_VIDEO_MENU_ROW_RESOLUTION 1
 #define OOT_PSP_VIDEO_MENU_ROW_ASPECT 2
 #define OOT_PSP_VIDEO_MENU_ROW_VSYNC 3
-#define OOT_PSP_VIDEO_MENU_ROW_APPLY 4
-#define OOT_PSP_VIDEO_MENU_ROW_SAVE 5
-#define OOT_PSP_VIDEO_MENU_ROW_RESET 6
-#define OOT_PSP_VIDEO_MENU_ROW_BACK 7
-#define OOT_PSP_VIDEO_MENU_ROW_COUNT 8
+#define OOT_PSP_VIDEO_MENU_ROW_FPS 4
+#define OOT_PSP_VIDEO_MENU_ROW_APPLY 5
+#define OOT_PSP_VIDEO_MENU_ROW_SAVE 6
+#define OOT_PSP_VIDEO_MENU_ROW_RESET 7
+#define OOT_PSP_VIDEO_MENU_ROW_BACK 8
+#define OOT_PSP_VIDEO_MENU_ROW_COUNT 9
 
 #define OOT_PSP_HOME_MENU_INPUT_LOCKOUT_US 500000
 #define OOT_PSP_HOME_MENU_INPUT_DEBOUNCE_US 150000
@@ -186,13 +187,15 @@ static void OotPspHomeMenu_AdjustVideoRow(int direction) {
         OotPspVideo_CycleResolution(direction);
     } else if (sVideoSelectedIndex == OOT_PSP_VIDEO_MENU_ROW_ASPECT) {
         OotPspVideo_CycleAspect(direction);
+    } else if (sVideoSelectedIndex == OOT_PSP_VIDEO_MENU_ROW_FPS) {
+        OotPspVideo_SetFrameRate(OotPspVideo_GetFrameRate() == 20 ? 60 : 20);
     } else if (sVideoSelectedIndex == OOT_PSP_VIDEO_MENU_ROW_VSYNC) {
         OotPspVideo_SetVSyncEnabled(!OotPspVideo_IsVSyncEnabled());
     }
 }
 
 static void OotPspHomeMenu_ActivateVideoRow(void) {
-    if (sVideoSelectedIndex <= OOT_PSP_VIDEO_MENU_ROW_VSYNC) {
+    if (sVideoSelectedIndex <= OOT_PSP_VIDEO_MENU_ROW_FPS) {
         OotPspHomeMenu_AdjustVideoRow(1);
     } else if (sVideoSelectedIndex == OOT_PSP_VIDEO_MENU_ROW_APPLY) {
         int result;

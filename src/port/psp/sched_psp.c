@@ -3,6 +3,8 @@
 #include "array_count.h"
 #include "oot_psp_performance.h"
 #include "oot_psp_renderer.h"
+#include "oot_psp_video.h"
+#include "oot_psp_frame_interpolation.h"
 
 #include <pspkernel.h>
 #include <string.h>
@@ -20,7 +22,7 @@
  * but signed timestamp subtraction handles that safely for the small
  * intervals used here.
  */
-static u32 sNextGfxCompletionUsec;
+static u32 sNextGfxPresentationUsec;
 static u32 sGfxPacingRemainder;
 static s32 sGfxPacingInitialized;
 
@@ -42,7 +44,7 @@ static inline s32 SchedPsp_TimeDiff(u32 a, u32 b) {
 /*
  * Return the N64 VI update rate associated with this task.
  *
- * Normally this is 1:
+ * Menus can use 1; normal OoT gameplay uses 3 (20 Hz):
  *
  *     60 / 1 = 60 Hz
  *
@@ -86,8 +88,7 @@ static inline u32 SchedPsp_GetUpdateRate(const OSScTask* task) {
  *
  * which averages exactly 60 Hz over time.
  */
-static inline u32 SchedPsp_GetFrameUsec(const OSScTask* task) {
-    const u32 updateRate = SchedPsp_GetUpdateRate(task);
+static inline u32 SchedPsp_GetFrameUsec(u32 updateRate) {
 
     u32 frameUsec =
         OOT_PSP_FRAME_BASE_USEC * updateRate;
@@ -110,17 +111,17 @@ static inline u32 SchedPsp_GetFrameUsec(const OSScTask* task) {
 
 
 /*
- * Pace a presented graphics frame.
+ * Pace a graphics presentation before rendering.
  *
  * IMPORTANT:
  *
  * There is intentionally NO catch-up behavior here.
  *
- * If rendering finishes early:
+ * If a presentation starts early:
  *
  *     sleep until the expected VI deadline
  *
- * If rendering finishes late:
+ * If a presentation starts late:
  *
  *     discard the missed deadline immediately
  *     restart pacing from "now"
@@ -128,41 +129,41 @@ static inline u32 SchedPsp_GetFrameUsec(const OSScTask* task) {
  * This prevents a slow frame from causing several subsequent frames to
  * run back-to-back at 100% CPU trying to catch up.
  */
-static void SchedPsp_PaceGfxTask(OSScTask* task) {
+static void SchedPsp_PaceGfxTask(u32 updateRate) {
     const u32 now = sceKernelGetSystemTimeLow();
-    const u32 frameUsec = SchedPsp_GetFrameUsec(task);
+    const u32 frameUsec = SchedPsp_GetFrameUsec(updateRate);
 
     /*
-     * First presented frame establishes our pacing timeline.
+     * The first presentation establishes our pacing timeline.
      */
     if (!sGfxPacingInitialized) {
-        sNextGfxCompletionUsec = now;
+        sNextGfxPresentationUsec = now;
         sGfxPacingInitialized = 1;
     }
 
     {
         const s32 waitUsec =
             SchedPsp_TimeDiff(
-                sNextGfxCompletionUsec,
+                sNextGfxPresentationUsec,
                 now);
 
         if (waitUsec > 0) {
             /*
-             * Frame finished early.
+             * Presentation reached the scheduler early.
              *
              * Sleep only for the remaining amount of this VI.
              */
             sceKernelDelayThread((u32)waitUsec);
         } else if (waitUsec < 0) {
             /*
-             * Frame missed its deadline.
+             * Presentation missed its deadline.
              *
              * NO CATCH-UP.
              *
              * Throw away all accumulated pacing debt and begin the
              * next interval relative to the current time.
              */
-            sNextGfxCompletionUsec = now;
+            sNextGfxPresentationUsec = now;
         }
     }
 
@@ -171,12 +172,12 @@ static void SchedPsp_PaceGfxTask(OSScTask* task) {
      *
      * If we were on time, this advances the existing timeline.
      *
-     * If we were late, sNextGfxCompletionUsec was reset to 'now',
+     * If we were late, sNextGfxPresentationUsec was reset to 'now',
      * so the next target becomes:
      *
      *     now + frameUsec
      */
-    sNextGfxCompletionUsec += frameUsec;
+    sNextGfxPresentationUsec += frameUsec;
 }
 
 
@@ -197,42 +198,32 @@ void Sched_Notify(Scheduler* sc) {
         }
 
         if (task->list.t.type == M_GFXTASK) {
+            const int presents = (task->flags & OS_SC_SWAPBUFFER) && task->framebuffer != NULL;
+            const u32 updateRate = SchedPsp_GetUpdateRate(task);
+            /* Keep the original simulation interval. Only replay the immutable
+             * display list; game and draw callbacks must run once per tick. */
+            const u32 passes = presents && OotPspVideo_GetFrameRate() == 60 &&
+                                       OotPspFrameInterpolation_HasSample() ? updateRate : 1;
+            u32 pass;
 
-            /*
-             * Execute the graphics display list.
-             */
-            OotPspRenderer_RenderTask(&task->list);
-
-            /*
-             * Only a task that actually presents a framebuffer should
-             * consume a VI pacing interval.
-             *
-             * Render-only graphics tasks complete immediately.
-             */
-            if ((task->flags & OS_SC_SWAPBUFFER) &&
-                task->framebuffer != NULL) {
-
-                osViSwapBuffer(
-                    task->framebuffer->swapBuffer);
-
+            for (pass = 0; pass < passes; pass++) {
+                if (presents) {
 #if defined(OOTDEBUG)
-
-                {
-                    const u64 paceStartUsec =
-                        OotPspPerformance_Now();
-
-                    SchedPsp_PaceGfxTask(task);
-
-                    OotPspPerformance_RecordPacing(
-                        OotPspPerformance_Now() -
-                        paceStartUsec);
-                }
-
-#else
-
-                SchedPsp_PaceGfxTask(task);
-
+                    const u64 paceStartUsec = OotPspPerformance_Now();
 #endif
+                    /* Pace before rendering so each intermediate frame has its
+                     * own deadline. Overruns rebase without running catch-up ticks. */
+                    SchedPsp_PaceGfxTask(updateRate / passes);
+#if defined(OOTDEBUG)
+                    OotPspPerformance_RecordPacing(OotPspPerformance_Now() - paceStartUsec);
+#endif
+                }
+                OotPspFrameInterpolation_SetFraction((float)(pass + 1) / (float)passes);
+                OotPspRenderer_RenderTask(&task->list);
+            }
+            OotPspFrameInterpolation_SetFraction(1.0f);
+            if (presents) {
+                osViSwapBuffer(task->framebuffer->swapBuffer);
             }
         }
 
@@ -279,7 +270,7 @@ void Sched_Init(
     /*
      * Start with a fresh graphics pacing timeline.
      */
-    sNextGfxCompletionUsec = 0;
+    sNextGfxPresentationUsec = 0;
     sGfxPacingRemainder = 0;
     sGfxPacingInitialized = 0;
 

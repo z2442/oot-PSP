@@ -60,6 +60,11 @@ static struct {
 } rendering_state;
 static TextureTileState* gfx_get_texture_tile(int slot) { return &rdp.texture_tile[slot]; }
 static void gfx_prepare_tri_pipeline_state(void) {}
+// Exercise the general UV path; test_psp_triangle_output covers the shade fast path.
+static bool gfx_emit_simple_vertices(struct LoadedVertex* const* vertices,size_t count,
+                                     const struct TriPipelineState* state) {
+    (void)vertices;(void)count;(void)state;return false;
+}
 '''
 preparation = section("static inline float gfx_texture_shift_scale(",
                       "#if defined(TARGET_PSP)\nstatic void gfx_prepare_flame_atlas_coord_state(")

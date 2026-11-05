@@ -31,6 +31,8 @@
 #include "play_state.h"
 #if defined(TARGET_PSP)
 #include "oot_psp_audio_backend.h"
+#include "oot_psp_frame_interpolation.h"
+#include "oot_psp_video.h"
 #include "oot_psp_performance.h"
 #endif
 
@@ -385,8 +387,21 @@ void Graph_Update(GraphicsContext* gfxCtx, GameState* gameState) {
     CLOSE_DISPS(gfxCtx, "../graph.c", 975);
 #endif
 
+#if PLATFORM_PSP
+    {
+        PlayState* play = (gameState->main == Play_Main) ? (PlayState*)gameState : NULL;
+        OotPspFrameInterpolation_Begin(gameState, play ? play->sceneId : -1,
+                                      play ? play->roomCtx.curRoom.num : -1,
+                                      play ? play->activeCamId : -1,
+                                      play != NULL && play->pauseCtx.state == 0 &&
+                                          OotPspVideo_GetFrameRate() == 60);
+    }
+#endif
     GameState_ReqPadData(gameState);
     GameState_Update(gameState);
+#if PLATFORM_PSP
+    OotPspFrameInterpolation_End();
+#endif
 #if defined(TARGET_PSP) && defined(OOTDEBUG)
     gameEndUsec = OotPspPerformance_Now();
 #endif

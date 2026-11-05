@@ -13,6 +13,9 @@
 #include "sfx.h"
 #include "sys_math.h"
 #include "sys_matrix.h"
+#if PLATFORM_PSP
+#include "oot_psp_frame_interpolation.h"
+#endif
 #include "terminal.h"
 #include "translation.h"
 #include "versions.h"
@@ -969,6 +972,9 @@ void Actor_Destroy(Actor* actor, PlayState* play) {
     ActorOverlay* overlayEntry;
     char* name;
 
+#if PLATFORM_PSP
+    OotPspFrameInterpolation_ForgetIdentity(actor);
+#endif
     if (actor->destroy != NULL) {
         actor->destroy(actor, play);
         actor->destroy = NULL;
@@ -2607,6 +2613,9 @@ void Actor_Draw(PlayState* play, Actor* actor) {
     ObjectEntry* slots;
 #endif
 
+#if PLATFORM_PSP
+    OotPspFrameInterpolation_SetIdentity(actor);
+#endif
     Fault_AddClient(&faultClient, Actor_FaultPrint, actor, "Actor_draw");
 
     OPEN_DISPS(play->state.gfxCtx, "../z_actor.c", 6035);
@@ -2675,6 +2684,9 @@ void Actor_Draw(PlayState* play, Actor* actor) {
     CLOSE_DISPS(play->state.gfxCtx, "../z_actor.c", 6119);
 
     Fault_RemoveClient(&faultClient);
+#if PLATFORM_PSP
+    OotPspFrameInterpolation_SetIdentity(NULL);
+#endif
 }
 
 void Actor_UpdateFlaggedAudio(Actor* actor) {

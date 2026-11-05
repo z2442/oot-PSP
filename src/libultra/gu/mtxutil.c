@@ -1,10 +1,16 @@
 #include "ultra64.h"
+#if PLATFORM_PSP
+#include "oot_psp_frame_interpolation.h"
+#endif
 
 void guMtxF2L(f32 mf[4][4], Mtx* m) {
     s32 i, j;
     s32 e1, e2;
     s32 *ai, *af;
 
+#if PLATFORM_PSP
+    OotPspFrameInterpolation_Record(m, mf, __builtin_return_address(0));
+#endif
     ai = (s32*)&m->m[0][0];
     af = (s32*)&m->m[2][0];
 
