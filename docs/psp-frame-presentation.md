@@ -44,12 +44,32 @@ without running catch-up simulation ticks.
 
 ## Buffer ownership
 
+The game thread publishes each tick's audio requests before translating its
+completed display list into GE commands. AudioGen continues at its independent
+60 Hz cadence, preparing sequence/control state on Allegrex and submitting
+command construction and mixing to the ME.
+
+After `sceGuFinish`, the `OOT PSP Video` thread owns GE completion and
+presentation, including vblank waits and 480i field conversion. Submission
+returns immediately so the game thread can run the following tick's logic and
+build its N64 display list while the previous tick finishes on the GE. Only one
+GU frame is outstanding. Before translating the following display list, the
+game thread joins the worker, then releases retained mesh pins and reuses the
+command list, cached vertex arena and textures. Interpolated presentations use
+the same handoff and fence between passes.
+
+Depth-buffer reads join the worker before consuming the previous frame's
+result. Display-mode changes, render/texture cache invalidation and game-state
+destruction also drain outstanding video work. HOME callback frames drain
+before invalidating GU state. If worker initialization fails, presentation
+uses the synchronous path.
+
 LCD and native 240p use three EDRAM color buffers plus a depth buffer. With
 VSync enabled, a completed color buffer is queued for the next vblank while
 the GE can render into the spare. Neither the scanned buffer nor the queued
 buffer is reused for drawing. Turning VSync off first retires a pending swap,
-then presents immediately. CPU/GPU completion remains synchronized because the
-renderer reuses command, texture and vertex storage after every presentation.
+then presents immediately. Render storage is reused only after the video
+worker's completion fence.
 
 720x480 TV modes retain double buffering: three 32-bit color buffers plus depth
 would exceed the Slim's 4 MiB of EDRAM. The 480i field conversion remains intact.
@@ -64,6 +84,10 @@ arena reuse, discontinuities, scope exclusion, context changes and overflow.
 per task, native update intervals, overruns and 32-bit timer wraparound.
 `tools/tests/test_psp_vsync.py` checks configuration, HOME controls, scanout
 ownership, queued/immediate swaps and EDRAM layouts with host SDK stubs.
+`tools/tests/test_psp_video_thread.py` runs the real worker and presentation
+handoff with host threads, checking logic progress during GE/vblank waits,
+ownership fences, VSync capture, repeated submissions and initialization
+failure cleanup.
 
 These checks and a PSPSDK build do not replace on-device play testing. Check
 movement, aiming, combat, cutscenes, room transitions, pause/HOME and LCD/TV mode

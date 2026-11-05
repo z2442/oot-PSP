@@ -46,6 +46,7 @@
 #include "oot_psp_dve.h"
 #include "oot_psp_memory.h"
 #include "oot_psp_video.h"
+#include "oot_psp_video_thread.h"
 #include "oot_psp_shadow.h"
 
 #include "oot_port_macros.h"
@@ -402,6 +403,9 @@ static bool gfx_scegu_read_depth(int32_t x, int32_t y, uint16_t *depth) {
         return false;
     }
 
+    /* Logic may already be building the next tick while GE writes this depth
+     * buffer. Only consumers of that result need to join the video worker. */
+    OotPspVideoThread_Wait();
     depthBuffer = (const volatile uint16_t *)gfx_scegu_vram_cpu_addr(sDepthBuffer);
     *depth = depthBuffer[(screenY * BUF_WIDTH) + screenX];
     return true;
@@ -1768,7 +1772,7 @@ static void gfx_scegu_draw_triangles(float buf_vbo[], UNUSED size_t buf_vbo_len,
                    GU_VERTEX_32BITF | GU_TRANSFORM_3D, 3 * buf_vbo_num_tris, 0, buf);
 }
 
-/* Retained buffers must remain pinned until finish_render completes. */
+/* Retained buffers stay pinned until the next frame joins the video worker. */
 void gfx_scegu_draw_native_mesh(const void* vertices, const uint16_t* indices,
                                unsigned int count, const float model[4][4], uint32_t cull) {
     if (!is_shader_enabled(cur_shader->shader_id)) {
@@ -1986,6 +1990,7 @@ int gfx_scegu_apply_video_mode(void) {
     OotPspVideoMode mode;
     int result;
 
+    OotPspVideoThread_Wait();
     OotPspVideo_GetMode(&mode);
     if ((mode.bufferWidth > sMaxBufferWidth) || (mode.displayHeight > sMaxScreenHeight)) {
         printf("oot-psp TV buffers unavailable requested=%dx%d max=%dx%d edram=%lu\n", mode.bufferWidth,
@@ -2171,6 +2176,8 @@ static void gfx_scegu_start_frame(void) {
     bool hasPauseBackground;
     bool hasStaticBackground;
 
+    OotPspVideoThread_Wait();
+
     /* GU state can be changed by intraFont and other callback rendering between
      * game frames. Revalidate once per frame, then suppress redundant texture
      * image/filter/wrap commands inside the frame. */
@@ -2272,10 +2279,9 @@ static void gfx_scegu_present_interlaced(void) {
     sDisplayBuffer = sSecondaryBuffer;
 }
 
-static void gfx_scegu_present_triple(void) {
+static void gfx_scegu_present_triple(int vsync) {
     void *front = NULL;
     int width, format, i;
-    int vsync = OotPspVideo_IsVSyncEnabled();
 
     /* Never overwrite a queued scanout target. With three buffers the CPU/GE
      * can render the next frame while this one waits for the next vblank. */
@@ -2300,16 +2306,18 @@ static void gfx_scegu_present_triple(void) {
     }
 }
 
-static void gfx_scegu_end_frame(void) {
+/* Captured before handing GU/display ownership to the video worker. */
+static int sFrameVSync;
+
+static void gfx_scegu_complete_frame(void) {
     void *previousDrawBuffer = sDrawBuffer;
 
-    sceGuFinish();
     sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
     if (sColorBufferCount == 3) {
-        gfx_scegu_present_triple();
+        gfx_scegu_present_triple(sFrameVSync);
         return;
     }
-    if (OotPspVideo_IsVSyncEnabled()) {
+    if (sFrameVSync) {
         sceDisplayWaitVblankStart();
     }
     if (sInterlacedOutput) {
@@ -2320,8 +2328,15 @@ static void gfx_scegu_end_frame(void) {
     }
 }
 
+static void gfx_scegu_end_frame(void) {
+    sceGuFinish();
+    sFrameVSync = OotPspVideo_IsVSyncEnabled();
+    OotPspVideoThread_Submit(gfx_scegu_complete_frame);
+}
+
 static void gfx_scegu_finish_render(void) {
-    /* There should be something here! */
+    /* Completion belongs to the video worker. The following frame fences it
+     * before reusing command, vertex, texture or retained mesh storage. */
 }
 
 // clang-format off

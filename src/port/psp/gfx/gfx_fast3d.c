@@ -39,6 +39,7 @@
 #include "oot_psp_memory.h"
 #if defined(TARGET_PSP)
 #include "oot_psp_performance.h"
+#include "oot_psp_video_thread.h"
 #endif
 #include "segmented_address.h"
 #include "sys_matrix.h"
@@ -2002,6 +2003,9 @@ static void gfx_texture_cache_clear(void) {
 }
 
 void gfx_invalidate_texture_cache(void) {
+#if defined(TARGET_PSP)
+    OotPspVideoThread_Wait();
+#endif
     /* A PSP display-route change reinitializes the GU and may disturb texture
      * data in the upper EDRAM aperture. This entry point is called between
      * frames, after the old GU list has completed, so only discard the CPU and
@@ -7548,6 +7552,14 @@ struct GfxRenderingAPI *gfx_get_current_rendering_api(void) {
 void gfx_start_frame(void) {
     //sceIoWrite(1, "----START FRAME!\n", 18);
 #if defined(TARGET_PSP)
+    /* The previous tick's GE/presentation waits ran on the video thread while
+     * game logic built this display list. Fence before recycling render data. */
+    OotPspVideoThread_Wait();
+#if defined(F3DEX_GBI_2) && OOT_PSP_NATIVE_MESH_ENTRIES > 0
+    for (unsigned int i = 0; i < OOT_PSP_NATIVE_MESH_ENTRIES; i++) {
+        sNativeMeshes[i].pinned = false;
+    }
+#endif
     sTextureCacheFrameSerial++;
     if (sTextureCacheFrameSerial == 0) {
         sTextureCacheFrameSerial = 1;
@@ -7623,15 +7635,15 @@ void gfx_end_frame(void) {
     //sceIoWrite(1, "----END FRAME!\n", 16);
     if (!dropped_frame) {
         gfx_rapi->finish_render();
-#if defined(TARGET_PSP) && defined(F3DEX_GBI_2) && OOT_PSP_NATIVE_MESH_ENTRIES > 0
-        for (unsigned int i = 0; i < OOT_PSP_NATIVE_MESH_ENTRIES; i++) sNativeMeshes[i].pinned = false;
-#endif
         gfx_wapi->swap_buffers_end();
     }
 
 }
 
 void gfx_invalidate_render_state(void) {
+#if defined(TARGET_PSP)
+    OotPspVideoThread_Wait();
+#endif
     gfx_flush();
 
     if (gfx_rapi != NULL) {

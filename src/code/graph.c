@@ -33,6 +33,7 @@
 #include "oot_psp_audio_backend.h"
 #include "oot_psp_frame_interpolation.h"
 #include "oot_psp_video.h"
+#include "oot_psp_video_thread.h"
 #include "oot_psp_performance.h"
 #endif
 
@@ -506,21 +507,27 @@ void Graph_Update(GraphicsContext* gfxCtx, GameState* gameState) {
                                     "Zelda 4 is dead (graph_alloc is empty)\n") VT_RST);
     }
 
+#if defined(TARGET_PSP)
+#if defined(OOTDEBUG)
+    audioStartUsec = OotPspPerformance_Now();
+#endif
+    /* Publish this tick's requests before rendering its completed display
+     * list, so the audio producer/ME can overlap that work. */
+    Audio_Update();
+    OotPspAudio_Update();
+#if defined(OOTDEBUG)
+    audioEndUsec = OotPspPerformance_Now();
+#endif
+#endif
+
     if (!problem) {
         Graph_TaskSet00(gfxCtx);
         gfxCtx->gfxPoolIdx++;
         gfxCtx->fbIdx++;
     }
 
-#if defined(TARGET_PSP) && defined(OOTDEBUG)
-    audioStartUsec = OotPspPerformance_Now();
-#endif
+#if !defined(TARGET_PSP)
     Audio_Update();
-#if defined(TARGET_PSP)
-    OotPspAudio_Update();
-#endif
-#if defined(TARGET_PSP) && defined(OOTDEBUG)
-    audioEndUsec = OotPspPerformance_Now();
 #endif
 
     {
@@ -601,6 +608,9 @@ void Graph_ThreadEntry(void* arg0) {
         }
 
         nextOvl = Graph_GetNextGameState(gameState);
+#if defined(TARGET_PSP)
+        OotPspVideoThread_Wait();
+#endif
         GameState_Destroy(gameState);
         SYSTEM_ARENA_FREE(gameState, "../graph.c", 1227);
         Overlay_FreeGameState(ovl);

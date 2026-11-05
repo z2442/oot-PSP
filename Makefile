@@ -1446,6 +1446,7 @@ PSP_PORT_RUNTIME_SOURCES := \
 	src/port/psp/oot_psp_renderer.c \
 	src/port/psp/oot_psp_runtime_patch.c \
 	src/port/psp/oot_psp_video.c \
+	src/port/psp/oot_psp_video_thread.c \
 	src/port/psp/sys_ucode_psp.c \
 	src/port/psp/libultra_psp.c \
 	src/port/psp/sched_psp.c

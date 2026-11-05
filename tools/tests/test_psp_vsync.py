@@ -62,6 +62,10 @@ static void* gfx_scegu_vram_cpu_addr(const void* address) { return (void*)addres
 static char trace[64];
 static unsigned traceLength;
 static void record(char event) { trace[traceLength++]=event; trace[traceLength]=0; }
+/* Exercise presentation policy synchronously here; the real asynchronous
+ * handoff and ownership fence have their own video-thread test. */
+static int sFrameVSync;
+static void OotPspVideoThread_Submit(void (*complete)(void)) { complete(); }
 static void sceGuFinish(void) { record('F'); }
 static void sceGuSync(int a,int b) { (void)a;(void)b;record('S'); }
 static void sceDisplayWaitVblankStart(void) {
@@ -172,7 +176,7 @@ defines = "\n".join(re.findall(r"^#define OOT_PSP_VIDEO_MENU_ROW_.*", menu, re.M
 code = video + stubs + defines
 for name in ("OotPspHomeMenu_MoveVideoSelection", "OotPspHomeMenu_AdjustVideoRow", "OotPspHomeMenu_ActivateVideoRow"):
     code += function(menu, name)
-code += function(backend, "gfx_scegu_reset_framebuffers") + function(backend, "gfx_scegu_present_triple") + function(backend, "gfx_scegu_end_frame") + tests
+code += function(backend, "gfx_scegu_reset_framebuffers") + function(backend, "gfx_scegu_present_triple") + function(backend, "gfx_scegu_complete_frame") + function(backend, "gfx_scegu_end_frame") + tests
 with tempfile.TemporaryDirectory(prefix="oot-vsync-") as directory:
     path = Path(directory)
     (path / "pspiofilemgr.h").write_text('''#include <fcntl.h>
