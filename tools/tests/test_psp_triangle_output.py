@@ -19,6 +19,7 @@ preamble = r'''
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#define GFX_DL_HANDLER __attribute__((noinline))
 #define CC_0 0
 #define CC_PRIM 3
 #define CC_SHADE 4
@@ -62,30 +63,42 @@ common = ''.join(function(name) for name in ('gfx_get_vertex_color','gfx_color_m
     'gfx_arrow_shimmer_alpha','gfx_color_mul_env','gfx_color_mul_prim',
     'gfx_two_texture_blend_pass_alphas','gfx_get_vertex_rgba'))
 helpers = function('gfx_prepare_color_multipliers')+function('gfx_dp_set_env_color')
+helpers += function('gfx_initialize_fog_prefix')
 helpers += function('gfx_emit_simple_base_vertex')+function('gfx_emit_simple_vertices')
-start = source.index('    size_t i;\n    for (i = 0; i < clipped_vertices_num; i++) {',
-                     source.index('static void gfx_sp_triangles('))
-loop = source[start:source.index('    buf_vbo_num_tris += new_tri_count;',start)]
-reference = r'''
+general = function('gfx_emit_general_vertices')
+loop = general[general.index('    size_t i;'):general.rindex('\n}')]
+emitter = r'''
 static void reference_emit(struct LoadedVertex* const* clipped_vertices,size_t clipped_vertices_num,
                            const struct TriPipelineState* state) {
     struct ColorCombiner* comb=state->comb;
     bool use_alpha=state->use_alpha,use_texture=state->use_texture;
     const float *tex_u_scale=state->tex_u_scale,*tex_v_scale=state->tex_v_scale;
     const float *tex_u_bias=state->tex_u_bias,*tex_v_bias=state->tex_v_bias;
-    unsigned shader_program_id=0;
-'''+loop+'}\n'
+'''
+# The reference eagerly writes every fog vertex, as before the optimization.
+# Keep it independent of lazy prefix initialization and visibility gating.
+reference = emitter + loop.replace('gfx_initialize_fog_prefix(state, buf_num_vert);', '(void)0;').replace(
+    'if (sBatchHasVisibleFog) {', 'if (true) {').replace(
+    'if (state->use_fog && (sBatchHasVisibleFog || vertex->fog_alpha != 0)) {',
+    'if (state->use_fog) {') + '}\n'
+reference += general.replace('gfx_emit_general_vertices(', 'general_emit(')
 tests = r'''
 static uint32_t seed=124893;
 static uint32_t next(void) { seed=seed*1664525U+1013904223U;return seed; }
 static float value(void) { return ((int)(next()%65536)-32768)*0.03125f; }
-static void clear(size_t prefix,bool fog) {
+static void clear(size_t prefix,bool fog,bool textured) {
     memset(buf_vbo,0xcc,sizeof(buf_vbo));memset(&buf_vbo_fog,0xcc,sizeof(buf_vbo_fog));
+    struct RGBA color=rdp.fog_color;color.a=0;
+    for (size_t i=0;i<prefix;i++) {
+        if (textured) buf_vbo_fog.textured[i]=(psp_fog_textured_t){buf_vbo[i].u,buf_vbo[i].v,color,
+            buf_vbo[i].x,buf_vbo[i].y,buf_vbo[i].z};
+        else buf_vbo_fog.color[i]=(psp_fog_color_t){color,buf_vbo[i].x,buf_vbo[i].y,buf_vbo[i].z};
+    }
     buf_num_vert=prefix;buf_vbo_len=prefix*sizeof(psp_fast_t);sBatchHasVisibleFog=fog;
 }
 int main(void) {
     struct LoadedVertex input[21],*vertices[21];
-    psp_fast_t expected[32]; unsigned char expectedFog[sizeof(buf_vbo_fog)];
+    psp_fast_t expected[32]; unsigned char expectedFog[sizeof(buf_vbo_fog)],initialFog[sizeof(buf_vbo_fog)];
     struct ColorCombiner comb={{CC_SHADE,CC_SHADE}};
     // Environment factors are baked into the prepared flags now. White ->
     // tinted -> white transitions must invalidate state without a new combiner.
@@ -120,16 +133,19 @@ int main(void) {
             vertices[i]=&input[i];
         }
         rdp.fog_color=(struct RGBA){next(),next(),next(),next()};
-        clear(prefix,priorFog);reference_emit(vertices,count,&state);
+        clear(prefix,priorFog,state.fog_uses_texture_alpha);reference_emit(vertices,count,&state);
         memcpy(expected,buf_vbo,sizeof(expected));memcpy(expectedFog,&buf_vbo_fog,sizeof(expectedFog));
         bool expectedVisible=sBatchHasVisibleFog;
-        clear(prefix,priorFog);assert(gfx_emit_simple_vertices(vertices,count,&state));
+        clear(prefix,priorFog,state.fog_uses_texture_alpha);
+        memcpy(initialFog,&buf_vbo_fog,sizeof(initialFog));
+        assert(gfx_emit_simple_vertices(vertices,count,&state));
         assert(memcmp(expected,buf_vbo,sizeof(expected))==0);
-        assert(memcmp(expectedFog,&buf_vbo_fog,sizeof(expectedFog))==0);
+        if (expectedVisible) assert(memcmp(expectedFog,&buf_vbo_fog,sizeof(expectedFog))==0);
+        else assert(memcmp(initialFog,&buf_vbo_fog,sizeof(initialFog))==0);
         assert(buf_num_vert==prefix+count && buf_vbo_len==(prefix+count)*sizeof(psp_fast_t));
         assert(sBatchHasVisibleFog==expectedVisible);
         // All special materials must retain the general emitter with no writes.
-        clear(prefix,priorFog);memcpy(expected,buf_vbo,sizeof(expected));
+        clear(prefix,priorFog,state.fog_uses_texture_alpha);memcpy(expected,buf_vbo,sizeof(expected));
         memcpy(expectedFog,&buf_vbo_fog,sizeof(expectedFog));
         switch (iteration%8) {
             case 0:state.color_mul_env=true;break;
@@ -170,17 +186,55 @@ int main(void) {
                 .color={next(),next(),next(),next()},.fog_alpha=next()};
             vertices[i]=&input[i];
         }
-        clear(0,false);reference_emit(vertices,count,&state);
+        clear(0,false,state.fog_uses_texture_alpha);reference_emit(vertices,count,&state);
         memcpy(expected,buf_vbo,sizeof(expected));memcpy(expectedFog,&buf_vbo_fog,sizeof(expectedFog));
         bool expectedVisible=sBatchHasVisibleFog;
         gfx_prepare_color_multipliers(&state);
-        clear(0,false);
+        clear(0,false,state.fog_uses_texture_alpha);
         bool simple=gfx_emit_simple_vertices(vertices,count,&state);
-        if (!simple) reference_emit(vertices,count,&state);
+        if (!simple) general_emit(vertices,count,&state);
         if ((iteration&48)==48) assert(simple);
         assert(memcmp(expected,buf_vbo,sizeof(expected))==0);
-        assert(memcmp(expectedFog,&buf_vbo_fog,sizeof(expectedFog))==0);
+        if (expectedVisible) assert(memcmp(expectedFog,&buf_vbo_fog,sizeof(expectedFog))==0);
         assert(sBatchHasVisibleFog==expectedVisible && buf_num_vert==count);
+    }
+    // Mixed batches cross from clear polygons to visible fog and back while
+    // alternating the shade and general emitters. The first foggy polygon
+    // starts with a fully transparent vertex, so the general path must also
+    // backfill earlier vertices from its own partially emitted polygon.
+    for (unsigned mode=0;mode<16;mode++) {
+        struct TriPipelineState state={.comb=&comb,.use_alpha=true,.use_texture=true,.use_fog=true,
+            .fog_uses_texture_alpha=(mode&1)!=0,.tex_u_scale={0.25f},.tex_v_scale={0.5f}};
+        rdp.env_color=(struct RGBA){90,60,127,255};
+        rdp.fog_color=(struct RGBA){42,85,128,255};
+        for (unsigned i=0;i<21;i++) {
+            input[i]=(struct LoadedVertex){.x=value(),.y=value(),.z=value(),.u=value(),.v=value(),
+                .normal={value(),value(),value()},.color={next(),next(),next(),255},
+                .fog_alpha=i>=12 && i<15 ? 128 : 0};
+            vertices[i]=&input[i];
+        }
+        input[12].color.a=0;
+        comb.vertex_color_source[1]=(mode&2) ? CC_0 : CC_SHADE;
+        clear(0,false,state.fog_uses_texture_alpha);
+        for (unsigned part=0;part<7;part++) {
+            state.color_mul_env=((part+mode)&1)!=0;
+            reference_emit(vertices+part*3,3,&state);
+        }
+        memcpy(expected,buf_vbo,sizeof(expected));memcpy(expectedFog,&buf_vbo_fog,sizeof(expectedFog));
+        assert(sBatchHasVisibleFog);
+        clear(0,false,state.fog_uses_texture_alpha);
+        for (unsigned part=0;part<7;part++) {
+            state.color_mul_env=((part+mode)&1)!=0;
+            if (!gfx_emit_simple_vertices(vertices+part*3,3,&state)) general_emit(vertices+part*3,3,&state);
+            if (part<4) {
+                assert(!sBatchHasVisibleFog);
+                unsigned char* fogBytes=(unsigned char*)&buf_vbo_fog;
+                for (size_t i=0;i<sizeof(buf_vbo_fog);i++) assert(fogBytes[i]==0xcc);
+            }
+        }
+        assert(buf_num_vert==21 && sBatchHasVisibleFog);
+        assert(memcmp(expected,buf_vbo,sizeof(expected))==0);
+        assert(memcmp(expectedFog,&buf_vbo_fog,sizeof(expectedFog))==0);
     }
     puts("Triangle output: 100000 shade/UV/fog equivalence cases, clipped polygons and material fallback passed");
 }

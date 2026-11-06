@@ -18,8 +18,8 @@ def function(name):
 flush = function("gfx_flush")
 reference = flush.replace("gfx_flush(", "reference_flush(").replace(
     "rendering_state.tri_pipeline.use_fog && sBatchHasVisibleFog", "rendering_state.tri_pipeline.use_fog")
-start = source.index("        if (state->use_fog) {", source.index("static void gfx_sp_triangles("))
-end = source.index("        if (shader_program_id", start)
+start = source.index("        if (state->use_fog", source.index("static GFX_DL_HANDLER void gfx_emit_general_vertices("))
+end = source.index("        buf_num_vert++;", start)
 emit = source[start:end]
 
 preamble = r'''
@@ -89,11 +89,19 @@ static struct { void (*draw_triangles)(float*,size_t,size_t); void (*set_use_alp
     api={base,set_alpha,select_texture,fog,set_depth_bias},*gfx_rapi=&api;
 '''
 common = function("gfx_color_mul_channel") + function("gfx_two_texture_blend_pass_alphas")
+common += function("gfx_initialize_fog_prefix")
 common += "static void emit(struct LoadedVertex* vertex,uint8_t surfaceAlpha) {\n"
 common += "struct TriPipelineState* state=&rendering_state.tri_pipeline;\npsp_fast_t* out=&buf_vbo[buf_num_vert];\n"
 common += emit + "}\n"
+common += "static void reference_emit(struct LoadedVertex* vertex,uint8_t surfaceAlpha) {\n"
+common += "struct TriPipelineState* state=&rendering_state.tri_pipeline;\npsp_fast_t* out=&buf_vbo[buf_num_vert];\n"
+common += emit.replace("gfx_initialize_fog_prefix(state, buf_num_vert);", "(void)0;").replace(
+    "if (sBatchHasVisibleFog) {", "if (true) {").replace(
+    "if (state->use_fog && (sBatchHasVisibleFog || vertex->fog_alpha != 0)) {",
+    "if (state->use_fog) {") + "}\n"
 
 tests = r'''
+static bool referenceEmission;
 static void prepare(unsigned mode,uint8_t alpha,uint8_t mix,bool mixed,bool transparent) {
     memset(&rendering_state,0,sizeof(rendering_state));
     rendering_state.tri_pipeline=(struct TriPipelineState){
@@ -102,7 +110,8 @@ static void prepare(unsigned mode,uint8_t alpha,uint8_t mix,bool mixed,bool tran
         .two_texture_uncompensated_alpha=(mode&16)!=0,.two_texture_blend_uses_prim_lod=(mode&32)!=0,.comb=&comb};
     rendering_state.textures[0]=&textures[0]; rendering_state.textures[1]=&textures[1];
     rdp.fog_color=(struct RGBA){42,85,128,255}; rdp.env_color.a=mix; rdp.prim_lod_frac=mix;
-    memset(buf_vbo,0,sizeof(buf_vbo)); memset(&buf_vbo_fog,0,sizeof(buf_vbo_fog));
+    memset(buf_vbo,0,sizeof(buf_vbo)); memset(&buf_vbo_fog,0xcc,sizeof(buf_vbo_fog));
+    memset(buf_vbo_fog_tex1_alpha,0xdd,sizeof(buf_vbo_fog_tex1_alpha));
     sBatchHasVisibleFog=false;
     sBatchDepthBias=0;
     for (unsigned i=0;i<9;i++) {
@@ -110,7 +119,8 @@ static void prepare(unsigned mode,uint8_t alpha,uint8_t mix,bool mixed,bool tran
         buf_vbo[i]=(psp_fast_t){i,i,{200,150,100,255},{0,0,0},i,i,i};
         buf_vbo_tex1[i]=(psp_uv_t){i+10,i+20,128};
         struct LoadedVertex vertex={i,i,i,mixed && i!=8 ? 0 : alpha};
-        emit(&vertex,transparent ? 0 : 255);
+        if (referenceEmission) reference_emit(&vertex,transparent ? 0 : 255);
+        else emit(&vertex,transparent ? 0 : 255);
     }
     buf_num_vert=9; buf_vbo_num_tris=3; buf_vbo_len=9*sizeof(psp_fast_t);
     trace=(Trace){0};
@@ -120,8 +130,10 @@ int main(void) {
     const uint8_t values[]={0,1,2,127,254,255};
     for (unsigned mode=0;mode<64;mode++) for (unsigned a=0;a<6;a++) for (unsigned mix=0;mix<256;mix++) {
         for (unsigned variant=0;variant<3;variant++) {
+            referenceEmission=true;
             prepare(mode,values[a],mix,variant==1,variant==2);
             reference_flush(); Trace expected=trace;
+            referenceEmission=false;
             prepare(mode,values[a],mix,variant==1,variant==2);
             bool visible=sBatchHasVisibleFog;
             gfx_flush();

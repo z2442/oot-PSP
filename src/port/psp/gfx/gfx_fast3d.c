@@ -4226,7 +4226,37 @@ static inline __attribute__((always_inline)) void gfx_emit_simple_base_vertex(
     out->z = vertex->z;
 }
 
-static bool gfx_emit_simple_vertices(struct LoadedVertex* const* vertices, size_t count,
+static void gfx_initialize_fog_prefix(const struct TriPipelineState* state, size_t count) {
+    /* Earlier polygons in this batch had zero fog in both passes. If a later
+     * polygon makes fog visible, reconstruct their transparent overlay from
+     * the base vertices once. Entirely clear batches never build this stream. */
+    struct RGBA color = rdp.fog_color;
+    color.a = 0;
+    if (state->fog_uses_texture_alpha) {
+        psp_fog_textured_t* fog = buf_vbo_fog.textured;
+        for (size_t i = 0; i < count; i++) {
+            fog[i].u = buf_vbo[i].u;
+            fog[i].v = buf_vbo[i].v;
+            fog[i].color = color;
+            fog[i].x = buf_vbo[i].x;
+            fog[i].y = buf_vbo[i].y;
+            fog[i].z = buf_vbo[i].z;
+        }
+    } else {
+        psp_fog_color_t* fog = buf_vbo_fog.color;
+        for (size_t i = 0; i < count; i++) {
+            fog[i].color = color;
+            fog[i].x = buf_vbo[i].x;
+            fog[i].y = buf_vbo[i].y;
+            fog[i].z = buf_vbo[i].z;
+        }
+    }
+    if (state->two_texture_blend && state->two_texture_alpha_blend) {
+        memset(buf_vbo_fog_tex1_alpha, 0, count);
+    }
+}
+
+static GFX_DL_HANDLER bool gfx_emit_simple_vertices(struct LoadedVertex* const* vertices, size_t count,
                                      const struct TriPipelineState* state) {
     const struct ColorCombiner* comb = state->comb;
     psp_fast_t* output;
@@ -4252,7 +4282,20 @@ static bool gfx_emit_simple_vertices(struct LoadedVertex* const* vertices, size_
             gfx_emit_simple_base_vertex(output + i, vertices[i], false, uScale, vScale, uBias, vBias);
         }
     }
-    if (state->use_fog) {
+    bool emitFog = state->use_fog && sBatchHasVisibleFog;
+    if (state->use_fog && !emitFog) {
+        for (size_t i = 0; i < count; i++) {
+            const struct LoadedVertex* vertex = vertices[i];
+            const uint8_t alpha = state->use_alpha
+                ? gfx_color_mul_channel(vertex->fog_alpha, vertex->color.a) : vertex->fog_alpha;
+            if (alpha != 0) {
+                gfx_initialize_fog_prefix(state, buf_num_vert);
+                emitFog = true;
+                break;
+            }
+        }
+    }
+    if (emitFog) {
         const struct RGBA color = rdp.fog_color;
         uint8_t visibleAlpha = 0;
 
@@ -4290,6 +4333,122 @@ static bool gfx_emit_simple_vertices(struct LoadedVertex* const* vertices, size_
     buf_num_vert += count;
     buf_vbo_len += count * sizeof(psp_fast_t);
     return true;
+}
+
+/* Keep the multipass/tint/LOD fallback out of the common triangle handler.
+ * Its register saves and instruction footprint otherwise affect ordinary
+ * character triangles even when the shade-copy emitter handles them. */
+static GFX_DL_HANDLER void gfx_emit_general_vertices(struct LoadedVertex* const* clipped_vertices,
+                                                     size_t clipped_vertices_num,
+                                                     const struct TriPipelineState* state) {
+    struct ColorCombiner* comb = state->comb;
+    const bool use_alpha = state->use_alpha;
+    const bool use_texture = state->use_texture;
+    const float* tex_u_scale = state->tex_u_scale;
+    const float* tex_v_scale = state->tex_v_scale;
+    const float* tex_u_bias = state->tex_u_bias;
+    const float* tex_v_bias = state->tex_v_bias;
+
+    size_t i;
+    for (i = 0; i < clipped_vertices_num; i++) {
+        const struct LoadedVertex *vertex = clipped_vertices[i];
+        psp_fast_t *out = &buf_vbo[buf_num_vert];
+
+        out->x = vertex->x;
+        out->y = vertex->y;
+        out->z = vertex->z;
+        memcpy(out->normal, vertex->normal, sizeof(out->normal));
+
+        if (use_texture) {
+            out->u = vertex->u * tex_u_scale[0] + tex_u_bias[0];
+            out->v = vertex->v * tex_v_scale[0] + tex_v_bias[0];
+            if (state->two_texture_blend) {
+                buf_vbo_tex1[buf_num_vert].u = vertex->u * tex_u_scale[1] + tex_u_bias[1];
+                buf_vbo_tex1[buf_num_vert].v = vertex->v * tex_v_scale[1] + tex_v_bias[1];
+            }
+        } else {
+            out->u = 0.0f;
+            out->v = 0.0f;
+        }
+
+        out->color = gfx_get_vertex_rgba(comb, use_alpha, &vertex->color, vertex->w, true);
+        if (state->texture_tint_colors_corrected) {
+            out->color.r = state->texture_tint_env_color.r;
+            out->color.g = state->texture_tint_env_color.g;
+            out->color.b = state->texture_tint_env_color.b;
+        }
+        if (state->color_mul_env) {
+            gfx_color_mul_env(&out->color);
+        }
+        if (state->color_mul_prim) {
+            gfx_color_mul_prim(&out->color);
+        }
+        if (state->alpha_mul_env) {
+            out->color.a = gfx_color_mul_channel(out->color.a, rdp.env_color.a);
+        }
+
+        const uint8_t surfaceAlpha = use_alpha ? out->color.a : 0xFF;
+
+        if (state->two_texture_blend) {
+            uint8_t baseAlpha;
+            uint8_t overlayAlpha;
+            const uint8_t mixAlpha = state->two_texture_blend_uses_prim_lod
+                                         ? rdp.prim_lod_frac
+                                         : rdp.env_color.a;
+
+            gfx_two_texture_blend_pass_alphas(out->color.a, mixAlpha, state->two_texture_alpha_blend,
+                                              state->two_texture_uncompensated_alpha, &baseAlpha,
+                                              &overlayAlpha);
+            out->color.a = baseAlpha;
+            if (state->arrow_glow) overlayAlpha = gfx_arrow_shimmer_alpha(overlayAlpha, vertex->v);
+            buf_vbo_tex1[buf_num_vert].alpha = overlayAlpha;
+        }
+        if (state->use_fog && (sBatchHasVisibleFog || vertex->fog_alpha != 0)) {
+            struct RGBA fogColor = rdp.fog_color;
+            const bool hadVisibleFog = sBatchHasVisibleFog;
+
+            fogColor.a = gfx_color_mul_channel(vertex->fog_alpha, surfaceAlpha);
+            if (state->two_texture_blend && state->two_texture_alpha_blend) {
+                uint8_t baseAlpha;
+                uint8_t overlayAlpha;
+                const uint8_t mixAlpha = state->two_texture_blend_uses_prim_lod
+                                             ? rdp.prim_lod_frac
+                                             : rdp.env_color.a;
+
+                gfx_two_texture_blend_pass_alphas(fogColor.a, mixAlpha, true,
+                                                  state->two_texture_uncompensated_alpha, &baseAlpha,
+                                                  &overlayAlpha);
+                fogColor.a = baseAlpha;
+                buf_vbo_fog_tex1_alpha[buf_num_vert] = overlayAlpha;
+                sBatchHasVisibleFog |= overlayAlpha != 0;
+            }
+            sBatchHasVisibleFog |= fogColor.a != 0;
+            if (!hadVisibleFog && sBatchHasVisibleFog) {
+                gfx_initialize_fog_prefix(state, buf_num_vert);
+            }
+            if (sBatchHasVisibleFog) {
+                if (state->fog_uses_texture_alpha) {
+                    psp_fog_textured_t* fogOut = &buf_vbo_fog.textured[buf_num_vert];
+
+                    fogOut->u = out->u;
+                    fogOut->v = out->v;
+                    fogOut->color = fogColor;
+                    fogOut->x = vertex->x;
+                    fogOut->y = vertex->y;
+                    fogOut->z = vertex->z;
+                } else {
+                    psp_fog_color_t* fogOut = &buf_vbo_fog.color[buf_num_vert];
+
+                    fogOut->color = fogColor;
+                    fogOut->x = vertex->x;
+                    fogOut->y = vertex->y;
+                    fogOut->z = vertex->z;
+                }
+            }
+        }
+        buf_num_vert++;
+        buf_vbo_len += sizeof(psp_fast_t);
+    }
 }
 
 static void gfx_sp_triangles(uint32_t packed0, uint32_t packed1, uint8_t triangleCount) {
@@ -4401,13 +4560,6 @@ static void gfx_sp_triangles(uint32_t packed0, uint32_t packed1, uint8_t triangl
     gfx_prepare_tri_pipeline_state();
     const struct TriPipelineState *state = &rendering_state.tri_pipeline;
     struct ColorCombiner *comb = state->comb;
-    const bool use_alpha = state->use_alpha;
-    const bool use_texture = state->use_texture;
-    const float* tex_u_scale = state->tex_u_scale;
-    const float* tex_v_scale = state->tex_v_scale;
-    const float* tex_u_bias = state->tex_u_bias;
-    const float* tex_v_bias = state->tex_v_bias;
-    const uint32_t shader_program_id = rendering_state.shader_program->shader_id;
 
     /* Lighting is a load-time property, like position. In particular, a limb
      * matrix change must not rotate normals or relight cached parent vertices.
@@ -4456,103 +4608,7 @@ static void gfx_sp_triangles(uint32_t packed0, uint32_t packed1, uint8_t triangl
         continue;
     }
 
-    size_t i;
-    for (i = 0; i < clipped_vertices_num; i++) {
-        const struct LoadedVertex *vertex = clipped_vertices[i];
-        psp_fast_t *out = &buf_vbo[buf_num_vert];
-
-        out->x = vertex->x;
-        out->y = vertex->y;
-        out->z = vertex->z;
-        memcpy(out->normal, vertex->normal, sizeof(out->normal));
-        
-        if (use_texture) {
-            out->u = vertex->u * tex_u_scale[0] + tex_u_bias[0];
-            out->v = vertex->v * tex_v_scale[0] + tex_v_bias[0];
-            if (state->two_texture_blend) {
-                buf_vbo_tex1[buf_num_vert].u = vertex->u * tex_u_scale[1] + tex_u_bias[1];
-                buf_vbo_tex1[buf_num_vert].v = vertex->v * tex_v_scale[1] + tex_v_bias[1];
-            }
-        } else {
-            out->u = 0.0f;
-            out->v = 0.0f;
-        }
-        
-        out->color = gfx_get_vertex_rgba(comb, use_alpha, &vertex->color, vertex->w, true);
-        if (state->texture_tint_colors_corrected) {
-            out->color.r = state->texture_tint_env_color.r;
-            out->color.g = state->texture_tint_env_color.g;
-            out->color.b = state->texture_tint_env_color.b;
-        }
-        if (state->color_mul_env) {
-            gfx_color_mul_env(&out->color);
-        }
-        if (state->color_mul_prim) {
-            gfx_color_mul_prim(&out->color);
-        }
-        if (state->alpha_mul_env) {
-            out->color.a = gfx_color_mul_channel(out->color.a, rdp.env_color.a);
-        }
-
-        const uint8_t surfaceAlpha = use_alpha ? out->color.a : 0xFF;
-
-        if (state->two_texture_blend) {
-            uint8_t baseAlpha;
-            uint8_t overlayAlpha;
-            const uint8_t mixAlpha = state->two_texture_blend_uses_prim_lod
-                                         ? rdp.prim_lod_frac
-                                         : rdp.env_color.a;
-
-            gfx_two_texture_blend_pass_alphas(out->color.a, mixAlpha, state->two_texture_alpha_blend,
-                                              state->two_texture_uncompensated_alpha, &baseAlpha,
-                                              &overlayAlpha);
-            out->color.a = baseAlpha;
-            if (state->arrow_glow) overlayAlpha = gfx_arrow_shimmer_alpha(overlayAlpha, vertex->v);
-            buf_vbo_tex1[buf_num_vert].alpha = overlayAlpha;
-        }
-        if (state->use_fog) {
-            struct RGBA fogColor = rdp.fog_color;
-
-            fogColor.a = gfx_color_mul_channel(vertex->fog_alpha, surfaceAlpha);
-            if (state->two_texture_blend && state->two_texture_alpha_blend) {
-                uint8_t baseAlpha;
-                uint8_t overlayAlpha;
-                const uint8_t mixAlpha = state->two_texture_blend_uses_prim_lod
-                                             ? rdp.prim_lod_frac
-                                             : rdp.env_color.a;
-
-                gfx_two_texture_blend_pass_alphas(fogColor.a, mixAlpha, true,
-                                                  state->two_texture_uncompensated_alpha, &baseAlpha,
-                                                  &overlayAlpha);
-                fogColor.a = baseAlpha;
-                buf_vbo_fog_tex1_alpha[buf_num_vert] = overlayAlpha;
-                sBatchHasVisibleFog |= overlayAlpha != 0;
-            }
-            sBatchHasVisibleFog |= fogColor.a != 0;
-            if (state->fog_uses_texture_alpha) {
-                psp_fog_textured_t* fogOut = &buf_vbo_fog.textured[buf_num_vert];
-
-                fogOut->u = out->u;
-                fogOut->v = out->v;
-                fogOut->color = fogColor;
-                fogOut->x = vertex->x;
-                fogOut->y = vertex->y;
-                fogOut->z = vertex->z;
-            } else {
-                psp_fog_color_t* fogOut = &buf_vbo_fog.color[buf_num_vert];
-
-                fogOut->color = fogColor;
-                fogOut->x = vertex->x;
-                fogOut->y = vertex->y;
-                fogOut->z = vertex->z;
-            }
-        }
-        if (shader_program_id == 0x01A00045) {
-            /* Matches the old code, which only updated the temporary pointer after the copy. */
-        }
-        buf_num_vert++;
-        buf_vbo_len += sizeof(psp_fast_t);
-    }
+    gfx_emit_general_vertices(clipped_vertices, clipped_vertices_num, state);
     buf_vbo_num_tris += new_tri_count;
     if (buf_vbo_num_tris >= MAX_BUFFERED) {
         gfx_flush();

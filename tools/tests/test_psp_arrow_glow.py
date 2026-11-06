@@ -68,7 +68,7 @@ coordinates = section("static inline float gfx_texture_shift_scale(",
 edge_fade = section("static uint8_t gfx_arrow_shimmer_alpha(", "static inline void gfx_color_mul_env(")
 alpha_emission_start = source.index("        if (state->two_texture_blend) {",
                                     source.index("        const uint8_t surfaceAlpha = use_alpha ?"))
-alpha_emission = source[alpha_emission_start:source.index("        if (state->use_fog) {", alpha_emission_start)]
+alpha_emission = source[alpha_emission_start:source.index("        if (state->use_fog", alpha_emission_start)]
 emission = r'''
 static unsigned emit_alpha(uint8_t alpha,float v,bool arrow) {
     struct { struct { uint8_t a; } color; } output={.color={alpha}},*out=&output;

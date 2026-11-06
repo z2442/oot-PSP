@@ -46,7 +46,6 @@ struct ShaderProgram { uint32_t shader_id; };
 typedef struct { float u, v; struct RGBA color; float normal[3]; float x, y, z; } psp_fast_t;
 static psp_fast_t buf_vbo[48], buf_vbo_tex1[48];
 static size_t buf_num_vert, buf_vbo_len, buf_vbo_num_tris;
-static void gfx_flush(void) { assert(false); }
 '''
 declarations = section("struct TriPipelineState {", "static struct RSP {")
 globals_and_stubs = r'''
@@ -59,12 +58,6 @@ static struct {
     struct { unsigned int width,height; } viewport;
 } rendering_state;
 static TextureTileState* gfx_get_texture_tile(int slot) { return &rdp.texture_tile[slot]; }
-static void gfx_prepare_tri_pipeline_state(void) {}
-// Exercise the general UV path; test_psp_triangle_output covers the shade fast path.
-static bool gfx_emit_simple_vertices(struct LoadedVertex* const* vertices,size_t count,
-                                     const struct TriPipelineState* state) {
-    (void)vertices;(void)count;(void)state;return false;
-}
 '''
 preparation = section("static inline float gfx_texture_shift_scale(",
                       "#if defined(TARGET_PSP)\nstatic void gfx_prepare_flame_atlas_coord_state(")
@@ -72,19 +65,18 @@ preparation = section("static inline float gfx_texture_shift_scale(",
 helper = ""
 if "static GFX_DL_HANDLER void gfx_apply_unmasked_texture_axis(" in source:
     helper = section("static GFX_DL_HANDLER void gfx_apply_unmasked_texture_axis(", "struct ShaderProgram {")
-triangles = section("static void gfx_sp_triangles(", "#undef GFX_TRI_INDEX_DIVISOR")
-emission = triangles[triangles.index("    gfx_prepare_tri_pipeline_state();"):
-                     triangles.index("        out->color = gfx_get_vertex_rgba(")]
+general = section("static GFX_DL_HANDLER void gfx_emit_general_vertices(", "static void gfx_sp_triangles(")
+emission = general[general.index("    struct ColorCombiner* comb = state->comb;"):
+                   general.index("        out->color = gfx_get_vertex_rgba(")]
 wrapper = r'''
 static void emit(struct LoadedVertex vertices[3]) {
     struct LoadedVertex *v1 = &vertices[0], *v2 = &vertices[1], *v3 = &vertices[2];
     struct LoadedVertex* clipped_vertices[] = {v1, v2, v3};
     size_t clipped_vertices_num = 3;
+    const struct TriPipelineState* state=&rendering_state.tri_pipeline;
     buf_num_vert = buf_vbo_len = buf_vbo_num_tris = 0;
-    for (int once = 0; once < 1; once++) {
 ''' + emission + r'''
         ++buf_num_vert;
-    }
     }
     assert(buf_num_vert == 3);
 }

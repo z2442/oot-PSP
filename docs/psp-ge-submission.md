@@ -41,6 +41,21 @@ Multipass materials, color tints, environment/primitive multiplication, LOD colo
 and independent alpha sources continue through the general emitter. Clipping,
 winding, lighting, triangle order and animation timing are unchanged.
 
+Fog vertices are generated only after a batch acquires visible fog. Clear
+shade batches inspect fog alpha without writing an overlay stream; the general
+emitter also skips zero-fog work until the first visible vertex. If fog appears
+later in a batch, the earlier transparent overlay vertices are reconstructed
+once from the base stream, including secondary alpha for two-texture fog.
+Entirely clear batches avoid both fog-buffer construction and its GPU draw.
+
+The shade-copy and general vertex emitters are separate PSP functions so the
+compiler cannot inline the full tint/LOD/multipass fallback into the triangle
+handler. In the current release build, that handler shrinks from 15,512 to
+4,040 bytes and its stack frame from 136 to 80 bytes. The common shade emitter
+is 1,248 bytes; the general emitter is 4,636 bytes. These are compiler output
+measurements, not hardware timing results. Triangle order, clipping, batching
+and vertex calculations are preserved.
+
 ## Validation and measurement
 
 - `tools/tests/test_psp_ge_submit.py` checks command words, both publication
@@ -51,6 +66,10 @@ winding, lighting, triangle order and animation timing are unchanged.
   texture coordinates, surface alpha and both fog vertex formats. Another
   10,000 material cases compare output before and after removing identity
   multipliers, including non-white tints that must retain their multiplication.
+  Mixed shade/general batches verify clear-to-fog transitions and transparent
+  vertices against eager fog generation, and clear batches leave fog storage
+  untouched. `test_psp_zero_fog.py` compares 294,912 material/fog combinations
+  against eager emission, including both texture-alpha fog passes.
 - The existing PSP rendering and frame-pacing tests cover the surrounding paths.
 
 For a synthetic workload of 120 small uploaded draws, the old allocation/draw
