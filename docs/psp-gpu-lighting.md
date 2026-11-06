@@ -21,6 +21,15 @@ fog alpha independently. A saved light set stays attached to each loaded vertex,
 and changing batch lighting flushes queued geometry before updating GE state.
 Snapshots and ranking are reused until a light command changes the light set.
 
+Vertex-transform setup loads aligned model/projection matrices using eight
+quad loads instead of 32 scalar loads. Memory rows are read through transposed
+VFPU register views so dot products retain their original operand order. A
+word-aligned scalar fallback handles deferred native vertices and other
+unaligned matrix pointers. XYZ integer coordinates convert together with one
+triple instruction instead of three scalar conversions. Matrix bytes read,
+transform math and vertex layout are unchanged; these are instruction-count
+reductions, not measured FPS gains.
+
 The GU backend also retains the applied lighting registers across material
 batches. Equal light sets emit no repeated setup commands; fog and UI passes
 toggle lighting without discarding those registers. Changes update only the
@@ -71,6 +80,9 @@ The lighting test exercises the actual selection, snapshot, batch and GU setup
 functions with sanitizers, including repeated material/fog transitions and
 10,000 changing light sets. The assembly test interprets the actual transform and
 clipping instructions, including limb normals, vertex stride, alpha and fog.
+It also compares 256 aligned/unaligned transform configurations byte-for-byte
+with the previous scalar matrix loader/conversions, using general projections,
+signed coordinate extremes and both lighting/fog modes.
 Neither replaces a PSP visual/performance check. Check Link's animated joints,
 torch/fairy lighting with more than four nearby lights, reflective equipment,
 translucent effects, near-plane clipping, fog, and HUD/menu transitions.

@@ -67,7 +67,8 @@ if "static GFX_DL_HANDLER void gfx_apply_unmasked_texture_axis(" in source:
     helper = section("static GFX_DL_HANDLER void gfx_apply_unmasked_texture_axis(", "struct ShaderProgram {")
 general = section("static GFX_DL_HANDLER void gfx_emit_general_vertices(", "static void gfx_sp_triangles(")
 emission = general[general.index("    struct ColorCombiner* comb = state->comb;"):
-                   general.index("        out->color = gfx_get_vertex_rgba(")]
+                   general.index("        if (hasConstantColor) {")]
+emission = emission.replace("    const bool hasConstantColor = gfx_get_constant_vertex_rgba(state, &constantColor);\n", "")
 wrapper = r'''
 static void emit(struct LoadedVertex vertices[3]) {
     struct LoadedVertex *v1 = &vertices[0], *v2 = &vertices[1], *v3 = &vertices[2];

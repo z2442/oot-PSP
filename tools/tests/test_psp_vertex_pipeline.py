@@ -32,6 +32,7 @@ class Machine:
         self.vfpu = {}
         self.fpu = {}
         self.condition = False
+        self.matrix_loads = 0
 
     def store(self, address, fmt, *values):
         struct.pack_into("<" + fmt, self.memory, address, *values)
@@ -41,6 +42,8 @@ class Machine:
 
     def keys(self, name, count):
         bank, col, row = map(int, name[1:])
+        if name[0] == "R":
+            return [(bank, col + i, row) for i in range(count)]
         assert name[0] in "SC"
         return [(bank, col, row + i) for i in range(count)]
 
@@ -51,8 +54,8 @@ class Machine:
         for key, value in zip(self.keys(name, len(values)), values):
             self.vfpu[key] = bits(value)
 
-    def execute(self, name, arguments):
-        text = (ROOT / name).read_text()
+    def execute(self, name, arguments, program=None):
+        text = (ROOT / name).read_text() if program is None else program
         definitions = dict(re.findall(r"^#define\s+(\w+)\s+(\S+)", text, re.M))
         code = []
         labels = {}
@@ -87,6 +90,9 @@ class Machine:
                 offset, register = re.fullmatch(r"(\w+)\((\$\w+)\)", args[1]).groups()
                 address = self.reg[register] + immediate(offset)
                 if op.startswith(("lv.", "sv.")):
+                    assert address % (16 if op.endswith("q") else 4) == 0
+                    if op.startswith("lv.") and register in ("$t8", "$t9"):
+                        self.matrix_loads += 1
                     count = 4 if op.endswith("q") else 1
                     for i, key in enumerate(self.keys(args[0], count)):
                         if op.startswith("lv"):
@@ -191,6 +197,48 @@ for lighting in (0, 1):
             assert m.load(0x1000+i*64+43, "B")[0] == 37+i
             assert abs(m.load(0x1000+i*64+45, "B")[0] - max(0, min(255, int(expected[2]*32+64)))) <= 1
 
+# Compare the new row-loaded matrix views and triple conversion with the old
+# scalar column-loader, preserving its operation order. Exercise both matrices'
+# word-aligned offsets, general projections, signed coordinate extremes, fog,
+# lighting, zero-length calls and the largest RSP vertex batch.
+transform = (ROOT / "gfx_transform_vfpu.s").read_text()
+matrix_start = transform.index("\t/* Matrices are normally")
+matrix_end = transform.index("\n\tbeq     $t7, $zero, .Ltransform_vertex", matrix_start)
+scalar_loads = "".join(f"\tlv.s S{bank}{col}{row}, {row*16+col*4}({base})\n"
+                       for bank, base in ((0, "$t8"), (1, "$t9"))
+                       for col in range(4) for row in range(4))
+reference_transform = transform[:matrix_start] + scalar_loads + transform[matrix_end:]
+for bank in range(2):
+    for col in range(4):
+        reference_transform = reference_transform.replace(f"R{bank}0{col},", f"C{bank}{col}0,")
+reference_transform = reference_transform.replace("vi2f.t  C200, C200, 0",
+    "vi2f.s S200, S200, 0\n\tvi2f.s S201, S201, 0\n\tvi2f.s S202, S202, 0")
+transform_cases = 0
+for model_offset in (0, 4, 8, 12):
+    for projection_offset in (0, 4, 8, 12):
+        for fog in (0, 1):
+            for lighting in (0, 1):
+                for count in (0, 1, 3, 64):
+                    m = Machine()
+                    model_address, projection_address = 0x4000+model_offset, 0x4100+projection_offset
+                    m.store(model_address, "16f", *(rng.uniform(-2, 2) for _ in range(16)))
+                    m.store(projection_address, "16f", *(rng.uniform(-2, 2) for _ in range(16)))
+                    m.store(0x3000, "IIffII", model_address, projection_address, 32, 64, fog, lighting)
+                    m.memory[0x1000:0x2000] = bytes([0xcc])*0x1000
+                    for i in range(count):
+                        m.store(0x2000+i*16, "hhhHhhbbbB", *(rng.randrange(-32768, 32768) for _ in range(3)),
+                            0, 0, 0, *(rng.randrange(-128, 128) for _ in range(3)), rng.randrange(256))
+                    original = Machine()
+                    original.memory[:] = m.memory
+                    args = (0x1000, 0x2000, count, 0x3000)
+                    m.execute("gfx_transform_vfpu.s", args, transform)
+                    original.execute("gfx_transform_vfpu.s", args, reference_transform)
+                    assert m.memory == original.memory
+                    expected_loads = 0 if count == 0 else 8 if model_offset == projection_offset == 0 else 32
+                    assert m.matrix_loads == expected_loads
+                    assert original.matrix_loads == (32 if count else 0)
+                    transform_cases += 1
+
 # Clip a triangle against a plane: intersections must carry interpolated normals,
 # RGBA, UV and fog independently, with a bit-exact integer lighting snapshot.
 for trial in range(100):
@@ -219,3 +267,4 @@ for trial in range(100):
         assert m.load(out+60, "I")[0] == 17
 
 print("PSP vertex assembly: limb normals, 64-byte stride, alpha/fog and 100 clipped triangles passed")
+print(f"Vertex transform: {transform_cases} exact scalar-reference comparisons passed; aligned matrix load instructions 32 -> 8")

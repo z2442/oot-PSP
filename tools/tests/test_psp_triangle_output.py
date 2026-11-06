@@ -63,6 +63,7 @@ common = ''.join(function(name) for name in ('gfx_get_vertex_color','gfx_color_m
     'gfx_arrow_shimmer_alpha','gfx_color_mul_env','gfx_color_mul_prim',
     'gfx_two_texture_blend_pass_alphas','gfx_get_vertex_rgba'))
 helpers = function('gfx_prepare_color_multipliers')+function('gfx_dp_set_env_color')
+helpers += function('gfx_get_constant_vertex_rgba')
 helpers += function('gfx_initialize_fog_prefix')
 helpers += function('gfx_emit_simple_base_vertex')+function('gfx_emit_simple_vertices')
 general = function('gfx_emit_general_vertices')
@@ -74,6 +75,8 @@ static void reference_emit(struct LoadedVertex* const* clipped_vertices,size_t c
     bool use_alpha=state->use_alpha,use_texture=state->use_texture;
     const float *tex_u_scale=state->tex_u_scale,*tex_v_scale=state->tex_v_scale;
     const float *tex_u_bias=state->tex_u_bias,*tex_v_bias=state->tex_v_bias;
+    struct RGBA constantColor={0};
+    const bool hasConstantColor=false;
 '''
 # The reference eagerly writes every fog vertex, as before the optimization.
 # Keep it independent of lazy prefix initialization and visibility gating.
@@ -88,6 +91,8 @@ static uint32_t next(void) { seed=seed*1664525U+1013904223U;return seed; }
 static float value(void) { return ((int)(next()%65536)-32768)*0.03125f; }
 static void clear(size_t prefix,bool fog,bool textured) {
     memset(buf_vbo,0xcc,sizeof(buf_vbo));memset(&buf_vbo_fog,0xcc,sizeof(buf_vbo_fog));
+    memset(buf_vbo_tex1,0xcc,sizeof(buf_vbo_tex1));
+    memset(buf_vbo_fog_tex1_alpha,0xcc,sizeof(buf_vbo_fog_tex1_alpha));
     struct RGBA color=rdp.fog_color;color.a=0;
     for (size_t i=0;i<prefix;i++) {
         if (textured) buf_vbo_fog.textured[i]=(psp_fog_textured_t){buf_vbo[i].u,buf_vbo[i].v,color,
@@ -236,7 +241,56 @@ int main(void) {
         assert(memcmp(expected,buf_vbo,sizeof(expected))==0);
         assert(memcmp(expectedFog,&buf_vbo_fog,sizeof(expectedFog))==0);
     }
+    // Compare fixed material folding with the original per-vertex color
+    // calculation, including independent shade/LOD alpha, corrected tints,
+    // rounding order, clipped polygons and both two-texture fog passes.
+    psp_uv_t expectedTex1[32];
+    uint8_t expectedFogAlpha[32];
+    unsigned folded=0;
+    const unsigned sources[]={CC_0,CC_PRIM,CC_ENV,CC_SHADE,CC_LOD};
+    for (unsigned iteration=0;iteration<50000;iteration++) {
+        size_t count=3*(1+iteration%7);
+        struct TriPipelineState state={.comb=&comb,
+            .use_alpha=(iteration&1)!=0,.use_texture=(iteration&2)!=0,
+            .use_fog=(iteration&4)!=0,.fog_uses_texture_alpha=(iteration&8)!=0,
+            .texture_tint_colors_corrected=(iteration&16)!=0,
+            .color_mul_env=(iteration&32)!=0,.color_mul_prim=(iteration&64)!=0,
+            .alpha_mul_env=(iteration&128)!=0,.two_texture_blend=(iteration&256)!=0,
+            .two_texture_alpha_blend=(iteration&512)!=0,.two_texture_uncompensated_alpha=(iteration&1024)!=0,
+            .two_texture_blend_uses_prim_lod=(iteration&2048)!=0,.arrow_glow=(iteration&4096)!=0,
+            .texture_tint_env_color={next(),next(),next(),next()},
+            .tex_u_scale={value(),value()},.tex_v_scale={value(),value()},
+            .tex_u_bias={value(),value()},.tex_v_bias={value(),value()}};
+        comb.vertex_color_source[0]=sources[iteration%5];
+        comb.vertex_color_source[1]=sources[(iteration/5)%5];
+        rdp.prim_color=(struct RGBA){next(),next(),next(),next()};
+        rdp.env_color=(struct RGBA){next(),next(),next(),next()};
+        rdp.fog_color=(struct RGBA){next(),next(),next(),next()};rdp.prim_lod_frac=next();
+        for (size_t i=0;i<count;i++) {
+            input[i]=(struct LoadedVertex){.x=value(),.y=value(),.z=value(),.w=next()%12000,
+                .u=value(),.v=value(),.normal={value(),value(),value()},
+                .color={next(),next(),next(),next()},.fog_alpha=i<count/2 ? 0 : next()};
+            vertices[i]=&input[i];
+        }
+        struct RGBA fixed;
+        folded+=gfx_get_constant_vertex_rgba(&state,&fixed);
+        clear(0,false,state.fog_uses_texture_alpha);reference_emit(vertices,count,&state);
+        memcpy(expected,buf_vbo,sizeof(expected));memcpy(expectedFog,&buf_vbo_fog,sizeof(expectedFog));
+        memcpy(expectedTex1,buf_vbo_tex1,sizeof(expectedTex1));
+        memcpy(expectedFogAlpha,buf_vbo_fog_tex1_alpha,sizeof(expectedFogAlpha));
+        bool visible=sBatchHasVisibleFog;
+        clear(0,false,state.fog_uses_texture_alpha);general_emit(vertices,count,&state);
+        assert(memcmp(expected,buf_vbo,sizeof(expected))==0);
+        assert(memcmp(expectedTex1,buf_vbo_tex1,sizeof(expectedTex1))==0);
+        if (visible) {
+            assert(memcmp(expectedFog,&buf_vbo_fog,sizeof(expectedFog))==0);
+            assert(memcmp(expectedFogAlpha,buf_vbo_fog_tex1_alpha,sizeof(expectedFogAlpha))==0);
+        }
+        assert(sBatchHasVisibleFog==visible && buf_num_vert==count);
+    }
+    assert(folded>0 && folded<50000);
     puts("Triangle output: 100000 shade/UV/fog equivalence cases, clipped polygons and material fallback passed");
+    puts("Fixed material colors: 50000 per-vertex reference comparisons passed, including shade/LOD alpha and multipass fog");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='oot-triangle-output-') as directory:

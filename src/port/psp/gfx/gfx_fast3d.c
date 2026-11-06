@@ -1873,6 +1873,29 @@ static inline struct RGBA gfx_get_vertex_rgba(const struct ColorCombiner *comb, 
     return color;
 }
 
+static inline bool gfx_get_constant_vertex_rgba(const struct TriPipelineState* state, struct RGBA* color) {
+    const struct ColorCombiner* comb = state->comb;
+    const uint8_t rgbSource = comb->vertex_color_source[0];
+    const uint8_t alphaSource = comb->vertex_color_source[1];
+    /* Without independent alpha, the RGB selector also supplies the vertex's
+     * alpha. Shade and LOD must therefore remain per vertex even when a later
+     * texture-tint correction replaces their RGB. */
+    if (rgbSource == CC_SHADE || rgbSource == CC_LOD ||
+        (state->use_alpha && (alphaSource == CC_SHADE || alphaSource == CC_LOD))) {
+        return false;
+    }
+    *color = gfx_get_vertex_rgba(comb, state->use_alpha, &white_color, 0.0f, true);
+    if (state->texture_tint_colors_corrected) {
+        color->r = state->texture_tint_env_color.r;
+        color->g = state->texture_tint_env_color.g;
+        color->b = state->texture_tint_env_color.b;
+    }
+    if (state->color_mul_env) gfx_color_mul_env(color);
+    if (state->color_mul_prim) gfx_color_mul_prim(color);
+    if (state->alpha_mul_env) color->a = gfx_color_mul_channel(color->a, rdp.env_color.a);
+    return true;
+}
+
 static struct ColorCombiner *gfx_lookup_or_create_color_combiner(uint32_t cc_id) {
     const size_t cacheIndex =
         (cc_id ^ (cc_id >> 12) ^ (cc_id >> 24)) & (COLOR_COMBINER_CACHE_SET_COUNT - 1);
@@ -4348,6 +4371,8 @@ static GFX_DL_HANDLER void gfx_emit_general_vertices(struct LoadedVertex* const*
     const float* tex_v_scale = state->tex_v_scale;
     const float* tex_u_bias = state->tex_u_bias;
     const float* tex_v_bias = state->tex_v_bias;
+    struct RGBA constantColor;
+    const bool hasConstantColor = gfx_get_constant_vertex_rgba(state, &constantColor);
 
     size_t i;
     for (i = 0; i < clipped_vertices_num; i++) {
@@ -4371,20 +4396,24 @@ static GFX_DL_HANDLER void gfx_emit_general_vertices(struct LoadedVertex* const*
             out->v = 0.0f;
         }
 
-        out->color = gfx_get_vertex_rgba(comb, use_alpha, &vertex->color, vertex->w, true);
-        if (state->texture_tint_colors_corrected) {
-            out->color.r = state->texture_tint_env_color.r;
-            out->color.g = state->texture_tint_env_color.g;
-            out->color.b = state->texture_tint_env_color.b;
-        }
-        if (state->color_mul_env) {
-            gfx_color_mul_env(&out->color);
-        }
-        if (state->color_mul_prim) {
-            gfx_color_mul_prim(&out->color);
-        }
-        if (state->alpha_mul_env) {
-            out->color.a = gfx_color_mul_channel(out->color.a, rdp.env_color.a);
+        if (hasConstantColor) {
+            out->color = constantColor;
+        } else {
+            out->color = gfx_get_vertex_rgba(comb, use_alpha, &vertex->color, vertex->w, true);
+            if (state->texture_tint_colors_corrected) {
+                out->color.r = state->texture_tint_env_color.r;
+                out->color.g = state->texture_tint_env_color.g;
+                out->color.b = state->texture_tint_env_color.b;
+            }
+            if (state->color_mul_env) {
+                gfx_color_mul_env(&out->color);
+            }
+            if (state->color_mul_prim) {
+                gfx_color_mul_prim(&out->color);
+            }
+            if (state->alpha_mul_env) {
+                out->color.a = gfx_color_mul_channel(out->color.a, rdp.env_color.a);
+            }
         }
 
         const uint8_t surfaceAlpha = use_alpha ? out->color.a : 0xFF;
