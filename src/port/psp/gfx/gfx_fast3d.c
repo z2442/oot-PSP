@@ -360,6 +360,18 @@ static inline TextureTileState* gfx_get_texture_tile(int tile) {
     return &rdp.texture_tile[tile != 0];
 }
 
+static inline bool gfx_texture_axis_needs_mirror(uint32_t cm, uint32_t mask, uint16_t low, uint16_t high) {
+    if (!(cm & G_TX_MIRROR) || mask == G_TX_NOMASK) {
+        return false;
+    }
+
+    /* RDP clamps before masking/mirroring. Epona's eye and hair tiles set
+     * MIRROR | CLAMP with a mask covering the whole image, so coordinates
+     * beyond that image must sample its edge, not a second mirrored eye. */
+    const uint32_t span = ((uint16_t)(high - low) + 4U) >> G_TEXTURE_IMAGE_FRAC;
+    return !(cm & G_TX_CLAMP) || span > (1U << mask);
+}
+
 static inline bool gfx_get_render_tile_slot(uint8_t tile, int* slot) {
     if (tile == G_TX_RENDERTILE) {
         *slot = 0;
@@ -1202,8 +1214,8 @@ static void gfx_upload_texture_slow(int tile, const uint8_t *buf, uint32_t width
 static inline __attribute__((always_inline)) void gfx_upload_texture(int tile, const uint8_t *buf, uint32_t width,
                                                                      uint32_t height, unsigned int type) {
     const TextureTileState* tileState = gfx_get_texture_tile(tile);
-    const bool mirror_s = (tileState->cms & G_TX_MIRROR) != 0 && tileState->masks != G_TX_NOMASK;
-    const bool mirror_t = (tileState->cmt & G_TX_MIRROR) != 0 && tileState->maskt != G_TX_NOMASK;
+    const bool mirror_s = gfx_texture_axis_needs_mirror(tileState->cms, tileState->masks, tileState->uls, tileState->lrs);
+    const bool mirror_t = gfx_texture_axis_needs_mirror(tileState->cmt, tileState->maskt, tileState->ult, tileState->lrt);
 
 #if defined(TARGET_PSP) && defined(OOTDEBUG)
     sPerformanceTextureUploadCount++;
@@ -2055,8 +2067,8 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
     const bool uses_palette = fmt == G_IM_FMT_CI;
     const uint8_t* palette_addr = uses_palette ? rdp.palette : NULL;
     const uint32_t palette_key = uses_palette ? rdp.palette_key : 0;
-    const uint8_t mirror_s = (tileState->cms & G_TX_MIRROR) != 0 && tileState->masks != G_TX_NOMASK;
-    const uint8_t mirror_t = (tileState->cmt & G_TX_MIRROR) != 0 && tileState->maskt != G_TX_NOMASK;
+    const uint8_t mirror_s = gfx_texture_axis_needs_mirror(tileState->cms, tileState->masks, tileState->uls, tileState->lrs);
+    const uint8_t mirror_t = gfx_texture_axis_needs_mirror(tileState->cmt, tileState->maskt, tileState->ult, tileState->lrt);
 
     hash ^= (size_t)source_key * 2654435761U;
     hash ^= (size_t)palette_addr >> 4;
@@ -5052,10 +5064,10 @@ static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t t
     if (gfx_get_render_tile_slot(tile, &renderSlot)) {
         TextureTileState* tileState = gfx_get_texture_tile(renderSlot);
         const uint32_t lineSizeBytes = line * 8;
-        const bool oldMirrorS = (tileState->cms & G_TX_MIRROR) != 0 && tileState->masks != G_TX_NOMASK;
-        const bool oldMirrorT = (tileState->cmt & G_TX_MIRROR) != 0 && tileState->maskt != G_TX_NOMASK;
-        const bool newMirrorS = (cms & G_TX_MIRROR) != 0 && masks != G_TX_NOMASK;
-        const bool newMirrorT = (cmt & G_TX_MIRROR) != 0 && maskt != G_TX_NOMASK;
+        const bool oldMirrorS = gfx_texture_axis_needs_mirror(tileState->cms, tileState->masks, tileState->uls, tileState->lrs);
+        const bool oldMirrorT = gfx_texture_axis_needs_mirror(tileState->cmt, tileState->maskt, tileState->ult, tileState->lrt);
+        const bool newMirrorS = gfx_texture_axis_needs_mirror(cms, masks, tileState->uls, tileState->lrs);
+        const bool newMirrorT = gfx_texture_axis_needs_mirror(cmt, maskt, tileState->ult, tileState->lrt);
         bool descriptorChanged = (tileState->fmt != fmt) || (tileState->siz != siz) ||
                                  (tileState->cms != cms) || (tileState->cmt != cmt) ||
                                  (tileState->masks != masks) || (tileState->maskt != maskt) ||

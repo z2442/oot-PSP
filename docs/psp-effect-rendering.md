@@ -1,5 +1,12 @@
 # PSP material and overlay rendering
 
+Epona's eye, hair and other clamped textures use both MIRROR and CLAMP.
+The RDP clamps coordinates before applying the mirror mask. When the clamp
+edge lies within the first mask period, PSP uploads the original image
+without a reflected copy. This keeps the eye at its original 32x16 extent
+and prevents an extra eye on each side of her head. Wrapped mirror textures
+and clamped tiles extending beyond a mask period retain mirror emulation.
+
 Elemental arrows use two scrolling 32x64 I8 masks. Their tile rectangles
 describe scrolling views, sometimes only 4x32 or 4x16, rather than the loaded
 image dimensions. Wrapped I8 load-block textures retain their loaded row
