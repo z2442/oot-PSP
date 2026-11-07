@@ -85,7 +85,8 @@ for name in ("NoteSynthesisBuffers", "NoteSynthesisState", "NoteSubEu"):
 state = r'''
 typedef struct { u32 startSamplePos; NoteSubEu noteSubEu; } Note;
 static struct { Note* notes; s16* curLoadedBook; struct { f32 resampleRate; } audioBufferParameters; } gAudioCtx;
-static struct { bool buildingOnMe; } sOotPspAudioMeLocalFlags;
+static bool onMe;
+#define OotPspMe_IsWorker() onMe
 static s16 D_8012FBA8[32];
 #define OotPspAudioSynth_IsAlignedNativePtr(ptr) ((ptr) != NULL)
 #define OotPsp_IsLoadedNativeExternalAssetRange(ptr, size) false
@@ -201,8 +202,7 @@ static void check_stream(float input, unsigned end, unsigned loopStart, unsigned
         assert(synth.samplePosInt == pos);
     }
 }
-int main(void) {
-    for (unsigned i = 0; i < sizeof(samples); i++) samples[i] = (i * 73 + (i >> 3) * 19) % 255;
+static void check_context(void) {
     /* Song of Storms D6; chest fanfare high strings/brass; rate boundaries. */
     for (unsigned rate = 22050; rate <= 44100; rate += 11025) {
         for (unsigned i = 0; i < 10000; i++) check_rate(rate, i / 1000.0f);
@@ -216,7 +216,14 @@ int main(void) {
         }
     }
     check_stream(4.104750f, 64000, 0, 192);
-    puts("PSP audio pitch: rate, continuous/looping PCM, and short-note checks passed");
+}
+int main(void) {
+    for (unsigned i = 0; i < sizeof(samples); i++) samples[i] = (i * 73 + (i >> 3) * 19) % 255;
+    for (int context = 0; context < 2; context++) {
+        onMe = context;
+        check_context();
+    }
+    puts("PSP audio pitch: CPU/ME contexts, rate, continuous/looping PCM, and short-note checks passed");
     printf("%u checks\n", checks);
 }
 '''

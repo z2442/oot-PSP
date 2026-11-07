@@ -3,6 +3,9 @@
 #include "attributes.h"
 #include "audio.h"
 #include "oot_psp_audio_commands.h"
+#if OOT_PSP_WAKE_DIAGNOSTICS
+#include "oot_psp_audio_backend.h"
+#endif
 
 #ifndef OOT_PSP_AUDIO_MIXER_VME
 #define OOT_PSP_AUDIO_MIXER_VME 1
@@ -289,6 +292,9 @@ void OotPspMixer_InitVme(void) {
         OotPspMixerMeStorage* storage = &sMeScalarStorage;
 
         memset(storage, 0, sizeof(*storage));
+        memset(&sMixerExecutionState, 0, sizeof(sMixerExecutionState));
+        memset(&sMixerMeState, 0, sizeof(sMixerMeState));
+        memset(&sMixerCounters, 0, sizeof(sMixerCounters));
         storage->mixer.sampleCache = &storage->sampleCache;
         storage->mixer.bookCache = &storage->bookCache;
         storage->mixer.reverbCache = &storage->reverbCache;
@@ -1813,7 +1819,8 @@ static void OotPspMixer_PublishOpcodeProfile(volatile OotPspMixerOpcodeProfile* 
 #endif
 
 static void OotPspMixer_ExecuteCommandListInternal(const Acmd* cmdList, s32 cmdCount,
-                                                   volatile OotPspMixerOpcodeProfile* profile) {
+                                                   volatile OotPspMixerOpcodeProfile* profile,
+                                                   volatile u32* progress) {
     s32 i;
 #if defined(TARGET_PSP) && OOT_PSP_AUDIO_DIAGNOSTICS
     u32 opcodeCalls[OOT_PSP_MIXER_PROFILE_OPCODE_COUNT];
@@ -1839,6 +1846,20 @@ static void OotPspMixer_ExecuteCommandListInternal(const Acmd* cmdList, s32 cmdC
         u32 w0 = cmd->words.w0;
         u32 w1 = cmd->words.w1;
         u32 opcode = w0 >> 24;
+
+        /* The normal watchdog must see progress within a real mixer job,
+         * including release builds. A NOP wake probe cannot exercise these
+         * operations. Publish once per batch to keep uncached traffic low. */
+#if OOT_PSP_WAKE_DIAGNOSTICS
+        if (progress != NULL) {
+            /* Live opcode/index, without enabling the opcode profiler. */
+            OotPspAudioBackend_RecordMeCommand(i, w0, w1);
+        }
+#else
+        if (progress != NULL && (i & 15) == 0) {
+            *progress = 0x10000U + (u32)i;
+        }
+#endif
 #if defined(TARGET_PSP) && OOT_PSP_AUDIO_DIAGNOSTICS
         u32 commandStartTicks = 0;
 
@@ -2004,16 +2025,16 @@ static void OotPspMixer_ExecuteCommandListInternal(const Acmd* cmdList, s32 cmdC
 void OotPspMixer_ExecuteCommandList(const Acmd* cmdList, s32 cmdCount) {
     sMixerExecutionState.currentMixer = &sCpuMixer;
     sMixerExecutionState.executingOnMe = false;
-    OotPspMixer_ExecuteCommandListInternal(cmdList, cmdCount, NULL);
+    OotPspMixer_ExecuteCommandListInternal(cmdList, cmdCount, NULL, NULL);
 }
 
 void OotPspMixer_ExecuteCommandListMe(const Acmd* cmdList, s32 cmdCount,
-                                      volatile OotPspMixerOpcodeProfile* profile) {
+                                      volatile OotPspMixerOpcodeProfile* profile, volatile u32* progress) {
     sMixerExecutionState.currentMixer = (sMixerMeState.meStorage != NULL) ?
                                            &sMixerMeState.meStorage->mixer :
                                            &sCpuMixer;
     sMixerExecutionState.executingOnMe = true;
-    OotPspMixer_ExecuteCommandListInternal(cmdList, cmdCount, profile);
+    OotPspMixer_ExecuteCommandListInternal(cmdList, cmdCount, profile, progress);
 }
 
 void OotPspMixer_InvalidateStateCache(void) {

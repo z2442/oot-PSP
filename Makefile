@@ -1193,6 +1193,7 @@ PSP_AUDIO_MIXER_VME ?= 1
 PSP_AUDIO_MIXER_FAST ?= 1
 PSP_AUDIO_MIXER_VERIFY ?= 0
 PSP_AUDIO_DIAGNOSTICS ?= 0
+PSP_WAKE_DIAGNOSTICS ?= 0
 PSP_GFX_DIAGNOSTICS ?= 0
 PSP_FAST_SQRT ?= 1
 PSP_OOTDEBUG ?= 0
@@ -1203,6 +1204,7 @@ PSP_PORT_AUDIO_ME_VARIANT :=
 PSP_PORT_AUDIO_MIXER_VARIANT :=
 PSP_PORT_AUDIO_SRC_VARIANT :=
 PSP_PORT_AUDIO_DIAGNOSTICS_VARIANT :=
+PSP_PORT_WAKE_DIAGNOSTICS_VARIANT :=
 ifeq ($(PSP_AUDIO_MEDIA_ENGINE),0)
 PSP_PORT_AUDIO_ME_VARIANT := -no-me
 endif
@@ -1225,16 +1227,20 @@ endif
 PSP_PORT_GPROF_ENABLED := $(filter 1 ON on TRUE true YES yes,$(PSP_ENABLE_GPROF))
 PSP_PORT_OOTDEBUG_ENABLED := $(filter 1 ON on TRUE true YES yes,$(PSP_OOTDEBUG))
 PSP_PORT_AUDIO_DIAGNOSTICS_ENABLED := $(filter 1 ON on TRUE true YES yes,$(PSP_AUDIO_DIAGNOSTICS))
+PSP_PORT_WAKE_DIAGNOSTICS_ENABLED := $(filter 1 ON on TRUE true YES yes,$(PSP_WAKE_DIAGNOSTICS))
 ifneq ($(PSP_PORT_AUDIO_DIAGNOSTICS_ENABLED),)
 PSP_PORT_AUDIO_DIAGNOSTICS_VARIANT := -audio-diag
 endif
 ifneq ($(PSP_PORT_OOTDEBUG_ENABLED),)
 PSP_PORT_OOTDEBUG_VARIANT := -ootdebug
 endif
+ifneq ($(PSP_PORT_WAKE_DIAGNOSTICS_ENABLED),)
+PSP_PORT_WAKE_DIAGNOSTICS_VARIANT := -wake-diag
+endif
 ifneq ($(PSP_PORT_GPROF_ENABLED),)
-PSP_PORT_DEFAULT_BUILD_DIR := build/psp-port-gprof$(PSP_PORT_AUDIO_ME_VARIANT)$(PSP_PORT_AUDIO_MIXER_VARIANT)$(PSP_PORT_AUDIO_SRC_VARIANT)$(PSP_PORT_AUDIO_DIAGNOSTICS_VARIANT)$(PSP_PORT_OOTDEBUG_VARIANT)/$(VERSION)
+PSP_PORT_DEFAULT_BUILD_DIR := build/psp-port-gprof$(PSP_PORT_AUDIO_ME_VARIANT)$(PSP_PORT_AUDIO_MIXER_VARIANT)$(PSP_PORT_AUDIO_SRC_VARIANT)$(PSP_PORT_AUDIO_DIAGNOSTICS_VARIANT)$(PSP_PORT_OOTDEBUG_VARIANT)$(PSP_PORT_WAKE_DIAGNOSTICS_VARIANT)/$(VERSION)
 else
-PSP_PORT_DEFAULT_BUILD_DIR := build/psp-port$(PSP_PORT_AUDIO_ME_VARIANT)$(PSP_PORT_AUDIO_MIXER_VARIANT)$(PSP_PORT_AUDIO_SRC_VARIANT)$(PSP_PORT_AUDIO_DIAGNOSTICS_VARIANT)$(PSP_PORT_OOTDEBUG_VARIANT)/$(VERSION)
+PSP_PORT_DEFAULT_BUILD_DIR := build/psp-port$(PSP_PORT_AUDIO_ME_VARIANT)$(PSP_PORT_AUDIO_MIXER_VARIANT)$(PSP_PORT_AUDIO_SRC_VARIANT)$(PSP_PORT_AUDIO_DIAGNOSTICS_VARIANT)$(PSP_PORT_OOTDEBUG_VARIANT)$(PSP_PORT_WAKE_DIAGNOSTICS_VARIANT)/$(VERSION)
 endif
 PSP_PORT_BUILD_DIR ?= $(PSP_PORT_DEFAULT_BUILD_DIR)
 PSP_PORT_PSPSDK := $(shell psp-config -p 2>/dev/null)
@@ -1254,6 +1260,7 @@ PSP_PORT_RUNTIME_ASM_SOURCES := \
 	src/port/psp/gfx/gfx_transform_vfpu.s \
 	src/port/psp/oot_psp_asset_transform.s \
 	src/port/psp/oot_psp_me_kcall.s \
+	src/port/psp/oot_psp_me_entry.s \
 	src/port/psp/oot_psp_dve_user.s \
 	src/port/psp/oot_psp_ucode_assets.s
 PSP_PORT_ROOT_ASSET_SOURCES := $(sort $(filter-out %.inc.c,$(wildcard assets/objects/*/*.c)))
@@ -1445,6 +1452,8 @@ PSP_PORT_RUNTIME_SOURCES := \
 	src/port/psp/oot_psp_performance.c \
 	src/port/psp/oot_psp_renderer.c \
 	src/port/psp/oot_psp_runtime_patch.c \
+	src/port/psp/oot_psp_suspend.c \
+	src/port/psp/oot_psp_wake_trace.c \
 	src/port/psp/oot_psp_video.c \
 	src/port/psp/oot_psp_video_thread.c \
 	src/port/psp/sys_ucode_psp.c \
@@ -1483,6 +1492,7 @@ PSP_PORT_ASSET_SEGMENT_DATA_STAMP := $(PSP_PORT_ASSET_SEGMENT_DATA_DIR)/.stamp
 PSP_PORT_ASSET_SEGMENT_OBJECT := $(PSP_PORT_BUILD_DIR)/oot_psp_asset_segments.o
 PSP_PORT_ASSET_SEGMENT_TABLE_OBJECT := $(PSP_PORT_BUILD_DIR)/oot_psp_asset_segments_table.o
 PSP_PORT_RUNTIME_OBJECTS := $(patsubst %.c,$(PSP_PORT_BUILD_DIR)/%.o,$(PSP_PORT_RUNTIME_SOURCES))
+PSP_PORT_RUNTIME_OBJECTS += $(PSP_PORT_BUILD_DIR)/src/port/psp/oot_psp_me_suspend.o
 PSP_PORT_RUNTIME_ASM_OBJECTS := $(patsubst %.s,$(PSP_PORT_BUILD_DIR)/%.o,$(PSP_PORT_RUNTIME_ASM_SOURCES))
 PSP_PORT_ASSET_OBJECTS := $(patsubst %.c,$(PSP_PORT_BUILD_DIR)/%.o,$(PSP_PORT_LINKED_ASSET_SOURCES))
 PSP_PORT_NATIVE_SEGMENT_OBJECTS := $(patsubst %.c,$(PSP_PORT_BUILD_DIR)/%.o,$(PSP_PORT_ASSET_SOURCES))
@@ -1602,6 +1612,7 @@ PSP_PORT_DEFINES := \
 	-DOOT_PSP_AUDIO_MIXER_FAST=$(PSP_AUDIO_MIXER_FAST) \
 	-DOOT_PSP_AUDIO_MIXER_VERIFY=$(PSP_AUDIO_MIXER_VERIFY) \
 	-DOOT_PSP_AUDIO_DIAGNOSTICS=$(if $(PSP_PORT_AUDIO_DIAGNOSTICS_ENABLED),1,0) \
+	-DOOT_PSP_WAKE_DIAGNOSTICS=$(if $(PSP_PORT_WAKE_DIAGNOSTICS_ENABLED),1,0) \
 	-DOOT_PSP_GFX_DIAGNOSTICS=$(PSP_GFX_DIAGNOSTICS) \
 	-DOOT_PSP_FAST_SQRT=$(PSP_FAST_SQRT) \
 	-D_PSP_FW_VERSION=500
@@ -1697,6 +1708,12 @@ $(PSP_PORT_DVEMGR_PRX): $(PSP_PORT_DVEMGR_ELF)
 $(PSP_PORT_BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(PSP_PORT_CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $(PSP_PORT_CFLAGS) -o $@ $<
+
+$(PSP_PORT_BUILD_DIR)/src/port/psp/oot_psp_me_suspend.o: src/port/psp/oot_psp_me_suspend.cpp
+	@mkdir -p $(dir $@)
+	$(PSP_PORT_CC) -MMD -MP -MF $(@:.o=.d) -MT $@ -c -x c++ -G0 -O2 -g3 \
+		-ffunction-sections -fdata-sections -fno-exceptions -fno-rtti -fno-unwind-tables \
+		-I$(PSP_PORT_PSPSDK)/include -I$(PSP_PORT_PREFIX)/include -o $@ $<
 
 $(PSP_PORT_BUILD_DIR)/%.o: %.s
 	@mkdir -p $(dir $@)

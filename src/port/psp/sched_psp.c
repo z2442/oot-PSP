@@ -26,6 +26,12 @@ static u32 sNextGfxPresentationUsec;
 static u32 sGfxPacingRemainder;
 static s32 sGfxPacingInitialized;
 
+void SchedPsp_ResetGfxPacing(void) {
+    sNextGfxPresentationUsec = 0;
+    sGfxPacingRemainder = 0;
+    sGfxPacingInitialized = 0;
+}
+
 
 /*
  * Wrap-safe time difference.
@@ -270,9 +276,7 @@ void Sched_Init(
     /*
      * Start with a fresh graphics pacing timeline.
      */
-    sNextGfxPresentationUsec = 0;
-    sGfxPacingRemainder = 0;
-    sGfxPacingInitialized = 0;
+    SchedPsp_ResetGfxPacing();
 
     OotPspRenderer_Init();
 

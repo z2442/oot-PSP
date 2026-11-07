@@ -60,7 +60,7 @@ void OotPspMixer_InitVme(void);
 void OotPspMixer_ShutdownVme(void);
 void OotPspMixer_ExecuteCommandList(const Acmd* cmdList, s32 cmdCount);
 void OotPspMixer_ExecuteCommandListMe(const Acmd* cmdList, s32 cmdCount,
-                                      volatile OotPspMixerOpcodeProfile* profile);
+                                      volatile OotPspMixerOpcodeProfile* profile, volatile u32* progress);
 void OotPspMixer_InvalidateStateCache(void);
 
 #if defined(OOT_PSP_MIXER_INLINE)

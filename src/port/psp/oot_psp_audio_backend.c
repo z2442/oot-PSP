@@ -5,12 +5,14 @@
 #include "dma.h"
 #include "oot_psp_asset_loader.h"
 #include "oot_psp_audio_commands.h"
+#include "oot_psp_me_entry.h"
 #include "oot_psp_mixer.h"
 
 #include <me-core-mapper/me-core.h>
 #include <pspaudio.h>
 #include <pspdmac.h>
 #include <pspintrman.h>
+#include <pspkerror.h>
 #include <pspkernel.h>
 #include <pspthreadman.h>
 #include <stdio.h>
@@ -76,9 +78,20 @@ static volatile s32 sOotPspAudioInitialized = false;
 #define OOT_PSP_AUDIO_UPDATE_USEC (1000000U / 60U)
 #define OOT_PSP_AUDIO_EXTERNAL_POOL_SIZE (2 * 1024 * 1024)
 #define OOT_PSP_AUDIO_ME_TIMEOUT_US 250000
+#define OOT_PSP_AUDIO_ME_WAKE_TIMEOUT_US 5000000
+/* Progress can extend a cold post-wake job, but cannot wait indefinitely. */
+#define OOT_PSP_AUDIO_ME_MAX_JOB_US 2000000
 #define OOT_PSP_AUDIO_ME_POLL_USEC 100
+/* Command waits occur every audio update. Keep the one-time boot/park probes
+ * responsive, but yield longer if completion interrupts are unavailable. */
+#define OOT_PSP_AUDIO_ME_COMPLETION_POLL_USEC 1000
+/* Recheck shared state if interrupt delivery disappears after the wake probe.
+ * Healthy jobs still wake immediately through the completion semaphore. */
+#define OOT_PSP_AUDIO_ME_COMPLETION_WAIT_USEC 10000
 #define OOT_PSP_AUDIO_ME_PROGRESS_ENTERED 0x10
 #define OOT_PSP_AUDIO_ME_PROGRESS_BOOT_RELEASED 0x20
+#define OOT_PSP_AUDIO_ME_PROGRESS_SYNTH_INIT 0x30
+#define OOT_PSP_AUDIO_ME_PROGRESS_MIXER_INIT 0x40
 #define OOT_PSP_AUDIO_ME_PROGRESS_READY 0x100
 #define OOT_PSP_AUDIO_PRODUCER_IO_BACKOFF_USEC 1000
 #define OOT_PSP_AUDIO_OUTPUT_ERROR_RETRY_USEC \
@@ -127,13 +140,32 @@ enum {
     OOT_PSP_AUDIO_ME_SHARED_QUEUE_FRAMES,
     OOT_PSP_AUDIO_ME_SHARED_QUEUE_WRITE_POS,
     OOT_PSP_AUDIO_ME_SHARED_QUEUE_RESULT_WRITE_POS,
+#if OOT_PSP_WAKE_DIAGNOSTICS
+    OOT_PSP_AUDIO_ME_SHARED_CONFIG,
+    OOT_PSP_AUDIO_ME_SHARED_CPU_STATUS,
+    OOT_PSP_AUDIO_ME_SHARED_WORD0,
+    OOT_PSP_AUDIO_ME_SHARED_WORD1,
+    OOT_PSP_AUDIO_ME_SHARED_STACK_POINTER,
+    OOT_PSP_AUDIO_ME_SHARED_SYNTH_TICKS,
+    OOT_PSP_AUDIO_ME_SHARED_SYNTH_NOTES,
+    OOT_PSP_AUDIO_ME_SHARED_SYNTH_REVERBS,
+    OOT_PSP_AUDIO_ME_SHARED_SYNTH_FRAMES,
+    OOT_PSP_AUDIO_ME_SHARED_SYNTH_DOWNSAMPLE,
+#endif
     OOT_PSP_AUDIO_ME_SHARED_COUNT,
 };
 
-static volatile u32 sAudioMeSharedStorage[OOT_PSP_AUDIO_ME_SHARED_COUNT] __attribute__((aligned(64), section(".uncached")));
+/* Reserve whole lines as well as aligning the base. An adjacent cached
+ * object must never be able to write back over an uncached mailbox word. */
+volatile u32 gOotPspAudioMeSharedStorage[(OOT_PSP_AUDIO_ME_SHARED_COUNT + 15) & ~15]
+    __attribute__((aligned(64), section(".uncached")));
+
+typedef char OotPspMeEntryProtocolMustMatch[
+    ((OOT_PSP_AUDIO_ME_SHARED_PROGRESS * sizeof(u32) == OOT_PSP_ME_ENTRY_PROGRESS_OFFSET) &&
+     (OOT_PSP_AUDIO_ME_PROGRESS_BOOT_RELEASED == OOT_PSP_ME_ENTRY_CACHE_STAGE)) ? 1 : -1];
 
 #define sAudioMeShared \
-    ((volatile u32*)(UNCACHED_USER_MASK | (u32)(uintptr_t)sAudioMeSharedStorage))
+    ((volatile u32*)(UNCACHED_USER_MASK | (u32)(uintptr_t)gOotPspAudioMeSharedStorage))
 #define sAudioMeState    sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_STATE]
 #define sAudioMeCmdList  sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_CMD_LIST]
 #define sAudioMeCmdCount sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_CMD_COUNT]
@@ -144,6 +176,13 @@ static volatile u32 sAudioMeSharedStorage[OOT_PSP_AUDIO_ME_SHARED_COUNT] __attri
 #define sAudioMeQueueFrames                sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_QUEUE_FRAMES]
 #define sAudioMeQueueWritePos              sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_QUEUE_WRITE_POS]
 #define sAudioMeQueueResultWritePos        sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_QUEUE_RESULT_WRITE_POS]
+#if OOT_PSP_WAKE_DIAGNOSTICS
+#define sAudioMeConfig sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_CONFIG]
+#define sAudioMeCpuStatus sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_CPU_STATUS]
+#define sAudioMeWord0 sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_WORD0]
+#define sAudioMeWord1 sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_WORD1]
+#define sAudioMeStackPointer sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_STACK_POINTER]
+#endif
 
 #if OOT_PSP_AUDIO_DIAGNOSTICS
 static volatile OotPspMixerOpcodeProfile sAudioMeOpcodeProfileStorage
@@ -175,10 +214,22 @@ static volatile u32 sAudioOutputFrames;
 static volatile u32 sAudioPendingOutputFrames;
 static volatile s32 sAudioOutputThreadRunning;
 static volatile s32 sAudioProducerThreadRunning;
+static volatile s32 sAudioSuspendRequested;
+static volatile s32 sAudioProducerParked;
+static volatile s32 sAudioOutputParked;
+static s32 sAudioMeRestartAfterSuspend;
+static s32 sAudioMeResumeStarted;
+static u32 sAudioMeWakeGeneration;
+static Acmd sAudioMeWakeProbe __attribute__((aligned(64)));
+static s32 sAudioSuspendOutputReleased;
+static s32 sAudioSuspendReleasePending;
+static const char* sAudioSuspendError;
+static char sAudioMeSetupError[80];
 static volatile s32 sAudioPlaybackPrimed;
 static volatile s32 sAudioPlaybackStarted;
 static volatile s32 sAudioMeBootStarted;
 static volatile s32 sAudioMeBootResult;
+static s32 sAudioMeLibraryInitialized;
 static volatile s32 sAudioMeInitialized;
 static volatile s32 sAudioMeCommandPending;
 static volatile u32 sAudioSourceFrequency = OOT_PSP_AUDIO_DEFAULT_SOURCE_FREQUENCY;
@@ -253,6 +304,62 @@ static volatile s32 sAudioDiagnosticThreadRunning;
 static SceUID sAudioMeLockSema = -1;
 static SceUID sAudioMeCompletionSema = -1;
 static s32 sAudioMeCompletionInterruptReady;
+static s32 sAudioMeCompletionInterruptRegistered;
+#if OOT_PSP_WAKE_DIAGNOSTICS
+static volatile u32 sAudioWakeInterruptCount;
+static u32 sAudioWakeFallbackCount;
+static u32 sAudioWakeFallbackState;
+static u32 sAudioWakeFallbackProgress;
+static u32 sAudioWakeFallbackElapsed;
+static s32 sAudioWakeFallbackCmdCount;
+static u32 sAudioWakeBootCount;
+static volatile u32 sAudioWakeHardware[6];
+static u32 sAudioWakeFallbackHardware[6];
+static s32 sAudioWakeFallbackHardwareResult;
+static u32 sAudioWakeFallbackWord0, sAudioWakeFallbackWord1, sAudioWakeFallbackWordsValid;
+static s32 sAudioWakeCpuSynthInputs[5];
+
+static int OotPspAudioBackend_ReadMeHardware(void) {
+    /* Read-only snapshots of the clock dividers used by me-core's bootstrap
+     * and the reset/bus/config registers it configures. Run through kcall. */
+    sAudioWakeHardware[0] = hw(0xBC200000);
+    sAudioWakeHardware[1] = hw(0xBC200004);
+    sAudioWakeHardware[2] = hw(0xBC200008);
+    sAudioWakeHardware[3] = HW_SYS_BUS_CLOCK_ENABLE;
+    sAudioWakeHardware[4] = HW_SYS_RESET_ENABLE;
+    sAudioWakeHardware[5] = HW_SYS_TACHYON_CONFIG_STATUS;
+    return 0;
+}
+
+static void OotPspAudioBackend_RecordMeCpuState(void) {
+    u32 config, status, stack;
+
+    __asm__ volatile("mfc0 %0, $16\n\tsync\n\tmfc0 %1, $12\n\tsync" : "=r"(config), "=r"(status));
+    __asm__ volatile("move %0, $sp" : "=r"(stack));
+    sAudioMeConfig = config;
+    sAudioMeCpuStatus = status;
+    sAudioMeStackPointer = stack;
+}
+
+void OotPspAudioBackend_RecordMeProgress(u32 progress) {
+    sAudioMeProgress = progress;
+}
+
+void OotPspAudioBackend_RecordMeCommand(u32 index, u32 word0, u32 word1) {
+    sAudioMeWord0 = word0;
+    sAudioMeWord1 = word1;
+    meLibSync();
+    sAudioMeProgress = 0x80000000U | (index << 8) | (word0 >> 24);
+}
+
+void OotPspAudioBackend_RecordMeSynthInputs(s32 ticks, s32 notes, s32 reverbs, s32 frames, s32 downsampleRate) {
+    sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_SYNTH_TICKS] = ticks;
+    sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_SYNTH_NOTES] = notes;
+    sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_SYNTH_REVERBS] = reverbs;
+    sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_SYNTH_FRAMES] = frames;
+    sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_SYNTH_DOWNSAMPLE] = downsampleRate;
+}
+#endif
 static s32 sAudioOutputChannel = -1;
 static s32 sAudioHardwareSrc;
 
@@ -260,6 +367,10 @@ void AudioThread_InitExternalPool(void* ramAddr, u32 size);
 static s32 OotPspAudioBackend_EnsureMeLockSema(void);
 #if OOT_PSP_AUDIO_MEDIA_ENGINE
 static s32 OotPspAudioBackend_EnsureMeCompletionInterrupt(void);
+int OotPspMeSuspend_Init(void);
+u32 OotPspMeSuspend_WakeGeneration(void);
+static int OotPspAudioBackend_HoldMeReset(void);
+static int OotPspAudioBackend_ResetMeAfterSuspend(void);
 #endif
 static void OotPspAudioBackend_MeWritebackRange(const void* address, u32 size);
 static void OotPspAudioBackend_MeInvalidateInputs(const Acmd* cmdList, s32 cmdCount,
@@ -283,42 +394,36 @@ static s32 OotPspAudioBackend_MeJobIsRunning(void) {
 #define AUDIO_DIAG_INCREMENT(variable) ((void)0)
 #endif
 
-__attribute__((noinline, aligned(4))) void meLibOnException(void) {
-    sAudioMeState = OOT_PSP_AUDIO_ME_STATE_FAULT;
-    meLibSync();
-    if (sAudioMeCompletionInterruptEnabled) {
-        meLibSendExternalSoftInterrupt();
-    }
-    meLibHalt();
-}
-
-__attribute__((noinline, aligned(4))) void meLibOnExternalInterrupt(void) {
-    sAudioMeState = OOT_PSP_AUDIO_ME_STATE_FAULT;
-    meLibSync();
-    if (sAudioMeCompletionInterruptEnabled) {
-        meLibSendExternalSoftInterrupt();
-    }
-    meLibHalt();
-}
-
-__attribute__((noinline, aligned(4))) void meLibOnProcess(void) {
-    /*
-     * Publish a checkpoint before touching any optional ME facilities.  The
-     * library's exception-handler setup is intentionally omitted: audio only
-     * sends completion interrupts from the ME to the Allegrex, while that
-     * setup configures the opposite direction and can stall on real hardware.
-     */
+__attribute__((noinline, aligned(4))) void OotPspAudioBackend_RunMe(void) {
+    /* The sample's simple reset handler needs no context-save interrupt.
+     * Completion interrupts travel in the other direction, to Allegrex. */
     sAudioMeProgress = OOT_PSP_AUDIO_ME_PROGRESS_ENTERED;
+#if OOT_PSP_WAKE_DIAGNOSTICS
+    OotPspAudioBackend_RecordMeCpuState();
+#endif
     meLibSync();
+    if (sAudioMeState != OOT_PSP_AUDIO_ME_STATE_BOOTING) {
+        /* The firmware wake hook can enter before assets are restored. Wait
+         * for the coordinator's explicit reset and BOOTING handoff instead
+         * of touching DSP state on this early entry. */
+        for (;;) {
+            meLibDelayPipeline();
+        }
+    }
 
-    do {
-        meLibDelayPipeline();
-    } while (sAudioMeState == OOT_PSP_AUDIO_ME_STATE_BOOTING);
-
-    sAudioMeProgress = OOT_PSP_AUDIO_ME_PROGRESS_BOOT_RELEASED;
+    /* As in the audio example, initialize directly on entry. Allegrex never
+     * releases a second startup gate: it only waits for the READY result. */
+    /* Assembly invalidated inherited cache tags before creating this C
+     * frame. Cold startup must not write back stale firmware cache contents. */
+    sAudioMeProgress = OOT_PSP_AUDIO_ME_PROGRESS_SYNTH_INIT;
+    meLibSync();
+    OotPspAudioSynth_InitMe();
+    sAudioMeProgress = OOT_PSP_AUDIO_ME_PROGRESS_MIXER_INIT;
     meLibSync();
     OotPspMixer_InitVme();
     sAudioMeProgress = OOT_PSP_AUDIO_ME_PROGRESS_READY;
+    meLibSync();
+    sAudioMeState = OOT_PSP_AUDIO_ME_STATE_IDLE;
     meLibSync();
 
     while (sAudioMeState != OOT_PSP_AUDIO_ME_STATE_STOP) {
@@ -330,6 +435,9 @@ __attribute__((noinline, aligned(4))) void meLibOnProcess(void) {
             u32 privateOutputBytes = sAudioMeQueueFrames * OOT_PSP_AUDIO_CHANNELS * sizeof(s16);
 
             sAudioMeProgress = 1;
+#if OOT_PSP_WAKE_DIAGNOSTICS
+            OotPspAudioBackend_RecordMeCpuState();
+#endif
             if (sAudioMeState == OOT_PSP_AUDIO_ME_STATE_SYNTH_RUN) {
                 /* Command construction follows Allegrex sequence/control
                  * preparation. Refresh only its shared inputs, then publish a
@@ -347,7 +455,8 @@ __attribute__((noinline, aligned(4))) void meLibOnProcess(void) {
             }
             OotPspAudioBackend_MeInvalidateInputs(cmdList, cmdCount, privateOutput, privateOutputBytes);
             sAudioMeProgress = 4;
-            OotPspMixer_ExecuteCommandListMe(cmdList, cmdCount, OOT_PSP_AUDIO_ME_OPCODE_PROFILE);
+            OotPspMixer_ExecuteCommandListMe(cmdList, cmdCount, OOT_PSP_AUDIO_ME_OPCODE_PROFILE,
+                                            &sAudioMeProgress);
             if (sAudioMeQueueFrames != 0) {
                 sAudioMeProgress = 5;
                 /* A_SAVEBUFF just produced this PCM in the ME cache. Copy it
@@ -381,6 +490,10 @@ __attribute__((noinline, aligned(4))) void meLibOnProcess(void) {
     }
 
     OotPspMixer_ShutdownVme();
+    /* Publish shutdown before acknowledging it; the main CPU may then free
+     * completion objects and reset the processor without a remaining writer. */
+    meLibDcacheWritebackInvalidateAll();
+    meLibSync();
     sAudioMeState = OOT_PSP_AUDIO_ME_STATE_HALTED;
     meLibSync();
     meLibHalt();
@@ -389,8 +502,8 @@ __attribute__((noinline, aligned(4))) void meLibOnProcess(void) {
 /*
  * Match the working me-core samples: initialize the library once, near the
  * beginning of main, before the renderer and audio systems are brought up.
- * The ME waits in meLibOnProcess until the late audio initialization changes
- * the shared state from BOOTING to IDLE.
+ * The ME worker initializes its private DSP state and publishes READY/IDLE.
+ * Late audio initialization waits for that result before submitting work.
  */
 s32 OotPspAudioBackend_BootMe(void) {
 #if !OOT_PSP_AUDIO_MEDIA_ENGINE
@@ -418,7 +531,19 @@ s32 OotPspAudioBackend_BootMe(void) {
     meLibSync();
 
     sAudioMeBootStarted = true;
-    sAudioMeBootResult = meLibDefaultInit();
+    if (sAudioMeLibraryInitialized) {
+        /* Keep the sample's firmware event hook and the existing bridge.
+         * Reinstall the bootstrap and select the firmware table as at boot. */
+        sAudioMeBootResult = kcall(OotPspAudioBackend_ResetMeAfterSuspend, 0);
+    } else {
+        sAudioMeBootResult = OotPspMeSuspend_Init();
+        sAudioMeLibraryInitialized = sAudioMeBootResult >= 0;
+    }
+#if OOT_PSP_WAKE_DIAGNOSTICS
+    if (sAudioMeBootResult >= 0) {
+        sAudioWakeBootCount++;
+    }
+#endif
     return sAudioMeBootResult;
 #endif
 }
@@ -437,18 +562,14 @@ static s32 OotPspAudioBackend_InitMe(void) {
 
     ret = OotPspAudioBackend_EnsureMeLockSema();
     if (ret < 0) {
+        sAudioSuspendError = "Media Engine lock unavailable";
         return ret;
     }
     ret = OotPspAudioBackend_BootMe();
     if (ret < 0) {
+        sAudioSuspendError = "Media Engine boot rejected";
         return ret;
     }
-
-    /* A failed registration is non-fatal; command waits retain their polling fallback. */
-    OotPspAudioBackend_EnsureMeCompletionInterrupt();
-
-    meLibSync();
-    sAudioMeState = OOT_PSP_AUDIO_ME_STATE_IDLE;
 
     /*
      * Do not publish the backend as active until the ME has finished mixer
@@ -457,16 +578,34 @@ static s32 OotPspAudioBackend_InitMe(void) {
      * one timeout followed by permanent CPU mixing.
      */
     readyStart = sceKernelGetSystemTimeLow();
-    while (sAudioMeProgress != OOT_PSP_AUDIO_ME_PROGRESS_READY) {
+    while ((sAudioMeProgress != OOT_PSP_AUDIO_ME_PROGRESS_READY) ||
+           (sAudioMeState != OOT_PSP_AUDIO_ME_STATE_IDLE)) {
         if ((sceKernelGetSystemTimeLow() - readyStart) >= OOT_PSP_AUDIO_ME_TIMEOUT_US) {
+            u32 failedProgress = sAudioMeProgress;
+            u32 failedState = sAudioMeState;
+            const char* stage = "setup";
+
             sAudioMeState = OOT_PSP_AUDIO_ME_STATE_STOP;
             meLibSync();
             AUDIO_DIAG_INCREMENT(sAudioDiagnosticMeTimeouts);
+            if (failedProgress == OOT_PSP_AUDIO_ME_PROGRESS_BOOT_RELEASED) {
+                stage = "cache";
+            } else if (failedProgress == OOT_PSP_AUDIO_ME_PROGRESS_SYNTH_INIT) {
+                stage = "synth";
+            } else if (failedProgress == OOT_PSP_AUDIO_ME_PROGRESS_MIXER_INIT) {
+                stage = "mixer";
+            }
+            snprintf(sAudioMeSetupError, sizeof(sAudioMeSetupError), "ME %s stalled p=%lX s=%lu",
+                     stage, (unsigned long)failedProgress, (unsigned long)failedState);
+            sAudioSuspendError = sAudioMeSetupError;
             return -1;
         }
         sceKernelDelayThread(OOT_PSP_AUDIO_ME_POLL_USEC);
     }
 
+    /* Arm completion delivery only after the worker is ready. Failure is
+     * non-fatal: command waits retain shared-state polling. */
+    OotPspAudioBackend_EnsureMeCompletionInterrupt();
     sAudioMeInitialized = true;
     return 0;
 #endif
@@ -876,6 +1015,22 @@ static void OotPspAudioBackend_PublishPendingMeQueue(void) {
 
 static void OotPspAudioBackend_FallbackFromMe(const Acmd* cmdList, s32 cmdCount, const s16* queueSrc,
                                               u32 queueFrames, u32 queueWritePos) {
+#if OOT_PSP_WAKE_DIAGNOSTICS
+    sAudioWakeFallbackCount++;
+    sAudioWakeFallbackState = sAudioMeState;
+    sAudioWakeFallbackProgress = sAudioMeProgress;
+    sAudioWakeFallbackWord0 = sAudioMeWord0;
+    sAudioWakeFallbackWord1 = sAudioMeWord1;
+    sAudioWakeFallbackWordsValid = (sAudioWakeFallbackProgress & 0x80000000U) &&
+        sAudioWakeFallbackProgress == sAudioMeProgress &&
+        (sAudioWakeFallbackProgress & 0xFF) == (sAudioWakeFallbackWord0 >> 24);
+    sAudioWakeFallbackElapsed = sAudioMeCommandPending ? sceKernelGetSystemTimeLow() - sAudioMePendingStartTime : 0;
+    sAudioWakeFallbackCmdCount = cmdCount;
+    sAudioWakeFallbackHardwareResult = sAudioMeLibraryInitialized ? kcall(OotPspAudioBackend_ReadMeHardware, 0) : -1;
+    for (u32 i = 0; i < 6; i++) {
+        sAudioWakeFallbackHardware[i] = sAudioWakeHardware[i];
+    }
+#endif
 #if defined(OOTDEBUG) || OOT_PSP_AUDIO_DIAGNOSTICS
     u32 buildStartUsec = 0;
 #endif
@@ -950,6 +1105,9 @@ static s32 OotPspAudioBackend_EnsureMeLockSema(void) {
 
 #if OOT_PSP_AUDIO_MEDIA_ENGINE
 static void OotPspAudioBackend_MeCompletionInterrupt(UNUSED int subIntr, UNUSED void* arg) {
+#if OOT_PSP_WAKE_DIAGNOSTICS
+    sAudioWakeInterruptCount++;
+#endif
     if (OotPspAudioBackend_IsValidUid(sAudioMeCompletionSema)) {
         sceKernelSignalSema(sAudioMeCompletionSema, 1);
     }
@@ -959,8 +1117,15 @@ static s32 OotPspAudioBackend_EnsureMeCompletionInterrupt(void) {
     SceUID sema;
     s32 ret;
 
-    if (sAudioMeCompletionInterruptReady) {
-        return 0;
+    if (sAudioMeCompletionInterruptRegistered) {
+        ret = sceKernelEnableSubIntr(PSP_MECODEC_INT, 0);
+        sAudioMeCompletionInterruptEnabled = ret >= 0;
+        /* If firmware cannot rearm the interrupt after wake, command waits
+         * must poll the shared completion state instead of sleeping until
+         * the full job timeout on a semaphore that will never be signalled. */
+        sAudioMeCompletionInterruptReady = ret >= 0;
+        meLibSync();
+        return ret;
     }
 
     if (!OotPspAudioBackend_IsValidUid(sAudioMeCompletionSema)) {
@@ -976,18 +1141,39 @@ static s32 OotPspAudioBackend_EnsureMeCompletionInterrupt(void) {
     if (ret < 0) {
         return ret;
     }
+    sAudioMeCompletionInterruptRegistered = true;
 
     ret = sceKernelEnableSubIntr(PSP_MECODEC_INT, 0);
     if (ret < 0) {
-        sceKernelReleaseSubIntrHandler(PSP_MECODEC_INT, 0);
+        if (sceKernelReleaseSubIntrHandler(PSP_MECODEC_INT, 0) >= 0) {
+            sAudioMeCompletionInterruptRegistered = false;
+        }
         return ret;
     }
 
     sAudioMeCompletionInterruptEnabled = true;
     meLibSync();
     sAudioMeCompletionInterruptReady = true;
+    sAudioMeCompletionInterruptRegistered = true;
     return 0;
 }
+
+static void OotPspAudioBackend_RebuildMeCompletionInterrupt(void) {
+    /* EnableSubIntr alone does not rebuild routing lost by firmware resume.
+     * Both workers and the ME are idle here, so replace only our owned handler
+     * before repeating the command/delivery check. */
+    sAudioMeCompletionInterruptEnabled = false;
+    sAudioMeCompletionInterruptReady = false;
+    meLibSync();
+    if (sAudioMeCompletionInterruptRegistered) {
+        sceKernelDisableSubIntr(PSP_MECODEC_INT, 0);
+        if (sceKernelReleaseSubIntrHandler(PSP_MECODEC_INT, 0) >= 0) {
+            sAudioMeCompletionInterruptRegistered = false;
+        }
+    }
+    (void)OotPspAudioBackend_EnsureMeCompletionInterrupt();
+}
+
 #endif
 
 static void OotPspAudioBackend_DrainMeCompletion(void) {
@@ -1031,6 +1217,8 @@ static void OotPspAudioBackend_EndDiagnosticMeWait(u32 startUsec, s32 waited) {
 #endif
 
 static void OotPspAudioBackend_WaitForCommandsLocked(void) {
+    u32 lastProgress;
+    u32 lastProgressUsec;
 #if OOT_PSP_AUDIO_DIAGNOSTICS
     u32 diagnosticWaitStart = 0;
     s32 diagnosticWaited = false;
@@ -1039,6 +1227,10 @@ static void OotPspAudioBackend_WaitForCommandsLocked(void) {
     if (!sAudioMeCommandPending) {
         return;
     }
+    lastProgress = sAudioMeProgress;
+    /* The asynchronous caller may itself have been descheduled. We cannot
+     * infer a stall from time when no one was observing the ME's progress. */
+    lastProgressUsec = sceKernelGetSystemTimeLow();
 
 #if OOT_PSP_AUDIO_DIAGNOSTICS
     if (OotPspAudioBackend_MeJobIsRunning()) {
@@ -1051,23 +1243,48 @@ static void OotPspAudioBackend_WaitForCommandsLocked(void) {
 #endif
 
     while (OotPspAudioBackend_MeJobIsRunning()) {
-        if (sAudioMeCompletionInterruptReady) {
-            u32 elapsed = sceKernelGetSystemTimeLow() - sAudioMePendingStartTime;
-            SceUInt timeout;
+        u32 now = sceKernelGetSystemTimeLow();
+        u32 progress = sAudioMeProgress;
+        u32 elapsed, totalElapsed;
 
-            if (elapsed >= OOT_PSP_AUDIO_ME_TIMEOUT_US) {
-                break;
-            }
+        if (progress != lastProgress) {
+            lastProgress = progress;
+            lastProgressUsec = now;
+        }
+        elapsed = now - lastProgressUsec;
+        totalElapsed = now - sAudioMePendingStartTime;
+        /* A progressing job still owns synthesis/mixer memory. A slow wake
+         * must not retire it and permanently move all later jobs to Allegrex
+         * just because total age exceeded the stall timeout. */
+        if (elapsed >= OOT_PSP_AUDIO_ME_TIMEOUT_US || totalElapsed >= OOT_PSP_AUDIO_ME_MAX_JOB_US) {
+            break;
+        }
+        if (sAudioMeCompletionInterruptReady) {
+            SceUInt timeout;
+            s32 result;
 
             timeout = OOT_PSP_AUDIO_ME_TIMEOUT_US - elapsed;
-            sceKernelWaitSema(sAudioMeCompletionSema, 1, &timeout);
+            if (timeout > OOT_PSP_AUDIO_ME_MAX_JOB_US - totalElapsed) {
+                timeout = OOT_PSP_AUDIO_ME_MAX_JOB_US - totalElapsed;
+            }
+            if (timeout > OOT_PSP_AUDIO_ME_COMPLETION_WAIT_USEC) {
+                timeout = OOT_PSP_AUDIO_ME_COMPLETION_WAIT_USEC;
+            }
+            result = sceKernelWaitSema(sAudioMeCompletionSema, 1, &timeout);
+            if ((result < 0) && ((result != (s32)SCE_KERNEL_ERROR_WAIT_TIMEOUT) ||
+                                 !OotPspAudioBackend_MeJobIsRunning())) {
+                /* Firmware can lose delivery after the resume probe too. An
+                 * invalid semaphore can fail immediately: retrying it here
+                 * would spin on Allegrex until the full command timeout.
+                 * Keep the ME running and use yielding shared-state waits. */
+                sAudioMeCompletionInterruptReady = false;
+                sAudioMeCompletionInterruptEnabled = false;
+                meLibSync();
+            }
             continue;
         }
 
-        if ((sceKernelGetSystemTimeLow() - sAudioMePendingStartTime) >= OOT_PSP_AUDIO_ME_TIMEOUT_US) {
-            break;
-        }
-        sceKernelDelayThread(OOT_PSP_AUDIO_ME_POLL_USEC);
+        sceKernelDelayThread(OOT_PSP_AUDIO_ME_COMPLETION_POLL_USEC);
     }
 
     if (OotPspAudioBackend_MeJobIsRunning()) {
@@ -1081,14 +1298,21 @@ static void OotPspAudioBackend_WaitForCommandsLocked(void) {
             if (sAudioMeCompletionInterruptReady) {
                 u32 elapsed = sceKernelGetSystemTimeLow() - interruptTime;
                 SceUInt timeout;
+                s32 result;
 
                 if (elapsed >= 10000) {
                     break;
                 }
                 timeout = 10000 - elapsed;
-                sceKernelWaitSema(sAudioMeCompletionSema, 1, &timeout);
+                result = sceKernelWaitSema(sAudioMeCompletionSema, 1, &timeout);
+                if ((result < 0) && ((result != (s32)SCE_KERNEL_ERROR_WAIT_TIMEOUT) ||
+                                     !OotPspAudioBackend_MeJobIsRunning())) {
+                    sAudioMeCompletionInterruptReady = false;
+                    sAudioMeCompletionInterruptEnabled = false;
+                    meLibSync();
+                }
             } else {
-                sceKernelDelayThread(OOT_PSP_AUDIO_ME_POLL_USEC);
+                sceKernelDelayThread(OOT_PSP_AUDIO_ME_COMPLETION_POLL_USEC);
             }
         }
 
@@ -1149,6 +1373,8 @@ void OotPspAudioBackend_WaitForCommands(void) {
     OotPspAudioBackend_WaitForCommandsLocked();
     OotPspAudioBackend_UnlockMe();
 }
+
+
 
 static void OotPspAudioBackend_SubmitCommandsInternal(const Acmd* cmdList, s32 cmdCount, const s16* queueSrc,
                                                       u32 queueFrames) {
@@ -1235,6 +1461,8 @@ void OotPspAudioBackend_SubmitCommandsAndQueue(const Acmd* cmdList, s32 cmdCount
     OotPspAudioBackend_SubmitCommandsInternal(cmdList, cmdCount, buf, size / frameBytes);
 }
 
+
+
 static void OotPspAudioBackend_RunSynthesisCpu(Acmd* cmdList, s16* aiBuffer, s32 aiFrames,
                                                u32 queueWritePos) {
     s32 cmdCount;
@@ -1299,6 +1527,13 @@ void OotPspAudioBackend_SubmitSynthesis(Acmd* cmdList, s16* aiBuffer, s32 aiFram
      * by the audio asset-load path when they enter RAM. */
     OotPspAudioBackend_ResetMeWriteRanges();
     OotPspAudioSynth_WritebackMeState();
+#if OOT_PSP_WAKE_DIAGNOSTICS
+    sAudioWakeCpuSynthInputs[0] = gAudioCtx.audioBufferParameters.ticksPerUpdate;
+    sAudioWakeCpuSynthInputs[1] = gAudioCtx.numNotes;
+    sAudioWakeCpuSynthInputs[2] = gAudioCtx.numSynthesisReverbs;
+    sAudioWakeCpuSynthInputs[3] = aiFrames;
+    sAudioWakeCpuSynthInputs[4] = gAudioCtx.numSynthesisReverbs > 0 ? gAudioCtx.synthesisReverbs[0].downsampleRate : 0;
+#endif
     OotPspAudioBackend_DrainMeCompletion();
     sAudioMeCmdList = (u32)(uintptr_t)cmdList;
     sAudioMeCmdCount = 0;
@@ -1782,6 +2017,22 @@ static void OotPspAudioBackend_CopyHardwareSrcChunk(u32 readPos, s16* mix) {
     }
 }
 
+static s32 OotPspAudioBackend_ParkForSuspend(volatile s32* parked, s32 producer) {
+    if (!sAudioSuspendRequested) {
+        return false;
+    }
+    if (producer) {
+        OotPspAudioBackend_WaitForCommands();
+    }
+    *parked = true;
+    __asm__ volatile("sync" ::: "memory");
+    while (sAudioSuspendRequested) {
+        sceKernelDelayThread(1000);
+    }
+    *parked = false;
+    return true;
+}
+
 static void OotPspAudioBackend_RunHardwareSrcOutput(void) {
     u32 heldFrames = 0;
     u32 mixIndex = 0;
@@ -1794,6 +2045,12 @@ static void OotPspAudioBackend_RunHardwareSrcOutput(void) {
      * prevents the producer from recycling those samples in the meantime.
      */
     while (sAudioOutputThreadRunning) {
+        if (OotPspAudioBackend_ParkForSuspend(&sAudioOutputParked, false)) {
+            /* Release drained the last direct buffer while we were parked.
+             * Keep it protected from the producer until that drain finishes. */
+            sAudioReadPos = (sAudioReadPos + heldFrames) & OOT_PSP_AUDIO_RING_MASK;
+            heldFrames = 0;
+        }
         u32 readPos = sAudioReadPos;
         u32 buffered = OotPspAudioBackend_BufferedFrames();
         u32 available = (heldFrames < buffered) ? buffered - heldFrames : 0;
@@ -1868,6 +2125,7 @@ static int OotPspAudioBackend_OutputThread(UNUSED SceSize args, UNUSED void* arg
     }
 
     while (sAudioOutputThreadRunning) {
+        OotPspAudioBackend_ParkForSuspend(&sAudioOutputParked, false);
         u32 buffered;
         u32 sourceFrames;
         s16* mix = sAudioMix[mixIndex];
@@ -1936,6 +2194,9 @@ static int OotPspAudioBackend_ProducerThread(UNUSED SceSize args, UNUSED void* a
     nextUpdateUsec = sceKernelGetSystemTimeLow();
 
     while (sAudioProducerThreadRunning) {
+        if (OotPspAudioBackend_ParkForSuspend(&sAudioProducerParked, true)) {
+            nextUpdateUsec = sceKernelGetSystemTimeLow();
+        }
         s32 delayUsec;
         s32 missedUpdate = false;
         u32 playableFrames;
@@ -2762,6 +3023,232 @@ static s32 OotPspAudioBackend_StartThreads(void) {
     return 0;
 }
 
+const char* OotPspAudioBackend_GetSuspendError(void) {
+    return sAudioSuspendError != NULL ? sAudioSuspendError : "Could not pause audio";
+}
+
+s32 OotPspAudioBackend_PrepareSuspend(void) {
+    u32 start = sceKernelGetSystemTimeLow();
+
+    sAudioSuspendError = "Audio workers did not pause";
+    sAudioSuspendRequested = true;
+    while ((sAudioProducerThreadRunning && !sAudioProducerParked) ||
+           (sAudioOutputThreadRunning && !sAudioOutputParked)) {
+        if (sceKernelGetSystemTimeLow() - start >= 2000000U) {
+            return false;
+        }
+        sceKernelDelayThread(1000);
+    }
+    OotPspAudioBackend_WaitForCommands();
+#if OOT_PSP_AUDIO_MEDIA_ENGINE
+    if (sAudioMeBootStarted && (sAudioMeBootResult >= 0)) {
+        sAudioMeWakeGeneration = OotPspMeSuspend_WakeGeneration();
+        sAudioSuspendError = "Media Engine did not shut down";
+        sAudioMeRestartAfterSuspend = true;
+        sAudioMeResumeStarted = false;
+        sAudioMeCompletionInterruptEnabled = false;
+        sAudioMeState = OOT_PSP_AUDIO_ME_STATE_STOP;
+        meLibSync();
+        start = sceKernelGetSystemTimeLow();
+        while (sAudioMeState != OOT_PSP_AUDIO_ME_STATE_HALTED) {
+            if (sceKernelGetSystemTimeLow() - start >= OOT_PSP_AUDIO_ME_TIMEOUT_US) {
+                return false;
+            }
+            sceKernelDelayThread(OOT_PSP_AUDIO_ME_POLL_USEC);
+        }
+        sAudioMeInitialized = false;
+    }
+#endif
+    if (OotPspAudioBackend_IsOutputInitialized()) {
+        s32 result;
+
+        /* The SRC driver retains the caller's buffer after output returns.
+         * A null submission explicitly waits for that final DMA before we
+         * release the channel. Both workers are already parked. */
+        sAudioSuspendError = "Audio output did not drain";
+        sAudioSuspendReleasePending = true;
+        if (sAudioHardwareSrc && (sceAudioSRCOutputBlocking(PSP_AUDIO_VOLUME_MAX, NULL) < 0)) {
+            return false;
+        }
+        start = sceKernelGetSystemTimeLow();
+        do {
+            result = sAudioHardwareSrc ? sceAudioSRCChRelease() : sceAudioChRelease(sAudioOutputChannel);
+            if (result >= 0) {
+                sAudioSuspendOutputReleased = true;
+                sAudioSuspendReleasePending = false;
+                break;
+            }
+            if (sceKernelGetSystemTimeLow() - start >= OOT_PSP_AUDIO_ME_TIMEOUT_US) {
+                return false;
+            }
+            sceKernelDelayThread(1000);
+        } while (true);
+    }
+    sAudioOutputFrames = 0;
+    sAudioPendingOutputFrames = 0;
+    sAudioSuspendError = NULL;
+    return true;
+}
+
+#if OOT_PSP_AUDIO_MEDIA_ENGINE
+static int OotPspAudioBackend_HoldMeReset(void) {
+    HW_SYS_RESET_ENABLE |= 0x14;
+    meLibSync();
+    return 0;
+}
+
+static int OotPspAudioBackend_ResetMeAfterSuspend(void) {
+    int tableId = meCoreGetTableIdFromWitnessWord();
+
+    if (tableId < 2) {
+        return ERROR_ON_ME_IMG;
+    }
+    meCoreSelectSystemTable(tableId);
+    meLibReset();
+    return tableId;
+}
+
+static s32 OotPspAudioBackend_VerifyMeAfterSuspend(void) {
+    u32 start;
+
+    /* Require a command round trip from the new worker before releasing
+     * the workers. An all-zero command is a NOP and preserves mixer, voices,
+     * queued PCM, and playback position. */
+    OotPspAudioBackend_DrainMeCompletion();
+    OotPspAudioBackend_WritebackRange(&sAudioMeWakeProbe, sizeof(sAudioMeWakeProbe));
+    sAudioMeCmdList = (u32)(uintptr_t)&sAudioMeWakeProbe;
+    sAudioMeCmdCount = 1;
+    sAudioMeQueueSrc = 0;
+    sAudioMeQueueFrames = 0;
+    sAudioMeProgress = 0;
+    meLibSync();
+    sAudioMeState = OOT_PSP_AUDIO_ME_STATE_RUN;
+    start = sceKernelGetSystemTimeLow();
+    while (sAudioMeState == OOT_PSP_AUDIO_ME_STATE_RUN) {
+        if ((sceKernelGetSystemTimeLow() - start) >= OOT_PSP_AUDIO_ME_TIMEOUT_US) {
+            return false;
+        }
+        sceKernelDelayThread(OOT_PSP_AUDIO_ME_POLL_USEC);
+    }
+    if ((sAudioMeState != OOT_PSP_AUDIO_ME_STATE_IDLE) || (sAudioMeProgress != 6)) {
+        return false;
+    }
+
+    if (sAudioMeCompletionInterruptReady) {
+        SceUInt timeout = 2000;
+
+        /* An enabled interrupt can still lose its delivery route across
+         * firmware resume. Test delivery as well as EnableSubIntr's return
+         * value, or each subsequent job can wait for a 250 ms timeout. */
+        if (sceKernelWaitSema(sAudioMeCompletionSema, 1, &timeout) < 0) {
+            sAudioMeCompletionInterruptEnabled = false;
+            meLibSync();
+            sceKernelDisableSubIntr(PSP_MECODEC_INT, 0);
+            sAudioMeCompletionInterruptReady = false;
+        }
+    }
+    return true;
+}
+#endif
+
+s32 OotPspAudioBackend_Resume(s32 didSleep) {
+    if (!sAudioSuspendRequested) {
+        return true;
+    }
+#if OOT_PSP_AUDIO_MEDIA_ENGINE
+    if (sAudioMeRestartAfterSuspend && didSleep) {
+        u32 start = sceKernelGetSystemTimeLow();
+
+        /* Power RESUME_COMPLETE does not acknowledge our MeRpc firmware
+         * event hook. Wait for its final reset write before channel setup or
+         * releasing the custom worker. Cancelled sleep skips this wait. */
+        while (OotPspMeSuspend_WakeGeneration() == sAudioMeWakeGeneration) {
+            if ((sceKernelGetSystemTimeLow() - start) >= OOT_PSP_AUDIO_ME_WAKE_TIMEOUT_US) {
+                sAudioSuspendError = "Media Engine wake not finished";
+                return false;
+            }
+            sceKernelDelayThread(1000);
+        }
+    }
+#endif
+    /* Finish channel setup before the explicit ME boot. The firmware hook
+     * leaves the core held in reset and never restores an old context. */
+    if (sAudioSuspendReleasePending) {
+        s32 result = sAudioHardwareSrc ? sceAudioSRCChRelease() : sceAudioChRelease(sAudioOutputChannel);
+
+        if (result < 0) {
+            sAudioSuspendError = "Audio output did not release";
+            return false;
+        }
+        sAudioSuspendReleasePending = false;
+        sAudioSuspendOutputReleased = true;
+    }
+    if (sAudioSuspendOutputReleased) {
+        s32 result = sAudioHardwareSrc
+                         ? sceAudioSRCChReserve(sAudioSourceChunkFrames, sAudioSourceFrequency,
+                                                OOT_PSP_AUDIO_CHANNELS)
+                         : sceAudioChReserve(sAudioOutputChannel, OOT_PSP_AUDIO_OUTPUT_CHUNK_FRAMES,
+                                              PSP_AUDIO_FORMAT_STEREO);
+
+        if (result < 0) {
+            sAudioSuspendError = "Audio output did not reserve";
+            return false;
+        }
+        sAudioSuspendOutputReleased = false;
+    }
+#if OOT_PSP_AUDIO_MEDIA_ENGINE
+    if (sAudioMeRestartAfterSuspend) {
+        if (!sAudioMeResumeStarted && (sAudioMeState != OOT_PSP_AUDIO_ME_STATE_HALTED)) {
+            sAudioSuspendError = "Media Engine did not shut down";
+            return false;
+        }
+        sAudioMeResumeStarted = true;
+        sAudioMeInitialized = false;
+        /* Fence the early firmware entry and any failed probe before retry
+         * clears shared transport. Neither can write into a fresh job. */
+        if (kcall(OotPspAudioBackend_HoldMeReset, 0) < 0) {
+            sAudioSuspendError = "Media Engine did not reset";
+            return false;
+        }
+        OotPspAudioBackend_ClearPendingMeCommand();
+        OotPspAudioBackend_ResetMeWriteRanges();
+        sAudioMeBootStarted = false;
+        sAudioMeBootResult = 0;
+        if (OotPspAudioBackend_InitMe() < 0) {
+            return false;
+        }
+        if (!OotPspAudioBackend_VerifyMeAfterSuspend()) {
+            sAudioMeInitialized = false;
+            sAudioSuspendError = "Media Engine command did not finish";
+            return false;
+        }
+        if (!sAudioMeCompletionInterruptReady && sAudioMeCompletionInterruptRegistered) {
+            OotPspAudioBackend_RebuildMeCompletionInterrupt();
+            if (!OotPspAudioBackend_VerifyMeAfterSuspend()) {
+                sAudioMeInitialized = false;
+                sAudioSuspendError = "Media Engine command did not finish";
+                return false;
+            }
+        }
+        sAudioMeResumeStarted = false;
+        sAudioMeRestartAfterSuspend = false;
+    }
+#endif
+    sAudioPlaybackPrimed = false;
+    sAudioOutputFrames = 0;
+    sAudioPendingOutputFrames = 0;
+    __asm__ volatile("sync" ::: "memory");
+    sAudioSuspendRequested = false;
+    /* Wait for acknowledgements to clear before accepting another sleep.
+     * Otherwise a quick second request could mistake the previous ACKs for
+     * parked threads while they are already running again. */
+    while (sAudioProducerParked || sAudioOutputParked) {
+        sceKernelDelayThread(1000);
+    }
+    sAudioSuspendError = NULL;
+    return true;
+}
+
 static void OotPspAudioBackend_QueueCpuCopy(const s16* samples, u32 frames, u32 writePos) {
     u32 copied = 0;
 
@@ -2852,6 +3339,39 @@ s32 OotPspAudioBackend_NeedsRefillUrgently(void) {
 s32 OotPspAudioBackend_NeedsRefillDuringIo(void) {
     return OotPspAudioBackend_PlayableFrames() < OotPspAudioBackend_IoBackoffFrames();
 }
+
+#if OOT_PSP_WAKE_DIAGNOSTICS
+void OotPspAudioBackend_GetWakeStatus(OotPspAudioWakeStatus* status) {
+    status->hardwareResult = sAudioMeLibraryInitialized ? kcall(OotPspAudioBackend_ReadMeHardware, 0) : -1;
+    for (u32 i = 0; i < 6; i++) {
+        status->hardware[i] = sAudioWakeHardware[i];
+        status->fallbackHardware[i] = sAudioWakeFallbackHardware[i];
+    }
+    status->fallbackHardwareResult = sAudioWakeFallbackHardwareResult;
+    status->meConfig = sAudioMeConfig;
+    status->meStatus = sAudioMeCpuStatus;
+    status->meStackPointer = sAudioMeStackPointer;
+    for (u32 i = 0; i < 5; i++) {
+        status->cpuSynthInputs[i] = sAudioWakeCpuSynthInputs[i];
+        status->meSynthInputs[i] = (s32)sAudioMeShared[OOT_PSP_AUDIO_ME_SHARED_SYNTH_TICKS + i];
+    }
+    status->fallbackWord0 = sAudioWakeFallbackWord0;
+    status->fallbackWord1 = sAudioWakeFallbackWord1;
+    status->fallbackWordsValid = sAudioWakeFallbackWordsValid;
+    status->meActive = sAudioMeInitialized != false;
+    status->meState = sAudioMeState;
+    status->meProgress = sAudioMeProgress;
+    status->interruptReady = sAudioMeCompletionInterruptReady;
+    status->interruptCount = sAudioWakeInterruptCount;
+    status->fallbackCount = sAudioWakeFallbackCount;
+    status->fallbackState = sAudioWakeFallbackState;
+    status->fallbackProgress = sAudioWakeFallbackProgress;
+    status->fallbackElapsedUsec = sAudioWakeFallbackElapsed;
+    status->fallbackCmdCount = sAudioWakeFallbackCmdCount;
+    status->hardwareSrc = sAudioHardwareSrc;
+    status->bootCount = sAudioWakeBootCount;
+}
+#endif
 
 #if defined(OOTDEBUG)
 static u64 OotPspAudioBackend_GetThreadRunClock(SceUID threadId) {

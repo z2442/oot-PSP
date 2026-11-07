@@ -21,6 +21,7 @@
 #include "oot_psp_performance.h"
 #include "oot_psp_renderer.h"
 #include "oot_psp_runtime_patch.h"
+#include "oot_psp_suspend.h"
 #include "oot_psp_video.h"
 #include "play_state.h"
 #include "player.h"
@@ -104,12 +105,12 @@ static int OotPspExitCallback(UNUSED int arg1, UNUSED int arg2, UNUSED void* com
 }
 
 static int OotPspPowerCallback(UNUSED int arg1, int powerInfo, UNUSED void* common) {
-    if (powerInfo & PSP_POWER_CB_RESUMING) {
-        OotPsp_AssetNotifyResume();
-    }
+    OotPspSuspend_NotifyPowerEvent(powerInfo);
 
     return 0;
 }
+
+static volatile s32 sOotPspPowerCallbackReady;
 
 static int OotPspCallbackThread(UNUSED SceSize args, UNUSED void* argp) {
     int exitCallbackId = sceKernelCreateCallback("OOT PSP Exit Callback", OotPspExitCallback, NULL);
@@ -121,6 +122,7 @@ static int OotPspCallbackThread(UNUSED SceSize args, UNUSED void* argp) {
         callbackRegistered = true;
     }
     if ((powerCallbackId >= 0) && (scePowerRegisterCallback(0, powerCallbackId) >= 0)) {
+        sOotPspPowerCallbackReady = true;
         callbackRegistered = true;
     }
     if (callbackRegistered) {
@@ -130,17 +132,25 @@ static int OotPspCallbackThread(UNUSED SceSize args, UNUSED void* argp) {
     return 0;
 }
 
-static void OotPspSetupCallbacks(void) {
+static s32 OotPspSetupCallbacks(void) {
     int threadId = sceKernelCreateThread("OOT PSP Callback Thread", OotPspCallbackThread, 0x11, 0x1000, 0, NULL);
 
     if (threadId >= 0) {
-        sceKernelStartThread(threadId, 0, NULL);
+        if (sceKernelStartThread(threadId, 0, NULL) < 0) {
+            sceKernelDeleteThread(threadId);
+        }
     }
+    /* The higher-priority callback thread registers before StartThread returns. */
+    return sOotPspPowerCallbackReady;
 }
 
 int main(int argc, char** argv) {
     const char* executablePath = ((argc > 0) && (argv != NULL)) ? argv[0] : NULL;
 
+    if (!OotPspSuspend_Init()) {
+        sceKernelExitGame();
+        return 1;
+    }
     /* Keep Daedalus's startup order through DVE detection. */
     scePowerSetClockFrequency(333, 333, 166);
     pspFpuSetEnable(0);
@@ -151,7 +161,12 @@ int main(int argc, char** argv) {
     (void)OotPspDve_Init(executablePath);
     OotPspVideo_Init(executablePath);
     OotPspHomeMenu_Init();
-    OotPspSetupCallbacks();
+    if (!OotPspSetupCallbacks()) {
+        printf("oot-psp power callback registration failed\n");
+        OotPspDve_Shutdown();
+        sceKernelExitGame();
+        return 1;
+    }
 
     GraphicsContext gfxCtx;
     GameState* gameState;
@@ -192,6 +207,7 @@ int main(int argc, char** argv) {
         GameState_Init(gameState, nextInit, &gfxCtx);
 
         while (GameState_IsRunning(gameState)) {
+            OotPspSuspend_Poll();
             OotPspHomeMenu_PollHomeButton();
 
             if (OotPspHomeMenu_IsOpen()) {

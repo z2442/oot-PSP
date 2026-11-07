@@ -18,6 +18,7 @@
 #include <pspkernel.h>
 #include <pspdebug.h>
 #include <pspdisplay.h>
+#include <pspge.h>
 #include <pspgu.h>
 #include <pspgum.h>
 #include <string.h>
@@ -1051,6 +1052,17 @@ static void gfx_scegu_render_about(int scrollOffset) {
                                   hintColor, gfx_scegu_rgba(0, 0, 0, 160), INTRAFONT_ALIGN_CENTER);
 }
 
+void gfx_scegu_render_suspend_message(const char* message, const char* hint) {
+    gfx_scegu_prepare_home_menu_draw();
+    gfx_scegu_draw_rect(0, 0, HOME_MENU_WIDTH, HOME_MENU_HEIGHT, gfx_scegu_rgba(7, 15, 13, 255));
+    gfx_scegu_draw_home_menu_text(HOME_MENU_WIDTH / 2, 118, message, 0.65f,
+                                  gfx_scegu_rgba(255, 255, 245, 255), gfx_scegu_rgba(0, 0, 0, 180),
+                                  INTRAFONT_ALIGN_CENTER);
+    gfx_scegu_draw_home_menu_text(HOME_MENU_WIDTH / 2, 166, hint, 0.48f,
+                                  gfx_scegu_rgba(170, 190, 180, 255), gfx_scegu_rgba(0, 0, 0, 160),
+                                  INTRAFONT_ALIGN_CENTER);
+}
+
 void gfx_scegu_render_first_boot_progress(uint32_t progressPermille, const char* statusMessage, bool error) {
     const int barX = 72;
     const int barY = 148;
@@ -2016,6 +2028,45 @@ static void gfx_scegu_invalidate_mode_state(void) {
     active_texture_tile = -1;
     sAppliedShader = NULL;
     sAppliedSamplerStateValid = false;
+}
+
+static PspGeContext sSuspendGeContext __attribute__((aligned(64)));
+static bool sSuspendGeContextValid;
+
+int gfx_scegu_save_suspend_context(void) {
+    int result = sceGeSaveContext(&sSuspendGeContext);
+
+    sSuspendGeContextValid = result >= 0;
+    return result;
+}
+
+int gfx_scegu_restore_suspend_context(void) {
+    OotPspVideoMode mode;
+    int result;
+
+    if (!sSuspendGeContextValid) {
+        return -1;
+    }
+    /* Restore the active route, including when the HOME menu has unapplied
+     * edits. Keep GU's RAM state, SDK callbacks, framebuffer rotation, and
+     * texture allocations paired with the saved GE state. sceGuInit would
+     * replace those objects and reset GU's software state on every wake. */
+    OotPspVideo_GetActiveMode(&mode);
+    result = mode.tvOutput ? gfx_scegu_set_hardware_video_mode(&mode)
+                           : sceDisplaySetMode(0, LCD_SCREEN_WIDTH, LCD_SCREEN_HEIGHT);
+    if (result < 0) {
+        return result;
+    }
+    result = sceGeRestoreContext(&sSuspendGeContext);
+    if (result < 0) {
+        return result;
+    }
+    result = sceDisplaySetFrameBuf(gfx_scegu_vram_cpu_addr(sDisplayBuffer), BUF_WIDTH, sColorPixelFormat,
+                                   PSP_DISPLAY_SETBUF_IMMEDIATE);
+    if (result >= 0) {
+        sPendingBuffer = NULL;
+    }
+    return result;
 }
 
 int gfx_scegu_apply_video_mode(void) {

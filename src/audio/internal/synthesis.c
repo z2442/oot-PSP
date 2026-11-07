@@ -8,6 +8,7 @@
 #include "oot_psp_asset_loader.h"
 #include "oot_psp_audio_backend.h"
 #include "oot_psp_audio_commands.h"
+#include "oot_psp_me_context.h"
 #include <me-core-mapper/me-lib.h>
 #include <pspkernel.h>
 #endif
@@ -80,10 +81,9 @@ typedef char OotPspAudioMeAssetInvalidationsMustFillCacheLines[
 
 typedef struct OotPspAudioMeLocalFlags {
     u8 badSampleLogged;
-    u8 buildingOnMe;
     /* ME stores dirty the entire cache line. Do not let that line contain
      * Allegrex-owned globals such as the letterbox animation state. */
-    u8 cacheLinePadding[62];
+    u8 cacheLinePadding[63];
 } OotPspAudioMeLocalFlags;
 
 typedef char OotPspAudioMeLocalFlagsMustFillCacheLine[
@@ -97,6 +97,13 @@ static OotPspAudioReverbDownsampleCmd sOotPspAudioReverbDownsampleCmds[OOT_PSP_A
                                                                              [OOT_PSP_AUDIO_REVERB_UPDATES]
                                                                              [OOT_PSP_AUDIO_REVERB_DESC_SLOTS]
     __attribute__((aligned(64)));
+
+void OotPspAudioSynth_InitMe(void) {
+    /* Sequence/voice playback remains in gAudioCtx. Recreate ME-local flags
+     * and command descriptors on every cold boot, including after sleep. */
+    memset(&sOotPspAudioMeLocalFlags, 0, sizeof(sOotPspAudioMeLocalFlags));
+    memset(sOotPspAudioReverbDownsampleCmds, 0, sizeof(sOotPspAudioReverbDownsampleCmds));
+}
 
 static s32 OotPspAudioSynth_IsAlignedNativePtr(const void* ptr) {
     u32 addr = (u32)ptr;
@@ -112,7 +119,7 @@ static s32 OotPspAudioSynth_CanCacheSampleSpan(const void* ptr, u32 size) {
     /* The loaded-asset index is owned and updated by Allegrex. The ME uses
      * ordinary load commands while constructing a list rather than racing
      * that index; the mixer still executes those loads on the ME. */
-    return !sOotPspAudioMeLocalFlags.buildingOnMe &&
+    return !OotPspMe_IsWorker() &&
            OotPsp_IsLoadedNativeExternalAssetRange((const void*)start, end - start);
 }
 
@@ -537,8 +544,20 @@ Acmd* AudioSynth_BuildCommandList(Acmd* cmdStart, s32* cmdCnt, s16* aiStart, s32
     cmdP = cmdStart;
     aiBufP = aiStart;
     gAudioCtx.curLoadedBook = NULL;
+#if defined(TARGET_PSP) && OOT_PSP_WAKE_DIAGNOSTICS
+    if (OotPspMe_IsWorker()) {
+        OotPspAudioBackend_RecordMeSynthInputs(gAudioCtx.audioBufferParameters.ticksPerUpdate,
+            gAudioCtx.numNotes, gAudioCtx.numSynthesisReverbs, aiBufLen,
+            gAudioCtx.numSynthesisReverbs > 0 ? gAudioCtx.synthesisReverbs[0].downsampleRate : 0);
+    }
+#endif
 
     for (i = gAudioCtx.audioBufferParameters.ticksPerUpdate; i > 0; i--) {
+#if defined(TARGET_PSP) && OOT_PSP_WAKE_DIAGNOSTICS
+        if (OotPspMe_IsWorker()) {
+            OotPspAudioBackend_RecordMeProgress(0x20000000U | (u32)i);
+        }
+#endif
         if (i == 1) {
             chunkLen = aiBufLen;
         } else if ((aiBufLen / i) >= gAudioCtx.audioBufferParameters.samplesPerTickMax) {
@@ -573,12 +592,7 @@ Acmd* AudioSynth_BuildCommandList(Acmd* cmdStart, s32* cmdCnt, s16* aiStart, s32
 
 #if defined(TARGET_PSP)
 Acmd* AudioSynth_BuildCommandListMe(Acmd* cmdStart, s32* cmdCnt, s16* aiStart, s32 aiBufLen) {
-    Acmd* cmdEnd;
-
-    sOotPspAudioMeLocalFlags.buildingOnMe = true;
-    cmdEnd = AudioSynth_BuildCommandList(cmdStart, cmdCnt, aiStart, aiBufLen);
-    sOotPspAudioMeLocalFlags.buildingOnMe = false;
-    return cmdEnd;
+    return AudioSynth_BuildCommandList(cmdStart, cmdCnt, aiStart, aiBufLen);
 }
 
 s32 AudioSynth_CanBuildCommandsOnMe(void) {
@@ -654,7 +668,7 @@ void func_800DB2C0(s32 updateIndex, s32 noteIndex) {
 #if defined(TARGET_PSP)
 static Acmd* OotPspAudioSynth_DropBadNote(Acmd* cmd, s32 updateIndex, s32 noteIndex, NoteSubEu* noteSubEu, Note* note,
                                           const char* reason, TunedSample* tunedSample, Sample* sample) {
-    if (!sOotPspAudioMeLocalFlags.buildingOnMe && !sOotPspAudioMeLocalFlags.badSampleLogged) {
+    if (!OotPspMe_IsWorker() && !sOotPspAudioMeLocalFlags.badSampleLogged) {
         sOotPspAudioMeLocalFlags.badSampleLogged = true;
         osSyncPrintf("oot-psp audio dropped bad synth note reason=%s note=%d tuned=%p sample=%p\n", reason, noteIndex,
                      tunedSample, sample);
@@ -1351,6 +1365,11 @@ Acmd* AudioSynth_ProcessNote(s32 noteIndex, NoteSubEu* noteSubEu, NoteSynthesisS
     u16 unused;
 
     bookOffset = noteSubEu->bitField1.bookOffset;
+#if defined(TARGET_PSP) && OOT_PSP_WAKE_DIAGNOSTICS
+    if (OotPspMe_IsWorker()) {
+        OotPspAudioBackend_RecordMeProgress(0x30000000U | ((u32)noteIndex << 16) | (u32)updateIndex);
+    }
+#endif
     finished = noteSubEu->bitField0.finished;
     note = &gAudioCtx.notes[noteIndex];
     flags = A_CONTINUE;
@@ -1429,6 +1448,12 @@ Acmd* AudioSynth_ProcessNote(s32 noteIndex, NoteSubEu* noteSubEu, NoteSynthesisS
         }
 #endif
         loopEndPos = loopInfo->header.end;
+#if defined(TARGET_PSP) && OOT_PSP_WAKE_DIAGNOSTICS
+        if (OotPspMe_IsWorker()) {
+            OotPspAudioBackend_RecordMeProgress(0x40000000U | ((u32)noteIndex << 16) |
+                                               ((u32)updateIndex << 8) | sample->codec);
+        }
+#endif
         sampleAddr = (u32)sample->sampleAddr;
         resampledTempLen = 0;
 
@@ -1470,7 +1495,7 @@ Acmd* AudioSynth_ProcessNote(s32 noteIndex, NoteSubEu* noteSubEu, NoteSynthesisS
                     if (1) {}
                     nEntries = SAMPLES_PER_FRAME * sample->book->header.order * sample->book->header.numPredictors;
 #if defined(TARGET_PSP)
-                    if (!sOotPspAudioMeLocalFlags.buildingOnMe &&
+                    if (!OotPspMe_IsWorker() &&
                         OotPsp_IsLoadedNativeExternalAssetRange(gAudioCtx.curLoadedBook, nEntries)) {
                         aOotPspAudioLoadAdpcmCached(cmd++, nEntries, gAudioCtx.curLoadedBook);
                     } else {
@@ -1571,7 +1596,7 @@ Acmd* AudioSynth_ProcessNote(s32 noteIndex, NoteSubEu* noteSubEu, NoteSynthesisS
                         return cmd;
                     } else {
 #if defined(TARGET_PSP)
-                        if (sOotPspAudioMeLocalFlags.buildingOnMe) {
+                        if (OotPspMe_IsWorker()) {
                             return OotPspAudioSynth_DropBadNote(cmd, updateIndex, noteIndex, noteSubEu,
                                                                &gAudioCtx.notes[noteIndex], "ME nonresident sample",
                                                                tunedSample, sample);

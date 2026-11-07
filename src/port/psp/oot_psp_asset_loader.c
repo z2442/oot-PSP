@@ -1,13 +1,13 @@
 #include "oot_psp_asset_loader.h"
 #include "oot_psp_asset_builder.h"
 #include "oot_psp_audio_backend.h"
+#include "oot_psp_dve.h"
 #include "oot_psp_memory.h"
 #include "segment_symbols.h"
 
 #include <pspdmac.h>
 #include <pspiofilemgr.h>
 #include <pspkernel.h>
-#include <psppower.h>
 #include <pspsuspend.h>
 #include <pspsysmem.h>
 #include <pspthreadman.h>
@@ -109,6 +109,8 @@ typedef struct OotPspCacheAllocation {
     void* address;
     SceUID blockId;
     size_t size;
+    s32 volatileMemory;
+    u32 suspendChecksum;
 } OotPspCacheAllocation;
 
 static char sOotPspAssetRoot[256];
@@ -120,7 +122,9 @@ static size_t sOotPspPackedAssetSize;
 static s32 sOotPspPackedAssetSizeKnown = false;
 static size_t sOotPspPackedAssetPosition;
 static volatile s32 sOotPspPackedAssetPositionKnown = false;
-static volatile s32 sOotPspAssetResumePending = false;
+static s32 sOotPspAssetsSuspended;
+static size_t sOotPspSuspendSnapshotSize;
+#define OOT_PSP_SUSPEND_SNAPSHOT_PATH "data/segments/oot_psp_suspend.bin"
 static u8* sOotPspPackedCacheData;
 static size_t sOotPspPackedCacheBlockCount;
 static s32 sOotPspPackedCacheInitTried = false;
@@ -181,7 +185,6 @@ static void OotPsp_UnlockUnusedVolatileMemory(void) {
     }
 
     sceKernelVolatileMemUnlock(0);
-    scePowerUnlock(0);
     sOotPspVolatileMemoryLocked = false;
     sOotPspVolatileMemorySize = 0;
 }
@@ -204,19 +207,8 @@ static s32 OotPsp_LockVolatileMemory(void) {
         return false;
     }
 
-    /* Volatile memory is discarded during suspend, but pinned asset pointers
-     * can live for the whole process. Match the Perfect Dark port and prevent
-     * suspend until the last volatile-backed cache block is released. */
-    result = scePowerLock(0);
-    if (result < 0) {
-        if (!sOotPspVolatileMemoryFailureReported) {
-            printf("oot-psp volatile memory power lock failed err=%08X\n", (unsigned int)result);
-            sOotPspVolatileMemoryFailureReported = true;
-        }
-        sceKernelVolatileMemUnlock(0);
-        return false;
-    }
-
+    /* The suspend coordinator owns the power lock. It parks every reader,
+     * saves live bytes, then releases this partition before allowing sleep. */
     sOotPspVolatileMemorySize = size > 0 ? (size_t)size : 0;
     sOotPspVolatileMemoryLocked = true;
     sOotPspVolatileMemoryFailureReported = false;
@@ -240,6 +232,13 @@ static void* OotPsp_AllocVolatileCacheMemory(size_t size) {
     SceUID blockId;
     void* address;
 
+    /* DVE initialization records the hardware model even without a TV cable
+     * or a loaded DVE plugin. Only the PSP-1000 needs this extra RAM; later
+     * models use their expanded normal heap, which survives suspend. An
+     * unknown model also stays on the normal-memory path. */
+    if (OotPspDve_GetModel() != 0) {
+        return NULL;
+    }
     if ((allocation == NULL) || !OotPsp_LockVolatileMemory()) {
         return NULL;
     }
@@ -260,6 +259,7 @@ static void* OotPsp_AllocVolatileCacheMemory(size_t size) {
     allocation->address = address;
     allocation->blockId = blockId;
     allocation->size = size;
+    allocation->volatileMemory = true;
     sOotPspVolatileCacheAllocationCount++;
     sOotPspVolatileCacheBytes += size;
     printf("oot-psp cache using volatile memory size=%lu used=%lu/%lu\n", (unsigned long)size,
@@ -283,6 +283,7 @@ static void* OotPsp_AllocCacheMemory(size_t size) {
     allocation->address = address;
     allocation->blockId = -1;
     allocation->size = size;
+    allocation->volatileMemory = false;
     return address;
 }
 
@@ -300,7 +301,7 @@ static void OotPsp_FreeCacheMemory(void* address) {
             continue;
         }
 
-        if (allocation->blockId >= 0) {
+        if (allocation->volatileMemory) {
             sceKernelFreePartitionMemory(allocation->blockId);
             sOotPspVolatileCacheBytes -= allocation->size;
             sOotPspVolatileCacheAllocationCount--;
@@ -310,6 +311,7 @@ static void OotPsp_FreeCacheMemory(void* address) {
         allocation->address = NULL;
         allocation->blockId = -1;
         allocation->size = 0;
+        allocation->volatileMemory = false;
         OotPsp_UnlockUnusedVolatileMemory();
         return;
     }
@@ -333,16 +335,6 @@ static void OotPsp_LockAssetLoader(void) {
         sceKernelWaitSema(sOotPspAssetSema, 1, NULL);
     }
 
-    /* File handles survive normal cache eviction, but their backing device and
-     * seek position cannot be trusted across a PSP suspend. Do this while the
-     * loader is serialized so neither the foreground nor audio reader can use
-     * the stale descriptor. Allocated cache buffers remain intact. */
-    if (sOotPspAssetResumePending) {
-        sOotPspAssetResumePending = false;
-        OotPsp_ClosePackedAssetFile();
-        sOotPspPackedAssetUnavailable = false;
-        printf("oot-psp asset file reset after resume\n");
-    }
 }
 
 static void OotPsp_UnlockAssetLoader(void) {
@@ -456,20 +448,12 @@ s32 OotPsp_AssetInit(const char* executablePath) {
     OotPsp_PreloadPersistentAssets();
 
     /*
-     * Claim the remaining volatile-memory budget for the general packed-block
+     * Claim the remaining cache budget for the general packed-block
      * cache during initialization. The removed hot cache can no longer consume
      * this pool later, and the first scene load no longer pays cache allocation.
      */
     OotPsp_InitPackedAssetCache();
     return true;
-}
-
-void OotPsp_AssetNotifyResume(void) {
-    /* This runs from the callback thread. Only publish scalar state here; the
-     * first serialized asset transaction performs sceIoClose/sceIoOpen. Mark
-     * the tracked position unknown immediately in case audio runs first. */
-    sOotPspPackedAssetPositionKnown = false;
-    sOotPspAssetResumePending = true;
 }
 
 static s32 OotPsp_IsAbsolutePath(const char* path) {
@@ -510,6 +494,177 @@ static void OotPsp_ClearPackedAssetCache(void) {
     memset(sOotPspPackedCacheLookup, 0, sizeof(sOotPspPackedCacheLookup));
 }
 
+static u32 OotPsp_SuspendChecksum(const u8* data, size_t size) {
+    u32 checksum = 2166136261U;
+
+    while (size-- != 0) {
+        checksum = (checksum ^ *data++) * 16777619U;
+    }
+    return checksum;
+}
+
+static s32 OotPsp_TransferSuspendBytes(SceUID fd, void* data, size_t size, s32 writing) {
+    u8* cursor = data;
+
+    while (size != 0) {
+        size_t chunk = size < OOT_PSP_PACKED_CACHE_BLOCK_SIZE ? size : OOT_PSP_PACKED_CACHE_BLOCK_SIZE;
+        int transferred = writing ? sceIoWrite(fd, cursor, chunk) : sceIoRead(fd, cursor, chunk);
+
+        if ((transferred <= 0) || ((size_t)transferred > chunk)) {
+            return false;
+        }
+        cursor += transferred;
+        size -= transferred;
+    }
+    return true;
+}
+
+s32 OotPsp_AssetPrepareSuspend(void) {
+    char pathBuffer[384];
+    const char* path = OotPsp_ResolveRootPath(OOT_PSP_SUSPEND_SNAPSHOT_PATH, pathBuffer, sizeof(pathBuffer));
+    SceUID fd = -1;
+    size_t i;
+
+    OotPsp_LockAssetLoader();
+    OotPsp_ClosePackedAssetFile();
+    sOotPspSuspendSnapshotSize = 0;
+    /* Audio fonts can contain relocated pointers and other in-place changes.
+     * Save their actual bytes, rather than reloading the original asset file.
+     * The disposable packed read cache needs no backup. No extra heap is used. */
+    for (i = 0; i < OOT_PSP_CACHE_ALLOCATION_COUNT; i++) {
+        OotPspCacheAllocation* allocation = &sOotPspCacheAllocations[i];
+
+        if (!allocation->volatileMemory || (allocation->address == sOotPspPackedCacheData)) {
+            continue;
+        }
+        if (fd < 0) {
+            fd = sceIoOpen(path, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0600);
+            if (fd < 0) {
+                OotPsp_UnlockAssetLoader();
+                return false;
+            }
+        }
+        allocation->suspendChecksum = OotPsp_SuspendChecksum(allocation->address, allocation->size);
+        if (!OotPsp_TransferSuspendBytes(fd, allocation->address, allocation->size, true)) {
+            sceIoClose(fd);
+            sceIoRemove(path);
+            OotPsp_UnlockAssetLoader();
+            return false;
+        }
+        sOotPspSuspendSnapshotSize += allocation->size;
+    }
+    if ((fd >= 0) && (sceIoClose(fd) < 0)) {
+        sceIoRemove(path);
+        OotPsp_UnlockAssetLoader();
+        return false;
+    }
+
+    /* Retain the loader semaphore until restore finishes. A partial release
+     * failure is recoverable through AssetResume, just like a normal wake. */
+    sOotPspAssetsSuspended = true;
+    for (i = 0; i < OOT_PSP_CACHE_ALLOCATION_COUNT; i++) {
+        OotPspCacheAllocation* allocation = &sOotPspCacheAllocations[i];
+
+        if (allocation->volatileMemory && (allocation->blockId >= 0)) {
+            if (sceKernelFreePartitionMemory(allocation->blockId) < 0) {
+                return false;
+            }
+            allocation->blockId = -1;
+        }
+    }
+    if (sOotPspVolatileMemoryLocked) {
+        if (sceKernelVolatileMemUnlock(0) < 0) {
+            return false;
+        }
+        sOotPspVolatileMemoryLocked = false;
+        sOotPspVolatileMemorySize = 0;
+    }
+    return true;
+}
+
+s32 OotPsp_AssetResume(void) {
+    char pathBuffer[384];
+    const char* path = OotPsp_ResolveRootPath(OOT_PSP_SUSPEND_SNAPSHOT_PATH, pathBuffer, sizeof(pathBuffer));
+    SceUID fd = -1;
+    size_t i;
+    s32 restored = true;
+
+    if (!sOotPspAssetsSuspended) {
+        return true;
+    }
+    if ((sOotPspVolatileCacheAllocationCount != 0) && !OotPsp_LockVolatileMemory()) {
+        return false;
+    }
+    for (i = 0; i < OOT_PSP_CACHE_ALLOCATION_COUNT; i++) {
+        OotPspCacheAllocation* allocation = &sOotPspCacheAllocations[i];
+        SceUID blockId;
+
+        if (!allocation->volatileMemory || (allocation->blockId >= 0)) {
+            continue;
+        }
+        /* Gameplay/audio retain direct pointers. Never accept a replacement
+         * at a different address, even if an allocation otherwise succeeds. */
+        blockId = sceKernelAllocPartitionMemory(5, "OOT PSP asset cache", PSP_SMEM_Addr,
+                                                allocation->size, allocation->address);
+        if (blockId < 0) {
+            return false;
+        }
+        if (sceKernelGetBlockHeadAddr(blockId) != allocation->address) {
+            sceKernelFreePartitionMemory(blockId);
+            return false;
+        }
+        allocation->blockId = blockId;
+    }
+    if (sOotPspSuspendSnapshotSize != 0) {
+        fd = sceIoOpen(path, PSP_O_RDONLY, 0);
+        if (fd < 0) {
+            return false;
+        }
+        if (sceIoLseek(fd, 0, PSP_SEEK_END) != (SceOff)sOotPspSuspendSnapshotSize ||
+            sceIoLseek(fd, 0, PSP_SEEK_SET) != 0) {
+            sceIoClose(fd);
+            return false;
+        }
+        for (i = 0; i < OOT_PSP_CACHE_ALLOCATION_COUNT; i++) {
+            OotPspCacheAllocation* allocation = &sOotPspCacheAllocations[i];
+
+            if (!allocation->volatileMemory || (allocation->address == sOotPspPackedCacheData)) {
+                continue;
+            }
+            if (!OotPsp_TransferSuspendBytes(fd, allocation->address, allocation->size, false) ||
+                OotPsp_SuspendChecksum(allocation->address, allocation->size) != allocation->suspendChecksum) {
+                restored = false;
+                break;
+            }
+        }
+        sceIoClose(fd);
+    }
+    if (!restored) {
+        return false;
+    }
+
+    sceKernelDcacheWritebackInvalidateAll();
+    /* Normal RAM survives sleep, including its valid read-cache contents.
+     * Only volatile cache storage was discarded by the system. Clearing a
+     * Slim's intact cache forces unnecessary Memory Stick reads after wake. */
+    for (i = 0; i < OOT_PSP_CACHE_ALLOCATION_COUNT; i++) {
+        const OotPspCacheAllocation* allocation = &sOotPspCacheAllocations[i];
+
+        if (allocation->volatileMemory && (allocation->address == sOotPspPackedCacheData)) {
+            OotPsp_ClearPackedAssetCache();
+            break;
+        }
+    }
+    sOotPspPackedAssetUnavailable = false;
+    sOotPspPackedAssetPositionKnown = false;
+    sOotPspAssetsSuspended = false;
+    OotPsp_UnlockAssetLoader();
+    if (sOotPspSuspendSnapshotSize != 0) {
+        sceIoRemove(path);
+    }
+    return true;
+}
+
 static void OotPsp_InitPackedAssetCache(void) {
     size_t cacheSize;
 
@@ -519,7 +674,8 @@ static void OotPsp_InitPackedAssetCache(void) {
 
     sOotPspPackedCacheInitTried = true;
     for (cacheSize = OOT_PSP_PACKED_CACHE_TARGET_SIZE; cacheSize >= OOT_PSP_PACKED_CACHE_MIN_SIZE;) {
-        sOotPspPackedCacheData = OotPsp_AllocVolatileCacheMemory(cacheSize);
+        sOotPspPackedCacheData = OotPspDve_GetModel() == 0 ? OotPsp_AllocVolatileCacheMemory(cacheSize)
+                                                      : OotPsp_AllocCacheMemory(cacheSize);
         if (sOotPspPackedCacheData != NULL) {
             sOotPspPackedCacheBlockCount = cacheSize / OOT_PSP_PACKED_CACHE_BLOCK_SIZE;
             OotPsp_ClearPackedAssetCache();

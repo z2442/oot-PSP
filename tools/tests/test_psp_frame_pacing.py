@@ -94,6 +94,11 @@ int main(void) {
     // A HOME/menu stall rebases deadlines, without executing catch-up ticks.
     now+=1000000; int before=rendered; submit();
     assert(rendered==before+3 && (u32)(renderTimes[before+1]-renderTimes[before])==16666);
+    // Wake can cross the signed 32-bit comparison window. Reset the old
+    // deadline explicitly so sleep never becomes a long pacing delay.
+    now+=0x90000000U;before=rendered;u32 wakeTime=now;
+    SchedPsp_ResetGfxPacing();submit();
+    assert(renderTimes[before]==wakeTime && renderTimes[before+1]-wakeTime==16666);
     puts("Frame pacing: 20/60 Hz, task cadence, completion, overruns, timer wrap and UI fallback passed");
 }
 '''

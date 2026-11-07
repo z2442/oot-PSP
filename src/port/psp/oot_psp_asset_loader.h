@@ -54,9 +54,10 @@ extern const OotPspMessageEntry gOotPspStaffMessageEntries[];
 extern const size_t gOotPspStaffMessageEntriesCount;
 
 s32 OotPsp_AssetInit(const char* executablePath);
-/* Callback-safe notification. The next asset transaction reopens the packed
- * file without discarding any allocated cache storage. */
-void OotPsp_AssetNotifyResume(void);
+/* Main thread only, with audio/video parked. Resume also rolls back a failed
+ * prepare; readers stay locked out until it returns true. */
+s32 OotPsp_AssetPrepareSuspend(void);
+s32 OotPsp_AssetResume(void);
 const char* OotPsp_ResolveRootPath(const char* path, char* buffer, size_t bufferSize);
 uintptr_t OotPsp_NormalizeVrom(uintptr_t vrom);
 void OotPsp_NormalizeRomFile(RomFile* file);

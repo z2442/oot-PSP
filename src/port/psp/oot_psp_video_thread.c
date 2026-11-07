@@ -9,6 +9,13 @@ static bool sInitializationAttempted;
 static bool sThreadReady;
 static bool sFramePending;
 static void (*sCompleteFrame)(void);
+#if OOT_PSP_WAKE_DIAGNOSTICS
+static volatile uint32_t sCompletedFrames;
+
+uint32_t OotPspVideoThread_GetCompletedFrames(void) {
+    return sCompletedFrames;
+}
+#endif
 
 static int OotPspVideoThread_Run(SceSize args, void* argp) {
     (void)args;
@@ -17,6 +24,9 @@ static int OotPspVideoThread_Run(SceSize args, void* argp) {
     for (;;) {
         sceKernelWaitSema(sRequestSema, 1, NULL);
         sCompleteFrame();
+#if OOT_PSP_WAKE_DIAGNOSTICS
+        sCompletedFrames++;
+#endif
         sceKernelSignalSema(sCompleteSema, 1);
     }
     return 0;
@@ -67,6 +77,9 @@ void OotPspVideoThread_Submit(void (*completeFrame)(void)) {
     if (!sThreadReady) {
         /* Preserve presentation on systems without another thread/semaphore. */
         completeFrame();
+#if OOT_PSP_WAKE_DIAGNOSTICS
+        sCompletedFrames++;
+#endif
         return;
     }
     sCompleteFrame = completeFrame;

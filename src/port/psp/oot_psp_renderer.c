@@ -8,6 +8,8 @@
 #include "oot_psp_performance.h"
 #include "oot_psp_video.h"
 #include "oot_psp_frame_interpolation.h"
+#include "oot_psp_video_thread.h"
+#include <pspgu.h>
 
 extern struct GfxRenderingAPI gfx_scegu_api;
 extern void gfx_scegu_request_pause_background(void);
@@ -21,8 +23,44 @@ extern void gfx_scegu_render_home_menu(int selectedIndex, int screen, int submen
 extern void gfx_scegu_render_first_boot_progress(uint32_t progressPermille, const char* statusMessage, bool error);
 extern bool gfx_scegu_depth_is_clear(int32_t x, int32_t y);
 extern bool gfx_scegu_depth_test(int32_t x, int32_t y, float projectedZ);
+extern void gfx_scegu_render_suspend_message(const char* message, const char* hint);
+extern int gfx_scegu_save_suspend_context(void);
+extern int gfx_scegu_restore_suspend_context(void);
 
 static bool sInitialized;
+
+static void OotPspRenderer_DrawSuspendMessage(void* arg) {
+    const char* const* lines = arg;
+
+    gfx_scegu_render_suspend_message(lines[0], lines[1]);
+}
+
+void OotPspRenderer_RenderSuspendMessage(const char* message, const char* hint) {
+    const char* lines[] = { message, hint };
+
+    gfx_render_callback_frame(OotPspRenderer_DrawSuspendMessage, lines);
+    /* The callback arguments live on this stack. */
+    OotPspVideoThread_Wait();
+}
+
+bool OotPspRenderer_PrepareSuspend(void) {
+    OotPspVideoThread_Wait();
+    sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
+    OotPspFrameInterpolation_Reset();
+    return gfx_scegu_save_suspend_context() >= 0;
+}
+
+bool OotPspRenderer_Resume(void) {
+    if (gfx_scegu_restore_suspend_context() < 0) {
+        return false;
+    }
+    /* The OS preserved VRAM while the app released volatile memory. Rebind
+     * state on the next frame without discarding the warm texture cache. */
+    gfx_invalidate_render_state();
+    OotPspFrameInterpolation_Reset();
+    SchedPsp_ResetGfxPacing();
+    return true;
+}
 
 typedef struct OotPspHomeMenuRenderArgs {
     int selectedIndex;

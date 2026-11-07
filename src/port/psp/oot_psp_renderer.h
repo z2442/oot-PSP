@@ -7,6 +7,9 @@
 #include "sched.h"
 
 void OotPspRenderer_Init(void);
+bool OotPspRenderer_PrepareSuspend(void);
+bool OotPspRenderer_Resume(void);
+void OotPspRenderer_RenderSuspendMessage(const char* message, const char* hint);
 void OotPspRenderer_RenderDisplayList(Gfx* dl);
 void OotPspRenderer_RenderTask(const OSTask* task);
 bool OotPspRenderer_IsDepthClear(int32_t x, int32_t y);
