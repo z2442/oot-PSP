@@ -78,12 +78,80 @@ jobs:
         run: |
           python3 tools/package_psp.py \
             build/psp-port/ntsc-1.0 \
-            "build/oot-psp-ntsc-1.0-${GITHUB_SHA:0:7}.zip"
+            build/oot-psp-ntsc-1.0.zip
 
       - name: Upload installable archive
         uses: actions/upload-artifact@v7
         with:
-          path: build/oot-psp-ntsc-1.0-*.zip
+          path: build/oot-psp-ntsc-1.0.zip
           archive: false
           if-no-files-found: error
           retention-days: 30
+
+  release:
+    name: Publish latest PSP build
+    needs: build
+    if: >-
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download installable archive
+        uses: actions/download-artifact@v7
+        with:
+          name: oot-psp-ntsc-1.0.zip
+          path: release
+
+      - name: Move latest tag to the built commit
+        id: latest
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const repo = context.repo;
+            const { data: branch } = await github.rest.repos.getBranch({
+              ...repo,
+              branch: context.ref.slice('refs/heads/'.length),
+            });
+            // Rerunning an older build must not replace the latest release.
+            if (branch.commit.sha !== context.sha) {
+              core.notice('Skipping release because this build is no longer the branch head.');
+              return;
+            }
+
+            try {
+              await github.rest.git.getRef({ ...repo, ref: 'tags/latest' });
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              await github.rest.git.createRef({
+                ...repo, ref: 'refs/tags/latest', sha: context.sha,
+              });
+              core.setOutput('publish', 'true');
+              return;
+            }
+
+            await github.rest.git.updateRef({
+              ...repo, ref: 'tags/latest', sha: context.sha, force: true,
+            });
+            core.setOutput('publish', 'true');
+
+      - name: Publish rolling prerelease
+        if: steps.latest.outputs.publish == 'true'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: latest
+          name: oot-PSP
+          prerelease: true
+          target_commitish: ${{ github.sha }}
+          files: release/oot-psp-ntsc-1.0.zip
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          body: |
+            Automated PSP build from the latest `${{ github.event.repository.default_branch }}` branch.
+
+            Commit: ${{ github.sha }}
+            Build: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Extract the ZIP and copy `OOT_PSP` into `PSP/GAME` on your memory stick.
+            See `OOT_PSP/README.txt` for installation instructions. A ROM is not included.

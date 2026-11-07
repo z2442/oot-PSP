@@ -35,8 +35,13 @@ mixer. Both downloads are verified with SHA-256 checksums. It builds without
 a ROM or an extraction tree. CI also installs the host MIPS binutils required
 by the Makefile's tool checks.
 
-Download `oot-psp-ntsc-1.0-<commit>.zip` from the successful run's **Artifacts**
-section under **Actions > PSP build**. Extract it and copy `OOT_PSP` into
+Successful default-branch builds update the [latest PSP prerelease](https://github.com/z2442/oot-PSP/releases/tag/latest),
+replacing its ZIP and moving the `latest` tag to the built commit. Manual runs
+on the default branch publish there too. Pull requests and other branches
+only upload build artifacts.
+
+Download `oot-psp-ntsc-1.0.zip` from that release or the successful run's
+**Artifacts** section under **Actions > PSP build**. Extract it and copy `OOT_PSP` into
 `PSP/GAME` on your memory stick. The ZIP includes `EBOOT.PBP`,
 `Plugins/dvemgr.prx`, an empty `data` folder, and installation instructions.
 Add your own compressed, big-endian NTSC 1.0 ROM as `OOT_PSP/data/basrom.z64`
