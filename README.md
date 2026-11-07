@@ -40,8 +40,9 @@ replacing its ZIP and moving the `latest` tag to the built commit. Manual runs
 on the default branch publish there too. Pull requests and other branches
 only upload build artifacts.
 
-Download `oot-psp-ntsc-1.0.zip` from that release or the successful run's
-**Artifacts** section under **Actions > PSP build**. Extract it and copy `OOT_PSP` into
+Download `oot-psp-ntsc-1.0.zip` from that release. For individual workflow runs,
+download `oot-psp-build` from **Artifacts** under **Actions > PSP build** and
+extract it to get `oot-psp-ntsc-1.0.zip`. Extract the installable ZIP and copy `OOT_PSP` into
 `PSP/GAME` on your memory stick. The ZIP includes `EBOOT.PBP`,
 `Plugins/dvemgr.prx`, an empty `data` folder, and installation instructions.
 Add your own compressed, big-endian NTSC 1.0 ROM as `OOT_PSP/data/basrom.z64`
