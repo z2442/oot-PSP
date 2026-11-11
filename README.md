@@ -1,29 +1,6 @@
 # The Legend of Zelda: Ocarina of Time
 
-[![Build Status][jenkins-badge]][jenkins] [![Decompilation Progress][progress-badge]][progress] [![Contributors][contributors-badge]][contributors] [![Discord Channel][discord-badge]][discord]
-
-[jenkins]: https://jenkins.deco.mp/job/OOT/job/main
-[jenkins-badge]: https://img.shields.io/jenkins/build?jobUrl=https%3A%2F%2Fjenkins.deco.mp%2Fjob%2FOOT%2Fjob%2Fmain
-
-[progress]: https://zelda.deco.mp/games/oot
-[progress-badge]: https://img.shields.io/endpoint?url=https://zelda.deco.mp/assets/csv/progress-oot-shield.json
-
-[contributors]: https://github.com/zeldaret/oot/graphs/contributors
-[contributors-badge]: https://img.shields.io/github/contributors/zeldaret/oot
-
-[discord]: https://discord.zelda.deco.mp
-[discord-badge]: https://img.shields.io/discord/688807550715560050?color=%237289DA&logo=discord&logoColor=%23FFFFFF
-
-```diff
-- WARNING! -
-
-This repository is a work in progress, and while it can be used to make certain changes, it's still
-constantly evolving. If you use it for modding purposes in its current state, please be aware that
-the codebase can drastically change at any time. Also note that some parts of the ROM may not be
-'shiftable' yet, so modifying them could be difficult at this point.
-```
-
-This is a WIP **decompilation** of ***The Legend of Zelda: Ocarina of Time***. The purpose of the project is to recreate a source code base for the game from scratch, using information found inside the game along with static and/or dynamic analysis. **It is not producing a PC port.** For more information you can get in touch with the team on our [Discord server][discord].
+This is a work-in-progress port of ***The Legend of Zelda: Ocarina of Time*** for the PSP, based on a fork of the [Decompilation of Ocarina of Time](https://github.com/zeldaret/oot).
 
 ## PSP builds
 
@@ -83,10 +60,6 @@ It builds the following versions:
 The default version is `gc-eu-mq-dbg`, i.e. the GameCube Europe/PAL Master Quest Debug ROM.
 
 **Note: This repository does not include any of the assets necessary to build the ROM. A prior copy of the game is required to extract the needed assets.**
-
-**Website:** <https://zelda.deco.mp>
-
-**Discord:** <https://discord.zelda.deco.mp>
 
 ## Installation
 
@@ -229,10 +202,3 @@ This default can be changed in the Makefile.
 
 The project Makefile is fairly configurable and can also be used to prepare the repo for modding.
 See the options outlined at the top of the Makefile for more information.
-
-## Contributing
-
-All contributions are welcome. This is a group effort, and even small contributions can make a difference.
-Some tasks also don't require much knowledge to get started.
-
-Most discussions happen on our [Discord Server][discord], where you are welcome to ask if you need help getting started, or if you have any questions regarding this project and other decompilation projects.
