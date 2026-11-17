@@ -29,10 +29,6 @@
 #include "actor.h"
 #include "environment.h"
 #include "save.h"
-#if PLATFORM_PSP
-#include "oot_psp_asset_loader.h"
-#include "oot_psp_compat.h"
-#endif
 
 #if PLATFORM_PSP
 #define nintendo_rogo_static_Tex_000000_WIDTH 192
@@ -116,38 +112,7 @@ void ConsoleLogo_SetupView(ConsoleLogoState* this, f32 x, f32 y, f32 z) {
 }
 
 #if PLATFORM_PSP
-typedef struct ConsoleLogoPspTexture {
-    /* 0x00 */ const u8* data;
-    /* 0x04 */ s32 byteSwap;
-} ConsoleLogoPspTexture;
-
-static ConsoleLogoPspTexture ConsoleLogo_GetPspTexture(void* texture) {
-    ConsoleLogoPspTexture source;
-    u32 loadedFlags;
-
-    source.data = SEGMENTED_TO_VIRTUAL(texture);
-    source.byteSwap = false;
-
-    if (OotPsp_GetLoadedExternalAssetRangeFlags(source.data, 1, &loadedFlags)) {
-        source.byteSwap = (loadedFlags & OOT_PSP_EXTERNAL_ASSET_NATIVE) != 0;
-    } else if (!OotPsp_IsRuntimeByteRange(source.data, 1)) {
-        source.byteSwap = true;
-    }
-
-    return source;
-}
-
-static u8 ConsoleLogo_ReadPspTextureByte(ConsoleLogoPspTexture texture, size_t offset) {
-    const u8* source = texture.data + offset;
-
-    if (texture.byteSwap) {
-        source = (const u8*)((uintptr_t)source ^ 7U);
-    }
-
-    return *source;
-}
-
-static u8 ConsoleLogo_ReadI8Texel(ConsoleLogoPspTexture texture, s16 width, s16 height, s16 x, s16 y) {
+static u8 ConsoleLogo_ReadI8Texel(const u8* texture, s16 width, s16 height, s16 x, s16 y) {
     x %= width;
     y %= height;
 
@@ -158,14 +123,14 @@ static u8 ConsoleLogo_ReadI8Texel(ConsoleLogoPspTexture texture, s16 width, s16 
         y += height;
     }
 
-    return ConsoleLogo_ReadPspTextureByte(texture, y * width + x);
+    return texture[y * width + x];
 }
 
 static void ConsoleLogo_BuildPspWordmarkTexture(ConsoleLogoState* this, u8* dst) {
-    ConsoleLogoPspTexture wordmarkTex =
-        ConsoleLogo_GetPspTexture(SEGMENTED_TO_VIRTUAL(nintendo_rogo_static_Tex_000000));
-    ConsoleLogoPspTexture effectTex =
-        ConsoleLogo_GetPspTexture(SEGMENTED_TO_VIRTUAL(nintendo_rogo_static_Tex_001800));
+    const u8* wordmarkTex =
+        SEGMENTED_TO_VIRTUAL(nintendo_rogo_static_Tex_000000);
+    const u8* effectTex =
+        SEGMENTED_TO_VIRTUAL(nintendo_rogo_static_Tex_001800);
     s16 scrollS = (this->uls >> G_TEXTURE_IMAGE_FRAC) & 0x1F;
     s16 scrollT = (this->ult >> G_TEXTURE_IMAGE_FRAC) & 0x1F;
     s16 x;

@@ -43,6 +43,7 @@
  * coherent if one of those calls publishes our pending draws early. */
 #define sceGuDrawArray gfx_psp_submit_draw_array
 #define sceGuGetMemory gfx_psp_submit_get_memory
+#define sceGuFinish gfx_psp_submit_finish
 #include "oot_psp_controls.h"
 #include "oot_psp_dve.h"
 #include "oot_psp_memory.h"
@@ -386,8 +387,8 @@ static void* gfx_scegu_upload_vertices(const void* source, size_t bytes) {
         /* Current batches are bounded by MAX_BUFFERED and fit the arena. */
         abort();
     }
+    /* Written back in bulk before the GE stall address next advances. */
     OotPsp_MemcpyVfpu(vertices, source, bytes);
-    gfx_psp_submit_writeback_vertices(vertices, bytes);
     return vertices;
 }
 
@@ -830,6 +831,9 @@ static void gfx_scegu_draw_home_menu_text(int x, int y, const char *text, float 
         float scale = gfx_scegu_home_menu_scale();
 
         gfx_scegu_apply_home_menu_2d_view();
+        /* intraFont uses the SDK's sceGuGetMemory/sceGuDrawArray, which
+         * advance the stall address themselves. */
+        gfx_psp_submit_publish_vertices();
         intraFontActivate(sHomeMenuFont);
         intraFontSetStyle(sHomeMenuFont, size * scale, color, shadowColor, 0.0f,
                           options | INTRAFONT_STRING_ASCII);
@@ -1144,6 +1148,7 @@ static void gfx_scegu_render_controller_mapping(int selectedIndex, const char* s
 
 #if OOT_PSP_USE_INTRAFONT
     if (gfx_scegu_ensure_home_menu_font()) {
+        gfx_psp_submit_publish_vertices();
         intraFontActivate(sHomeMenuFont);
 
         for (row = firstRow; row < firstRow + visibleRows; row++) {

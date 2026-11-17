@@ -28,6 +28,7 @@ preamble = r'''
 #define F3DEX_GBI_2 1
 #define GFX_DL_HANDLER
 #define MAX_VERTICES 64
+#define NUM_SEGMENTS 16
 #define G_VTX 1
 #define G_TRI1 5
 #define G_TRI2 6
@@ -44,8 +45,6 @@ preamble = r'''
 #define CC_0 0
 #define CC_SHADE 4
 #define PSP_NATIVE_ADDR_START 0x08800000
-#define OOT_PSP_EXTERNAL_ASSET_NATIVE 1
-#define OOT_PSP_EXTERNAL_ASSET_IMMUTABLE_MESH 4
 #define X_POS 1
 #define X_NEG 2
 #define Y_POS 4
@@ -72,20 +71,23 @@ struct TriPipelineState { bool use_texture,use_fog,use_alpha,texture_tint_colors
 struct { struct TriPipelineState tri_pipeline; } rendering_state;
 uintptr_t gSegments[16];
 float sNdcAspectScale = 1;
-unsigned validation_calls, draws, transforms, generation = 1;
-bool immutable = true;
+unsigned validation_calls, draws, transforms;
+bool readable = true;
+const psp_fast_t* drawn_vertices;
 static bool gfx_hud_anchor_enabled(void) { return false; }
 static void gfx_prepare_tri_pipeline_state(void) {}
 static void gfx_flush(void) {}
 static void gfx_apply_projection_matrix(void) {}
-static unsigned OotPsp_GetExternalAssetGeneration(void) { return generation; }
-static bool OotPsp_GetLoadedExternalAssetRangeFlags(const void* p, size_t n, uint32_t* flags) {
-    validation_calls++; *flags = immutable ? 5 : 1; return p && n;
+static bool gfx_is_valid_native_read_range(uintptr_t p, size_t n) {
+    validation_calls++; return readable && p && n;
+}
+static bool gfx_is_valid_native_dl_range(uintptr_t p, size_t n) {
+    return gfx_is_valid_native_read_range(p, n);
 }
 static void* seg_addr(uintptr_t addr) { return (void*)addr; }
 static void sceKernelDcacheWritebackRange(void* p, size_t n) { (void)p; (void)n; }
 void gfx_scegu_draw_native_mesh(const void* v, const uint16_t* i, unsigned n, const float m[4][4], uint32_t c) {
-    assert(v && i && n % 3 == 0); draws++; (void)m; (void)c;
+    assert(v && i && n % 3 == 0); drawn_vertices=v; draws++; (void)m; (void)c;
 }
 '''
 transform = function("static inline void gfx_transform_vec4(", "static inline void gfx_upload_projection_matrix(")
@@ -116,26 +118,41 @@ int main(void) {
     rdp.other_mode_l=0;
     assert(gfx_native_try(&cursor)); assert(cursor==commands+2 && draws==1 && transforms==0);
     unsigned validations=validation_calls;
-    commands[1].words.w0=0x02000000; /* Poison original commands: a hit must not decode. */
+    const psp_fast_t* first_snapshot=drawn_vertices;
     rsp.modelview_matrix_stack[0][3][0]=2;
     cursor=commands; assert(gfx_native_try(&cursor));
-    assert(validation_calls==validations && transforms==0 && draws==2);
+    assert(validation_calls>validations && transforms==0 && draws==2);
+    assert(drawn_vertices==first_snapshot); /* Equal snapshots reuse compiled storage. */
+    commands[1].words.w0=0x02000000;
+    cursor=commands; assert(!gfx_native_try(&cursor)); /* Same generation, edited command. */
+    commands[1].words.w0=(G_TRI1<<24)|(2<<8)|4;
+    vertices[1].v.ob[0]=2; /* A writer cannot change a deferred load or queued GU draw. */
     gfx_native_forget(1); /* A later VTX overwrites slot 0, leaving other slots live. */
     rsp.modelview_matrix_stack[0][3][0]=5;
     gfx_native_materialize(7);
     assert(transforms==2 && rsp.loaded_vertices[1].x==3 && rsp.loaded_vertices[2].x==2);
     assert(rsp.loaded_vertices[1].color.r==42 && rsp.loaded_vertices[1].color.a==123);
     assert(sNativePendingMask==0);
-    generation++; cursor=commands; assert(!gfx_native_try(&cursor)); /* MODIFYVTX rejected. */
+    cursor=commands; assert(gfx_native_try(&cursor)); /* Same generation, edited vertices. */
+    assert(drawn_vertices!=first_snapshot && drawn_vertices[1].x==2 && first_snapshot[1].x==1);
+    commands[1].words.w0=0x02000000;
+    cursor=commands; assert(!gfx_native_try(&cursor));
     commands[1].words.w0=(G_TRI1<<24)|(2<<8)|4;
-    generation++; immutable=false; cursor=commands; assert(!gfx_native_try(&cursor));
-    immutable=true; generation++;
+    cursor=commands; assert(gfx_native_try(&cursor)); /* A previous failed build is retried. */
+    readable=false; cursor=commands; assert(!gfx_native_try(&cursor));
+    readable=true;
     rsp.modelview_matrix_stack[0][3][0]=20; cursor=commands; assert(!gfx_native_try(&cursor)); /* bounds */
     rsp.modelview_matrix_stack[0][3][0]=0; cursor=commands; assert(gfx_native_try(&cursor));
     validations=validation_calls;
-    rsp.segments[6]=(void*)1; cursor=commands; assert(gfx_native_try(&cursor));
-    assert(validation_calls>validations); /* segment remap forces a rebuild */
-    struct NativeMesh bad={0};
+    rsp.segments[9]=(void*)1; cursor=commands; assert(gfx_native_try(&cursor));
+    assert(validation_calls>validations); /* Every segment remap forces a rebuild. */
+    static struct NativeMesh bad;
+    Gfx dynamic_commands[3];
+    memcpy(dynamic_commands,commands,sizeof(commands));
+    dynamic_commands[1].words.w0=0x02000000;
+    cursor=dynamic_commands; assert(!gfx_native_try(&cursor));
+    dynamic_commands[1]=commands[1];
+    cursor=dynamic_commands; assert(gfx_native_try(&cursor)); /* Reused dynamic DL address. */
     commands[1].words.w0=(G_TRI1<<24)|(2<<8)|6;
     assert(!gfx_native_build(&bad,commands)); /* inherited/unloaded slot */
     commands[1].words.w0=(G_TRI1<<24)|(2<<8)|5;
@@ -148,10 +165,10 @@ int main(void) {
     rendering_state.tri_pipeline.tex_u_scale[0]=1.0f/32;
     rendering_state.tri_pipeline.tex_v_scale[0]=1.0f/32;
     rsp.texture_scaling_factor.s=rsp.texture_scaling_factor.t=65535;
-    vertices[0].v.tc[0]=64; generation++;
+    vertices[0].v.tc[0]=64;
     cursor=commands; assert(gfx_native_try(&cursor));
     bool found=false;
-    for (unsigned i=0;i<OOT_PSP_NATIVE_MESH_ENTRIES;i++) if (sNativeMeshes[i].generation==generation && sNativeMeshes[i].valid) {
+    for (unsigned i=0;i<OOT_PSP_NATIVE_MESH_ENTRIES;i++) if (sNativeMeshes[i].vertices==drawn_vertices && sNativeMeshes[i].valid) {
         assert(sNativeMeshes[i].vertices[0].u==63.0f/32);
         assert(sNativeMeshes[i].vertices[0].color.a==255); found=true;
     }
@@ -160,7 +177,8 @@ int main(void) {
     cursor=commands; assert(!gfx_native_try(&cursor)); /* two textures */
     comb.used_textures[1]=false;
     for (unsigned i=0;i<OOT_PSP_NATIVE_MESH_ENTRIES;i++) sNativeMeshes[i].pinned=true;
-    generation++; cursor=commands; assert(!gfx_native_try(&cursor)); /* no overwrite of submitted buffers */
+    vertices[0].v.tc[0]++;
+    cursor=commands; assert(!gfx_native_try(&cursor)); /* no overwrite of submitted buffers */
     puts("native mesh cache tests passed");
 }
 '''

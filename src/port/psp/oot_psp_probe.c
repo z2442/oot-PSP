@@ -92,6 +92,33 @@ static void OotPspProfiler_Stop(int shouldDump) {
     sOotPspGprofRunning = false;
     sOotPspGprofDumped = true;
 }
+
+/* SELECT+L+R brackets a capture of one in-game situation. The first press
+ * discards everything sampled so far (boot, menus, travel) and restarts; the
+ * next press writes gmon.out. Further pairs overwrite it with a new capture. */
+__attribute__((__no_instrument_function__, __no_profile_instrument_function__))
+void OotPspProfiler_OnButtons(u32 buttons) {
+    static int sComboHeld;
+    static int sCapturing;
+    const u32 combo = PSP_CTRL_SELECT | PSP_CTRL_LTRIGGER | PSP_CTRL_RTRIGGER;
+    const int held = (buttons & combo) == combo;
+
+    if (!held || sComboHeld) {
+        sComboHeld = held;
+        return;
+    }
+    sComboHeld = true;
+
+    if (!sCapturing) {
+        OotPspProfiler_Start();
+        sCapturing = true;
+        osSyncPrintf("oot-psp gprof capture started\n");
+    } else {
+        OotPspProfiler_Stop(true);
+        sCapturing = false;
+        osSyncPrintf("oot-psp gprof capture written to %s\n", sOotPspGprofOutputPath);
+    }
+}
 #else
 static void OotPspProfiler_Start(void) {
 }

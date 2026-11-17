@@ -10,8 +10,6 @@
 #include "ultra64.h"
 
 #if defined(TARGET_PSP)
-#include "oot_psp_asset_loader.h"
-
 #include <stdio.h>
 #include <jpeglib.h>
 #include <setjmp.h>
@@ -32,40 +30,10 @@
 #define MARKER_COM 0xFE
 #define MARKER_EOI 0xD9
 
-typedef enum JpegByteLayout {
-    JPEG_BYTE_LAYOUT_INVALID,
-    JPEG_BYTE_LAYOUT_DIRECT,
-    JPEG_BYTE_LAYOUT_PSP_TEXTURE_WORDS,
-} JpegByteLayout;
-
-static u8 Jpeg_ReadByteWithLayout(const u8* data, size_t offset, JpegByteLayout layout) {
-#if defined(TARGET_PSP)
-    if (layout == JPEG_BYTE_LAYOUT_PSP_TEXTURE_WORDS) {
-        return data[offset ^ 7U];
-    }
-#else
-    (void)layout;
-#endif
-
-    return data[offset];
-}
-
-static JpegByteLayout Jpeg_GetByteLayout(const u8* data) {
-    if ((data[0] == 0xFF) && (data[1] == MARKER_SOI) && (data[2] == 0xFF)) {
-        return JPEG_BYTE_LAYOUT_DIRECT;
-    }
-
-#if defined(TARGET_PSP)
-    if ((data[7] == 0xFF) && (data[6] == MARKER_SOI) && (data[5] == 0xFF)) {
-        return JPEG_BYTE_LAYOUT_PSP_TEXTURE_WORDS;
-    }
-#endif
-
-    return JPEG_BYTE_LAYOUT_INVALID;
-}
-
 s32 Jpeg_IsJpeg(void* data) {
-    return Jpeg_GetByteLayout(data) != JPEG_BYTE_LAYOUT_INVALID;
+    const u8* bytes = data;
+
+    return (bytes[0] == 0xFF) && (bytes[1] == MARKER_SOI) && (bytes[2] == 0xFF);
 }
 
 /**
@@ -331,12 +299,12 @@ static void JpegPsp_RecordDecodedImage(void* data) {
     }
 }
 
-static s32 JpegPsp_CopyCompressedImage(const u8* data, JpegByteLayout layout, u8* out, size_t outCapacity,
+static s32 JpegPsp_CopyCompressedImage(const u8* data, u8* out, size_t outCapacity,
                                        size_t* outSize) {
     u8 prev = 0;
 
     for (size_t i = 0; i < outCapacity; i++) {
-        u8 cur = Jpeg_ReadByteWithLayout(data, i, layout);
+        u8 cur = data[i];
 
         out[i] = cur;
         if ((prev == 0xFF) && (cur == MARKER_EOI)) {
@@ -407,30 +375,9 @@ static s32 JpegPsp_ReadDimensions(const u8* data, size_t size, int* width, int* 
     return false;
 }
 
-static void JpegPsp_WriteOutputByte(u8* dst, size_t offset, u8 value, s32 textureWords) {
-    if (textureWords) {
-        const void* mapped;
-
-        if (OotPsp_MapNativeExternalTextureByte(dst + offset, &mapped)) {
-            dst = (u8*)mapped;
-            offset = 0;
-        } else {
-            offset ^= 7U;
-        }
-    }
-
-    dst[offset] = value;
-}
-
-static void JpegPsp_WriteOutputU16(u8* dst, size_t offset, u16 value, s32 textureWords) {
-    JpegPsp_WriteOutputByte(dst, offset, value >> 8, textureWords);
-    JpegPsp_WriteOutputByte(dst, offset + 1, value & 0xFF, textureWords);
-}
-
 static s32 JpegPsp_Decode(void* data, void* output) {
     const u8* src = data;
     u8* dst = output;
-    JpegByteLayout layout = Jpeg_GetByteLayout(src);
     struct jpeg_decompress_struct decoder;
     JpegPspErrorManager error;
     JSAMPROW row[1];
@@ -440,13 +387,12 @@ static s32 JpegPsp_Decode(void* data, void* output) {
     int decodedWidth;
     int decodedHeight;
     size_t rgbStride;
-    s32 textureWords;
 
-    if (layout == JPEG_BYTE_LAYOUT_INVALID) {
+    if (!Jpeg_IsJpeg(data)) {
         return -1;
     }
 
-    if (!JpegPsp_CopyCompressedImage(src, layout, sPspJpegInput, sizeof(sPspJpegInput), &jpegSize)) {
+    if (!JpegPsp_CopyCompressedImage(src, sPspJpegInput, sizeof(sPspJpegInput), &jpegSize)) {
         osSyncPrintf("oot-psp jpeg eoi not found\n");
         return -1;
     }
@@ -498,14 +444,6 @@ static s32 JpegPsp_Decode(void* data, void* output) {
     jpeg_finish_decompress(&decoder);
     jpeg_destroy_decompress(&decoder);
 
-    /*
-     * JPEG room images are stored as texture-word assets while compressed, but the
-     * registered subrange only covers the compressed bytes. The decoded 320x240
-     * image still has to preserve that byte layout because the PSP texture importer
-     * reads the room segment through the same mapped texture-word path.
-     */
-    textureWords = (layout == JPEG_BYTE_LAYOUT_PSP_TEXTURE_WORDS) ||
-                   OotPsp_IsNativeExternalTextureRange(output, JPEG_PSP_RGBA16_SIZE);
     memset(dst, 0, JPEG_PSP_RGBA16_SIZE);
 
     for (int y = 0; y < decodedHeight; y++) {
@@ -517,15 +455,13 @@ static s32 JpegPsp_Decode(void* data, void* output) {
             u8 b = sPspJpegRgba[rgbaOff + 2];
             u16 rgba16 = ((r >> 3) << 11) | ((g >> 3) << 6) | ((b >> 3) << 1) | 1;
 
-            JpegPsp_WriteOutputU16(dst, outOff, rgba16, textureWords);
+            dst[outOff] = rgba16 >> 8;
+            dst[outOff + 1] = rgba16 & 0xFF;
         }
     }
 
     sceKernelDcacheWritebackRange(dst, JPEG_PSP_RGBA16_SIZE);
-    if ((layout == JPEG_BYTE_LAYOUT_PSP_TEXTURE_WORDS) ||
-        OotPsp_IsNativeExternalTextureRange(output, JPEG_PSP_RGBA16_SIZE)) {
-        JpegPsp_RecordDecodedImage(output);
-    }
+    JpegPsp_RecordDecodedImage(output);
     return 0;
 }
 #else

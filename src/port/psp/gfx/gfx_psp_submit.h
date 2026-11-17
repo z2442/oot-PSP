@@ -12,7 +12,11 @@
  * synchronized. Resetting also releases that list's immutable vertex uploads. */
 void gfx_psp_submit_reset(void);
 void* gfx_psp_submit_alloc_vertices(size_t bytes);
-void gfx_psp_submit_writeback_vertices(const void* vertices, size_t bytes);
+/* Write back every arena upload not yet visible to the GE. Required before
+ * anything that can advance the GE stall address outside this file (SDK draw,
+ * memory or finish calls, intraFont). Draw thresholds and finish do it here. */
+void gfx_psp_submit_publish_vertices(void);
+int gfx_psp_submit_finish(void);
 void* gfx_psp_submit_get_memory(int bytes);
 void gfx_psp_submit_draw_array(int primitive, int format, int count, const void* indices, const void* vertices);
 

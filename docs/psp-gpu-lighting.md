@@ -64,6 +64,17 @@ speed improvement must be measured on hardware.
 
 CPU-generated silhouette masks have a separate [GU shadow path](psp-gpu-shadows.md).
 
+Native unlit meshes cache snapshots of their F3DEX2 command suffix and vertex
+loads. Reuse compares those bytes and all segment mappings instead of requiring
+an immutable external asset or a matching asset generation. A CPU edit rebuilds
+the mesh; a previously rejected suffix can be retried after editing. Submitted
+GU buffers and deferred RSP vertex loads keep their old snapshots until their
+consumers finish. Texture binding remains in the ordinary pipeline on each draw.
+The supported suffix is still limited to VTX/TRI1/TRI2/ENDDL and compatible
+material/projection state, with ordinary memory bounds checks. Snapshot storage
+and comparisons trade memory and CPU reads for broader cache eligibility;
+performance requires a hardware measurement.
+
 ## Validation
 
 Build with `make -j4 psp-port`. Relevant host regressions:
@@ -72,6 +83,7 @@ Build with `make -j4 psp-port`. Relevant host regressions:
 python3 tools/tests/test_psp_gpu_lighting.py
 python3 tools/tests/test_psp_vertex_pipeline.py
 python3 tools/tests/test_psp_native_mesh.py
+python3 tools/tests/test_psp_asset_layout.py
 python3 tools/tests/test_psp_texture_coords.py
 python3 tools/tests/test_psp_zero_fog.py
 ```

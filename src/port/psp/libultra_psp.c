@@ -1033,6 +1033,13 @@ s32 osContStartReadData(UNUSED OSMesgQueue* mq) {
 
     memset(sControllerPads, 0, sizeof(sControllerPads));
     sceCtrlPeekBufferPositive(&pad, 1);
+#ifdef OOT_PSP_GPROF
+    {
+        void OotPspProfiler_OnButtons(u32 buttons);
+
+        OotPspProfiler_OnButtons(pad.Buttons);
+    }
+#endif
 
     sControllerPads[0].button = OotPspControls_MapButtons(pad.Buttons);
     sControllerPads[0].stick_x = OotPspControls_MapStick(pad.Lx);

@@ -1,6 +1,7 @@
 #include "oot_psp_runtime_patch.h"
 
 #include "oot_psp_asset_loader.h"
+#include "oot_psp_texture.h"
 
 #include <pspkernel.h>
 #include <stdlib.h>
@@ -116,18 +117,11 @@ s32 OotPspRuntimePatch_Apply(void) {
     u32 patchCount;
     u32 permutationCount;
     u32 patchIndex;
-    s32 hasPatchFlags;
 
     if ((size_t)(end - cursor) < 12) {
         return false;
     }
-    if (memcmp(cursor, "OPB2", 4) == 0) {
-        hasPatchFlags = true;
-    } else if (memcmp(cursor, "OPB1", 4) == 0) {
-        /* Retain compatibility with old generated blobs. They carry no range
-         * metadata and therefore cannot identify patched texture words. */
-        hasPatchFlags = false;
-    } else {
+    if (memcmp(cursor, "OPB2", 4) != 0) {
         return false;
     }
     patchCount = OotPspRuntimePatch_ReadLe32(cursor + 4);
@@ -153,7 +147,7 @@ s32 OotPspRuntimePatch_Apply(void) {
         u8* payload;
         u32 relocationIndex;
 
-        if ((size_t)(end - cursor) < (hasPatchFlags ? 28 : 24)) {
+        if ((size_t)(end - cursor) < 28) {
             return false;
         }
         destinationOffset = OotPspRuntimePatch_ReadLe32(cursor + 0);
@@ -162,8 +156,8 @@ s32 OotPspRuntimePatch_Apply(void) {
         payloadSize = OotPspRuntimePatch_ReadLe32(cursor + 12);
         compressedSize = OotPspRuntimePatch_ReadLe32(cursor + 16);
         relocationCount = OotPspRuntimePatch_ReadLe32(cursor + 20);
-        patchFlags = hasPatchFlags ? OotPspRuntimePatch_ReadLe32(cursor + 24) : 0;
-        cursor += hasPatchFlags ? 28 : 24;
+        patchFlags = OotPspRuntimePatch_ReadLe32(cursor + 24);
+        cursor += 28;
         if (((size_t)(end - cursor) < compressedSize) ||
             ((size_t)(end - cursor - compressedSize) < relocationCount * 8)) {
             return false;
@@ -185,10 +179,8 @@ s32 OotPspRuntimePatch_Apply(void) {
         free(payload);
         cursor += compressedSize;
 
-        if ((patchFlags & OOT_PSP_PATCH_TEXTURE_WORDS) &&
-            !OotPsp_MarkLoadedExternalAssetRangeFlags(
-                destination, size, OOT_PSP_EXTERNAL_ASSET_NATIVE | OOT_PSP_EXTERNAL_ASSET_TEXTURE_WORDS)) {
-            return false;
+        if (patchFlags & OOT_PSP_PATCH_TEXTURE_WORDS) {
+            OotPsp_TextureWordsToBytes(destination, size);
         }
 
         for (relocationIndex = 0; relocationIndex < relocationCount; relocationIndex++) {

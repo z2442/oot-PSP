@@ -544,12 +544,6 @@ static bool gfx_is_static_prx_range(uintptr_t value, size_t size) {
     return gfx_range_contains(value, size, PSP_NATIVE_ADDR_START, (uintptr_t)__bss_start);
 }
 
-static bool gfx_is_loaded_external_range(uintptr_t value, size_t size) {
-    u32 flags;
-
-    return OotPsp_GetLoadedExternalAssetRangeFlags((const void*)value, size, &flags);
-}
-
 static bool gfx_is_valid_native_dl_range(uintptr_t value, size_t size) {
     if (!gfx_native_range_contains(value, size)) {
         return false;
@@ -567,35 +561,13 @@ static bool gfx_is_valid_native_dl_range(uintptr_t value, size_t size) {
         return true;
     }
 
-    if (gfx_is_loaded_external_range(value, size)) {
-        return true;
-    }
-
-    return false;
+    return OotPsp_IsRuntimeByteRange((const void*)value, size);
 }
 
 static bool gfx_is_valid_native_read_range(uintptr_t value, size_t size) {
-    if (!gfx_native_range_contains(value, size)) {
-        return false;
-    }
-
-    /*
-     * Keep this provenance set in sync with gfx_is_valid_native_dl_range().
-     * Display lists and texture staging data allocated from gOotPspSystemHeap can
-     * numerically look like segments 8-B.  If the heap is omitted here,
-     * seg_addr() translates a valid pointer through the active N64 segment and
-     * sends the renderer into unrelated frame data.
-     */
-    if (gfx_is_static_prx_range(value, size) || gfx_is_graph_pool_range(value, size) ||
-        OotPsp_IsSystemHeapRange((const void*)value, size)) {
-        return true;
-    }
-
-    if (OotPsp_IsRuntimeByteRange((const void*)value, size)) {
-        return true;
-    }
-
-    return gfx_is_loaded_external_range(value, size);
+    /* Display lists, loaded objects and staging data share owned storage.
+     * Byte layout and read validity do not depend on an asset registration. */
+    return gfx_is_valid_native_dl_range(value, size);
 }
 
 static inline bool gfx_is_valid_native_read_range_cached(uintptr_t value, size_t size) {
@@ -808,91 +780,13 @@ static uint32_t gfx_texture_source_span_size(int tile) {
 #endif
 }
 
-typedef enum GfxTextureSwapMode {
-    GFX_TEXTURE_SWAP_NONE,
-    GFX_TEXTURE_SWAP_DIRECT,
-    GFX_TEXTURE_SWAP_MAPPED,
-} GfxTextureSwapMode;
-
-typedef struct GfxTextureSwapState {
-    GfxTextureSwapMode mode;
-    uintptr_t rangeStart;
-    uintptr_t rangeEnd;
-} GfxTextureSwapState;
-
-static GfxTextureSwapState gfx_texture_source_swap_state(const uint8_t* addr, uint32_t sizeBytes) {
-    GfxTextureSwapState state = { GFX_TEXTURE_SWAP_NONE, 0, 0 };
-#if defined(TARGET_PSP)
-    u32 loadedFlags;
-
-    /*
-     * Extracted OoT textures are declared as u64 words. On PSP those words are
-     * stored little-endian, so byte-oriented texture import must flip bytes back
-     * within each 64-bit word. Loaded external assets need asset-offset-aware
-     * mapping; static PRX data can use a direct native-address XOR.
-     */
-    if ((addr == sInvalidTextureBuf) || (addr == sInvalidPaletteBuf)) {
-        return state;
-    }
-
-    if (OotPsp_GetLoadedExternalAssetRangeFlags(addr, sizeBytes, &loadedFlags) ||
-        OotPsp_GetLoadedExternalAssetRangeFlags(addr, 1, &loadedFlags)) {
-        state.mode = ((loadedFlags & OOT_PSP_EXTERNAL_ASSET_NATIVE) != 0) ? GFX_TEXTURE_SWAP_MAPPED
-                                                                          : GFX_TEXTURE_SWAP_NONE;
-        if (state.mode == GFX_TEXTURE_SWAP_MAPPED) {
-            OotPsp_GetNativeExternalTextureMappingRange(addr, &state.rangeStart, &state.rangeEnd);
-        }
-        return state;
-    }
-
-    state.mode = OotPsp_IsRuntimeByteRange(addr, sizeBytes) ? GFX_TEXTURE_SWAP_NONE : GFX_TEXTURE_SWAP_DIRECT;
-#else
-    _UNUSED(addr);
-    _UNUSED(sizeBytes);
-#endif
-    return state;
-}
-
-static inline uint8_t gfx_read_texture_source_u8(const uint8_t* addr, uint32_t offset,
-                                                 GfxTextureSwapState* swapState) {
-#if defined(TARGET_PSP)
-    uintptr_t source = (uintptr_t)addr + offset;
-
-    if (swapState->mode == GFX_TEXTURE_SWAP_MAPPED) {
-        uintptr_t relative;
-        uintptr_t mappedRelative;
-
-        if ((source < swapState->rangeStart) || (source >= swapState->rangeEnd)) {
-            OotPsp_GetNativeExternalTextureMappingRange((const void*)source, &swapState->rangeStart,
-                                                        &swapState->rangeEnd);
-        }
-
-        relative = source - swapState->rangeStart;
-        mappedRelative = relative ^ 7U;
-        if ((swapState->rangeStart != 0) &&
-            (mappedRelative < (swapState->rangeEnd - swapState->rangeStart))) {
-            source = swapState->rangeStart + mappedRelative;
-        } else {
-            source ^= 7U;
-        }
-    } else if (swapState->mode == GFX_TEXTURE_SWAP_DIRECT) {
-        source ^= 7U;
-    }
-
-    return *(const uint8_t*)source;
-#else
-    _UNUSED(swapState);
-
+/* Texture/TLUT inputs are canonical bytes before reaching the renderer. */
+static inline uint8_t gfx_read_texture_source_u8(const uint8_t* addr, uint32_t offset) {
     return addr[offset];
-#endif
 }
 
-static inline uint16_t gfx_read_texture_source_be16(const uint8_t* addr, uint32_t offset,
-                                                    GfxTextureSwapState* swapState) {
-    uint16_t hi = gfx_read_texture_source_u8(addr, offset, swapState);
-    uint16_t lo = gfx_read_texture_source_u8(addr, offset + 1, swapState);
-
-    return (hi << 8) | lo;
+static inline uint16_t gfx_read_texture_source_be16(const uint8_t* addr, uint32_t offset) {
+    return ((uint16_t)addr[offset] << 8) | addr[offset + 1];
 }
 
 #if defined(TARGET_PSP)
@@ -2441,15 +2335,13 @@ static void import_texture_rgba16(int tile) {
     uint32_t width = gfx_texture_import_width(tile);
     uint32_t height = gfx_texture_import_height(tile);
     uint32_t rowBytes = gfx_texture_row_bytes(width, G_IM_SIZ_16b);
-    GfxTextureSwapState swapState =
-        gfx_texture_source_swap_state(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
 
     for (uint32_t y = 0; y < height; y++) {
         const uint8_t* row = gfx_texture_row(tile, y, rowBytes);
 
         for (uint32_t x = 0; x < width; x++) {
             uint32_t i = y * width + x;
-            uint16_t col16 = gfx_read_texture_source_be16(row, 2 * x, &swapState);
+            uint16_t col16 = gfx_read_texture_source_be16(row, 2 * x);
             rgba16_buf[i] = gfx_rgba16_to_gu5551(col16);
         }
     }
@@ -2462,11 +2354,8 @@ static void import_texture_rgba32(int tile) {
     uint32_t width = gfx_texture_import_width(tile);
     uint32_t height = gfx_texture_import_height(tile);
     uint32_t rowBytes = gfx_texture_row_bytes(width, G_IM_SIZ_32b);
-    GfxTextureSwapState swapState =
-        gfx_texture_source_swap_state(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
 
-    if ((swapState.mode == GFX_TEXTURE_SWAP_NONE) &&
-        (rdp.loaded_texture[tile].row_stride_bytes == 0 || rdp.loaded_texture[tile].row_stride_bytes == rowBytes)) {
+    if (rdp.loaded_texture[tile].row_stride_bytes == 0 || rdp.loaded_texture[tile].row_stride_bytes == rowBytes) {
         gfx_upload_texture(tile, rdp.loaded_texture[tile].addr, width, height, GU_PSM_8888);
         return;
     }
@@ -2475,17 +2364,16 @@ static void import_texture_rgba32(int tile) {
         const uint8_t* row = gfx_texture_row(tile, y, rowBytes);
 
         for (uint32_t x = 0; x < rowBytes; x++) {
-            rgba32_buf[y * rowBytes + x] = gfx_read_texture_source_u8(row, x, &swapState);
+            rgba32_buf[y * rowBytes + x] = gfx_read_texture_source_u8(row, x);
         }
     }
 
     gfx_upload_texture(tile, rgba32_buf, width, height, GU_PSM_8888);
 }
 
-static uint8_t gfx_texture_read_4b(int tile, uint32_t x, const uint8_t* row,
-                                   GfxTextureSwapState* swapState) {
+static uint8_t gfx_texture_read_4b(int tile, uint32_t x, const uint8_t* row) {
     uint32_t texel = rdp.loaded_texture[tile].source_nibble_offset + x;
-    uint8_t byte = gfx_read_texture_source_u8(row, texel >> 1, swapState);
+    uint8_t byte = gfx_read_texture_source_u8(row, texel >> 1);
 
     return (byte >> (4 - (texel & 1) * 4)) & 0xf;
 }
@@ -2495,15 +2383,13 @@ static void import_texture_ia4(int tile) {
     uint32_t width = gfx_texture_import_width(tile);
     uint32_t height = gfx_texture_import_height(tile);
     uint32_t rowBytes = gfx_texture_row_bytes(width + rdp.loaded_texture[tile].source_nibble_offset, G_IM_SIZ_4b);
-    GfxTextureSwapState swapState =
-        gfx_texture_source_swap_state(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
 
     for (uint32_t y = 0; y < height; y++) {
         const uint8_t* row = gfx_texture_row(tile, y, rowBytes);
 
         for (uint32_t x = 0; x < width; x++) {
             uint32_t i = y * width + x;
-            uint8_t part = gfx_texture_read_4b(tile, x, row, &swapState);
+            uint8_t part = gfx_texture_read_4b(tile, x, row);
             uint8_t intensity = part >> 1;
             uint8_t alpha = part & 1;
             uint8_t r = intensity;
@@ -2524,15 +2410,13 @@ static void import_texture_ia8(int tile) {
     uint32_t width = gfx_texture_import_width(tile);
     uint32_t height = gfx_texture_import_height(tile);
     uint32_t rowBytes = gfx_texture_row_bytes(width, G_IM_SIZ_8b);
-    GfxTextureSwapState swapState =
-        gfx_texture_source_swap_state(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
 
     for (uint32_t y = 0; y < height; y++) {
         const uint8_t* row = gfx_texture_row(tile, y, rowBytes);
 
         for (uint32_t x = 0; x < width; x++) {
             uint32_t i = y * width + x;
-            uint8_t texel = gfx_read_texture_source_u8(row, x, &swapState);
+            uint8_t texel = gfx_read_texture_source_u8(row, x);
             uint16_t intensity = texel >> 4;
             uint16_t alpha = texel & 0xF;
 
@@ -2548,16 +2432,14 @@ static void import_texture_ia16(int tile) {
     uint32_t width = gfx_texture_import_width(tile);
     uint32_t height = gfx_texture_import_height(tile);
     uint32_t rowBytes = gfx_texture_row_bytes(width, G_IM_SIZ_16b);
-    GfxTextureSwapState swapState =
-        gfx_texture_source_swap_state(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
 
     for (uint32_t y = 0; y < height; y++) {
         const uint8_t* row = gfx_texture_row(tile, y, rowBytes);
 
         for (uint32_t x = 0; x < width; x++) {
             uint32_t i = y * width + x;
-            uint8_t intensity = gfx_read_texture_source_u8(row, 2 * x, &swapState);
-            uint8_t alpha = gfx_read_texture_source_u8(row, 2 * x + 1, &swapState);
+            uint8_t intensity = gfx_read_texture_source_u8(row, 2 * x);
+            uint8_t alpha = gfx_read_texture_source_u8(row, 2 * x + 1);
             uint8_t r = intensity;
             uint8_t g = intensity;
             uint8_t b = intensity;
@@ -2576,15 +2458,13 @@ static void import_texture_i4(int tile) {
     uint32_t width = gfx_texture_import_width(tile);
     uint32_t height = gfx_texture_import_height(tile);
     uint32_t rowBytes = gfx_texture_row_bytes(width + rdp.loaded_texture[tile].source_nibble_offset, G_IM_SIZ_4b);
-    GfxTextureSwapState swapState =
-        gfx_texture_source_swap_state(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
 
     for (uint32_t y = 0; y < height; y++) {
         const uint8_t* row = gfx_texture_row(tile, y, rowBytes);
 
         for (uint32_t x = 0; x < width; x++) {
             uint32_t i = y * width + x;
-            uint16_t intensity = gfx_texture_read_4b(tile, x, row, &swapState);
+            uint16_t intensity = gfx_texture_read_4b(tile, x, row);
 
             rgba16_buf[i] = (intensity << 12) | (intensity << 8) | (intensity << 4) | intensity;
         }
@@ -2602,12 +2482,9 @@ static void import_texture_i8(int tile) {
     uint32_t width = gfx_texture_import_width(tile);
     uint32_t height = gfx_texture_import_height(tile);
     uint32_t rowBytes = gfx_texture_row_bytes(width, G_IM_SIZ_8b);
-    GfxTextureSwapState swapState =
-        gfx_texture_source_swap_state(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
 
 #if defined(TARGET_PSP)
-    if ((swapState.mode == GFX_TEXTURE_SWAP_NONE) &&
-        (rdp.loaded_texture[tile].row_stride_bytes == 0 || rdp.loaded_texture[tile].row_stride_bytes == rowBytes)) {
+    if (rdp.loaded_texture[tile].row_stride_bytes == 0 || rdp.loaded_texture[tile].row_stride_bytes == rowBytes) {
         gfx_upload_texture(tile, rdp.loaded_texture[tile].addr, width, height, GU_PSM_T8);
         return;
     }
@@ -2616,7 +2493,7 @@ static void import_texture_i8(int tile) {
         const uint8_t* row = gfx_texture_row(tile, y, rowBytes);
 
         for (uint32_t x = 0; x < width; x++) {
-            i8_buf[y * width + x] = gfx_read_texture_source_u8(row, x, &swapState);
+            i8_buf[y * width + x] = gfx_read_texture_source_u8(row, x);
         }
     }
 
@@ -2627,7 +2504,7 @@ static void import_texture_i8(int tile) {
 
         for (uint32_t x = 0; x < width; x++) {
             uint32_t i = y * width + x;
-            uint8_t intensity = gfx_read_texture_source_u8(row, x, &swapState);
+            uint8_t intensity = gfx_read_texture_source_u8(row, x);
             uint8_t r = intensity;
             uint8_t g = intensity;
             uint8_t b = intensity;
@@ -2648,21 +2525,18 @@ static void import_texture_ci4(int tile) {
     uint32_t width = gfx_texture_import_width(tile);
     uint32_t height = gfx_texture_import_height(tile);
     uint32_t rowBytes = gfx_texture_row_bytes(width + rdp.loaded_texture[tile].source_nibble_offset, G_IM_SIZ_4b);
-    GfxTextureSwapState swapState =
-        gfx_texture_source_swap_state(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
 
 #if defined(TARGET_PSP)
     gfx_validate_palette_source("import_texture_ci4");
 #endif
-    GfxTextureSwapState paletteSwapState = gfx_texture_source_swap_state(rdp.palette, GFX_CI4_TLUT_SIZE_BYTES);
 
     for (uint32_t y = 0; y < height; y++) {
         const uint8_t* row = gfx_texture_row(tile, y, rowBytes);
 
         for (uint32_t x = 0; x < width; x++) {
             uint32_t i = y * width + x;
-            uint8_t idx = gfx_texture_read_4b(tile, x, row, &swapState);
-            uint16_t col16 = gfx_read_texture_source_be16(rdp.palette, idx * 2, &paletteSwapState);
+            uint8_t idx = gfx_texture_read_4b(tile, x, row);
+            uint16_t col16 = gfx_read_texture_source_be16(rdp.palette, idx * 2);
             rgba16_buf[i] = gfx_rgba16_to_gu5551(col16);
         }
     }
@@ -2675,21 +2549,18 @@ static void import_texture_ci8(int tile) {
     uint32_t width = gfx_texture_import_width(tile);
     uint32_t height = gfx_texture_import_height(tile);
     uint32_t rowBytes = gfx_texture_row_bytes(width, G_IM_SIZ_8b);
-    GfxTextureSwapState swapState =
-        gfx_texture_source_swap_state(rdp.loaded_texture[tile].addr, gfx_texture_source_span_size(tile));
 
 #if defined(TARGET_PSP)
     gfx_validate_palette_source("import_texture_ci8");
 #endif
-    GfxTextureSwapState paletteSwapState = gfx_texture_source_swap_state(rdp.palette, GFX_TLUT_SIZE_BYTES);
 
     for (uint32_t y = 0; y < height; y++) {
         const uint8_t* row = gfx_texture_row(tile, y, rowBytes);
 
         for (uint32_t x = 0; x < width; x++) {
             uint32_t i = y * width + x;
-            uint8_t idx = gfx_read_texture_source_u8(row, x, &swapState);
-            uint16_t col16 = gfx_read_texture_source_be16(rdp.palette, idx * 2, &paletteSwapState);
+            uint8_t idx = gfx_read_texture_source_u8(row, x);
+            uint16_t col16 = gfx_read_texture_source_be16(rdp.palette, idx * 2);
             rgba16_buf[i] = gfx_rgba16_to_gu5551(col16);
         }
     }
@@ -2909,7 +2780,6 @@ static bool gfx_get_single_texture_tint_colors(uint8_t tintFactor, uint8_t cache
     uint32_t height;
     uint32_t texelCount;
     uint32_t rowBytes;
-    GfxTextureSwapState swapState;
 
     if (!gfx_intensity_tint_texture_is_supported(0) ||
         !gfx_validate_texture_source(0, "single-texture-tint-texture0") ||
@@ -2924,15 +2794,14 @@ static bool gfx_get_single_texture_tint_colors(uint8_t tintFactor, uint8_t cache
 
     texelCount = width * height;
     rowBytes = gfx_texture_row_bytes(width + rdp.loaded_texture[0].source_nibble_offset, texture0->siz);
-    swapState = gfx_texture_source_swap_state(rdp.loaded_texture[0].addr, gfx_texture_source_span_size(0));
 
     for (uint32_t y = 0; y < height; y++) {
         const uint8_t* row = gfx_texture_row(0, y, rowBytes);
 
         for (uint32_t x = 0; x < width; x++) {
             const int32_t intensity = texture0->siz == G_IM_SIZ_4b
-                                          ? gfx_texture_read_4b(0, x, row, &swapState) * 0x11
-                                          : gfx_read_texture_source_u8(row, x, &swapState);
+                                          ? gfx_texture_read_4b(0, x, row) * 0x11
+                                          : gfx_read_texture_source_u8(row, x);
 
             intensitySum += intensity;
             intensitySquaredSum += intensity * intensity;
@@ -3003,7 +2872,6 @@ static bool gfx_get_two_texture_prim_lod_tint_colors(struct RGBA* primColor, str
     uint64_t intensitySum = 0;
     uint32_t texelCount;
     uint8_t meanIntensity;
-    GfxTextureSwapState swapState;
 
     if (!gfx_two_intensity_tint_textures_are_supported() ||
         !gfx_validate_texture_source(0, "two-prim-lod-tint-texture0")) {
@@ -3027,16 +2895,15 @@ static bool gfx_get_two_texture_prim_lod_tint_colors(struct RGBA* primColor, str
 
     texelCount = width * height;
     rowBytes = gfx_texture_row_bytes(width + rdp.loaded_texture[0].source_nibble_offset, texture0->siz);
-    swapState = gfx_texture_source_swap_state(rdp.loaded_texture[0].addr, gfx_texture_source_span_size(0));
 
     for (uint32_t y = 0; y < height; y++) {
         const uint8_t* row = gfx_texture_row(0, y, rowBytes);
 
         for (uint32_t x = 0; x < width; x++) {
             if (texture0->siz == G_IM_SIZ_4b) {
-                intensitySum += gfx_texture_read_4b(0, x, row, &swapState) * 0x11U;
+                intensitySum += gfx_texture_read_4b(0, x, row) * 0x11U;
             } else {
-                intensitySum += gfx_read_texture_source_u8(row, x, &swapState);
+                intensitySum += gfx_read_texture_source_u8(row, x);
             }
         }
     }
@@ -3094,10 +2961,6 @@ static void gfx_build_flame_atlas(FlameAtlasCacheEntry* entry) {
     const uint32_t texture0RowBytes = gfx_texture_row_bytes(GFX_FLAME_ATLAS_FRAME_WIDTH, G_IM_SIZ_8b);
     const uint32_t texture1RowBytes = gfx_texture_row_bytes(GFX_FLAME_ATLAS_FRAME_WIDTH, G_IM_SIZ_4b);
     uint8_t noiseSubtraction[16];
-    GfxTextureSwapState texture0Swap =
-        gfx_texture_source_swap_state(rdp.loaded_texture[0].addr, gfx_texture_source_span_size(0));
-    GfxTextureSwapState texture1Swap =
-        gfx_texture_source_swap_state(rdp.loaded_texture[1].addr, gfx_texture_source_span_size(1));
 
     /* The RDP expression is TEXEL0 + (TEXEL1 - 1) * PRIM_LOD_FRAC. Its fraction uses an 8-bit fixed-point
      * denominator, so precompute the only 16 possible I4 noise contributions rather than doing arithmetic for
@@ -3120,8 +2983,8 @@ static void gfx_build_flame_atlas(FlameAtlasCacheEntry* entry) {
                 &entry->pixels[(atlasY + y) * GFX_FLAME_ATLAS_WIDTH + atlasX];
 
             for (uint32_t x = 0; x < GFX_FLAME_ATLAS_FRAME_WIDTH; x++) {
-                const uint8_t flame = gfx_read_texture_source_u8(texture0Row, x, &texture0Swap);
-                const uint8_t noise = gfx_texture_read_4b(1, x, texture1Row, &texture1Swap);
+                const uint8_t flame = gfx_read_texture_source_u8(texture0Row, x);
+                const uint8_t noise = gfx_texture_read_4b(1, x, texture1Row);
                 const uint8_t subtraction = noiseSubtraction[noise];
 
                 atlasRow[x] = flame > subtraction ? flame - subtraction : 0;
@@ -5615,7 +5478,16 @@ static void gfx_dp_set_combine_mode(uint32_t rgb, uint32_t alpha, bool color_mul
     gfx_mark_tri_pipeline_dirty();
 }
 
-static GFX_DL_HANDLER void gfx_dp_set_combine(uint32_t w0, uint32_t w1) {
+/* Decoded form of one SETCOMBINE command. The decoder below depends only on the
+ * two command words and the RDP cycle type, so its result can be memoized. */
+struct GfxCombineDecode {
+    uint32_t rgb, alpha;
+    bool color_mul_env, color_mul_prim, texture_blend, texture_blend_shade, two_texture_blend,
+        two_texture_blend_uses_prim_lod, two_texture_alpha_blend, alpha_mul_env, flame_texture_atlas,
+        texture_tint_uses_prim_lod, texture_tint_uses_env_alpha, arrow_glow, texture_add;
+};
+
+static GFX_DL_HANDLER void gfx_dp_decode_combine(uint32_t w0, uint32_t w1, struct GfxCombineDecode* out) {
 #define COMB_FIELD(word, pos, width) (((word) >> (pos)) & ((1U << (width)) - 1))
     uint32_t rgbA0 = COMB_FIELD(w0, 20, 4);
     uint32_t rgbB0 = COMB_FIELD(w1, 28, 4);
@@ -5894,11 +5766,78 @@ static GFX_DL_HANDLER void gfx_dp_set_combine(uint32_t w0, uint32_t w1) {
     }
 #endif
 
-    gfx_dp_set_combine_mode(rgbComb, alphaComb, colorMulEnv, colorMulPrim, textureBlend, textureBlendShade,
-                            twoTextureBlend, twoTextureBlendUsesPrimLod, twoTextureAlphaBlend, alphaMulEnv,
-                            flameTextureAtlas, textureTintUsesPrimLod || singleTexturePrimLodTint,
-                            singleTextureEnvAlphaTint, arrowGlow, textureAdd);
+    out->rgb = rgbComb;
+    out->alpha = alphaComb;
+    out->color_mul_env = colorMulEnv;
+    out->color_mul_prim = colorMulPrim;
+    out->texture_blend = textureBlend;
+    out->texture_blend_shade = textureBlendShade;
+    out->two_texture_blend = twoTextureBlend;
+    out->two_texture_blend_uses_prim_lod = twoTextureBlendUsesPrimLod;
+    out->two_texture_alpha_blend = twoTextureAlphaBlend;
+    out->alpha_mul_env = alphaMulEnv;
+    out->flame_texture_atlas = flameTextureAtlas;
+    out->texture_tint_uses_prim_lod = textureTintUsesPrimLod || singleTexturePrimLodTint;
+    out->texture_tint_uses_env_alpha = singleTextureEnvAlphaTint;
+    out->arrow_glow = arrowGlow;
+    out->texture_add = textureAdd;
 #undef COMB_FIELD
+}
+
+/* Character display lists reissue a handful of combiners for every limb and
+ * material (about 265 commands per frame in a busy Gerudo Fortress scene).
+ * The full decoder is ~8 KB of pattern matching; running it each time evicts
+ * the rest of the hot renderer from Allegrex's 16 KB instruction cache. */
+/* Set-associative: a direct-mapped table already collides among the ten
+ * combiners used by Gerudo guards, Link and common effects. */
+#define GFX_COMBINE_MEMO_SETS 16
+#define GFX_COMBINE_MEMO_WAYS 4
+struct GfxCombineMemoEntry {
+    uint32_t w0, w1, cycle;
+    bool valid;
+    struct GfxCombineDecode decode;
+};
+static struct GfxCombineMemoEntry sCombineMemo[GFX_COMBINE_MEMO_SETS][GFX_COMBINE_MEMO_WAYS];
+static uint8_t sCombineMemoNext[GFX_COMBINE_MEMO_SETS];
+
+static inline uint32_t gfx_combine_memo_set(uint32_t w0, uint32_t w1, uint32_t cycle) {
+    return (((w0 ^ (w1 * 0x9E3779B1U) ^ cycle) * 0x85EBCA6BU) >> 28) & (GFX_COMBINE_MEMO_SETS - 1);
+}
+
+static inline const struct GfxCombineDecode* gfx_combine_memo_find(uint32_t w0, uint32_t w1, uint32_t cycle) {
+    const struct GfxCombineMemoEntry* set = sCombineMemo[gfx_combine_memo_set(w0, w1, cycle)];
+
+    for (uint32_t way = 0; way < GFX_COMBINE_MEMO_WAYS; way++) {
+        if (set[way].valid && set[way].w0 == w0 && set[way].w1 == w1 && set[way].cycle == cycle) {
+            return &set[way].decode;
+        }
+    }
+    return NULL;
+}
+
+static void gfx_dp_set_combine(uint32_t w0, uint32_t w1) {
+    const uint32_t cycle = rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE);
+    const struct GfxCombineDecode* d = gfx_combine_memo_find(w0, w1, cycle);
+
+    if (d == NULL) {
+        const uint32_t setIndex = gfx_combine_memo_set(w0, w1, cycle);
+        const uint32_t way = sCombineMemoNext[setIndex];
+        struct GfxCombineMemoEntry* entry = &sCombineMemo[setIndex][way];
+
+        sCombineMemoNext[setIndex] = (way + 1) & (GFX_COMBINE_MEMO_WAYS - 1);
+        gfx_dp_decode_combine(w0, w1, &entry->decode);
+        entry->w0 = w0;
+        entry->w1 = w1;
+        entry->cycle = cycle;
+        entry->valid = true;
+        d = &entry->decode;
+    }
+
+    gfx_dp_set_combine_mode(d->rgb, d->alpha, d->color_mul_env, d->color_mul_prim, d->texture_blend,
+                            d->texture_blend_shade, d->two_texture_blend, d->two_texture_blend_uses_prim_lod,
+                            d->two_texture_alpha_blend, d->alpha_mul_env, d->flame_texture_atlas,
+                            d->texture_tint_uses_prim_lod, d->texture_tint_uses_env_alpha, d->arrow_glow,
+                            d->texture_add);
 }
 
 static void gfx_dp_set_env_color(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
@@ -6675,7 +6614,6 @@ static bool gfx_s2dex_bg_upload_rgba16_texture(const uint8_t* source, uint32_t w
                                                uint32_t contentHeight, uint32_t uploadWidth, uint32_t uploadHeight,
                                                struct TextureHashmapNode* node) {
     const size_t uploadSize = (size_t)uploadWidth * uploadHeight * sizeof(uint16_t);
-    GfxTextureSwapState swapState;
     uint16_t* dst;
 
     if (uploadSize > sizeof(psp_texture_stage_buf)) {
@@ -6685,7 +6623,6 @@ static bool gfx_s2dex_bg_upload_rgba16_texture(const uint8_t* source, uint32_t w
 
     memset(psp_texture_stage_buf, 0, uploadSize);
     dst = (uint16_t*)psp_texture_stage_buf;
-    swapState = gfx_texture_source_swap_state(source, sourceSpan);
 
     for (uint32_t y = 0; y < contentHeight; y++) {
         uint32_t sourceY = (uint64_t)y * height / contentHeight;
@@ -6694,7 +6631,7 @@ static bool gfx_s2dex_bg_upload_rgba16_texture(const uint8_t* source, uint32_t w
 
         for (uint32_t x = 0; x < contentWidth; x++) {
             uint32_t sourceX = (uint64_t)x * width / contentWidth;
-            uint16_t col16 = gfx_read_texture_source_be16(row, sourceX * sizeof(uint16_t), &swapState);
+            uint16_t col16 = gfx_read_texture_source_be16(row, sourceX * sizeof(uint16_t));
             const uint8_t a = col16 & 1;
             const uint8_t r = (col16 >> 11) & 0x1f;
             const uint8_t g = (col16 >> 6) & 0x1f;
@@ -6951,19 +6888,20 @@ static bool gfx_translate_dl_cursor(Gfx** cmdP) {
 #define C1(pos, width) ((cmd->words.w1 >> (pos)) & ((1U << width) - 1))
 
 /* Native mesh cache deliberately accepts only a state-free F3DEX2 suffix:
- * VTX/TRI1/TRI2/ENDDL, immutable packed assets, unlit SHADE with at most one immutable texture.
- * No command or asset pointer is read again on a hit. Material changes before
- * the suffix continue through the normal interpreter/pipeline state cache. */
+ * VTX/TRI1/TRI2/ENDDL, unlit SHADE with at most one texture. Commands and vertex
+ * loads are snapshotted and compared on reuse, so CPU-written and generated
+ * meshes have the same lifetime rules as loaded objects. Materials continue
+ * through the ordinary pipeline and texture cache on every draw. */
 #ifndef OOT_PSP_NATIVE_MESH_ENTRIES
 #define OOT_PSP_NATIVE_MESH_ENTRIES 8
 #endif
 #define NATIVE_MESH_VERTICES 128
 #define NATIVE_MESH_INDICES 768
+#define NATIVE_MESH_COMMANDS 512
 #if defined(TARGET_PSP) && defined(F3DEX_GBI_2) && OOT_PSP_NATIVE_MESH_ENTRIES > 0
 extern void gfx_scegu_draw_native_mesh(const void* vertices, const uint16_t* indices,
                                       unsigned int count, const float model[4][4], uint32_t cull);
 struct NativeMaterial {
-    const uint8_t* texture;
     uint32_t geometry_mode, white_alpha;
     float u_scale, v_scale, u_bias, v_bias;
     uint16_t s, t;
@@ -6971,16 +6909,20 @@ struct NativeMaterial {
 struct NativeMesh {
     const Gfx* commands;
     Gfx* end;
-    uint32_t generation;
     struct NativeMaterial material;
-    uintptr_t segments[4];
+    uintptr_t segments[NUM_SEGMENTS * 2];
     uint64_t written;
     uint16_t final[MAX_VERTICES];
-    uint16_t vertex_count, index_count;
+    uint16_t vertex_count, index_count, command_count, load_count;
     bool pinned, valid;
     uint8_t pending_groups;
     float min[3], max[3];
     Vtx source[NATIVE_MESH_VERTICES];
+    Gfx command_source[NATIVE_MESH_COMMANDS];
+    struct {
+        const Vtx* source;
+        uint16_t first, count;
+    } loads[NATIVE_MESH_VERTICES];
     psp_fast_t vertices[NATIVE_MESH_VERTICES] __attribute__((aligned(16)));
     uint16_t indices[NATIVE_MESH_INDICES] __attribute__((aligned(16)));
 };
@@ -7044,31 +6986,40 @@ static void gfx_native_materialize(uint64_t mask) {
     }
 }
 
-static bool gfx_native_immutable(const void* ptr, size_t size) {
-    uint32_t flags;
-    const uint32_t required = OOT_PSP_EXTERNAL_ASSET_NATIVE | OOT_PSP_EXTERNAL_ASSET_IMMUTABLE_MESH;
-    return OotPsp_GetLoadedExternalAssetRangeFlags(ptr, size, &flags) && (flags & required) == required;
+static bool gfx_native_matches(const struct NativeMesh* mesh) {
+    size_t size = mesh->command_count * sizeof(Gfx);
+
+    if (!mesh->valid || !gfx_is_valid_native_dl_range((uintptr_t)mesh->commands, size) ||
+        memcmp(mesh->commands, mesh->command_source, size) != 0) return false;
+    for (unsigned int i = 0; i < mesh->load_count; i++) {
+        const Vtx* source = mesh->loads[i].source;
+        size = mesh->loads[i].count * sizeof(Vtx);
+        if (!gfx_is_valid_native_read_range((uintptr_t)source, size) ||
+            memcmp(source, &mesh->source[mesh->loads[i].first], size) != 0) return false;
+    }
+    return true;
 }
 
 static bool gfx_native_build(struct NativeMesh* mesh, Gfx* cmd) {
     uint16_t slots[MAX_VERTICES];
     memset(slots, 0xff, sizeof(slots));
-    mesh->vertex_count = mesh->index_count = 0;
+    mesh->vertex_count = mesh->index_count = mesh->command_count = mesh->load_count = 0;
     mesh->written = 0;
-    if (mesh->material.texture && !gfx_native_immutable(mesh->material.texture, rdp.loaded_texture[0].source_size_bytes)) return false;
-    for (unsigned int command = 0; command < 512; command++, cmd++) {
-        if (!gfx_native_immutable(cmd, sizeof(*cmd))) return false;
+    for (unsigned int command = 0; command < NATIVE_MESH_COMMANDS; command++, cmd++) {
+        if (!gfx_is_valid_native_dl_range((uintptr_t)cmd, sizeof(*cmd))) return false;
+        mesh->command_source[mesh->command_count++] = *cmd;
         const uint32_t w0 = cmd->words.w0;
         const unsigned int op = w0 >> 24;
         if (op == G_VTX) {
             uint32_t count, dest;
             uintptr_t raw = cmd->words.w1;
-            /* Only object/keep mappings are part of this cache key. */
-            if (raw < PSP_NATIVE_ADDR_START && (raw >> 24) != 4 && (raw >> 24) != 6) return false;
             if (!gfx_decode_vertex_cmd_f3dex2(w0, &count, &dest) ||
                 mesh->vertex_count + count > NATIVE_MESH_VERTICES) return false;
             const Vtx* source = seg_addr(raw);
-            if (!gfx_native_immutable(source, count * sizeof(Vtx))) return false;
+            if (!gfx_is_valid_native_read_range((uintptr_t)source, count * sizeof(Vtx))) return false;
+            mesh->loads[mesh->load_count].source = source;
+            mesh->loads[mesh->load_count].first = mesh->vertex_count;
+            mesh->loads[mesh->load_count++].count = count;
             for (unsigned int j = 0; j < count; j++) {
                 unsigned int index = mesh->vertex_count++;
                 psp_fast_t* v = &mesh->vertices[index];
@@ -7150,7 +7101,6 @@ static GFX_DL_HANDLER bool gfx_native_try(Gfx** cursor) {
     material.geometry_mode = rsp.geometry_mode;
     material.white_alpha = state->use_alpha && state->comb->vertex_color_source[1] == CC_0;
     if (state->use_texture) {
-        material.texture = rdp.loaded_texture[0].addr;
         material.u_scale = state->tex_u_scale[0];
         material.v_scale = state->tex_v_scale[0];
         material.u_bias = state->tex_u_bias[0];
@@ -7158,14 +7108,17 @@ static GFX_DL_HANDLER bool gfx_native_try(Gfx** cursor) {
         material.s = rsp.texture_scaling_factor.s;
         material.t = rsp.texture_scaling_factor.t;
     }
-    const uint32_t generation = OotPsp_GetExternalAssetGeneration();
-    const uintptr_t segments[4] = { (uintptr_t)rsp.segments[4], (uintptr_t)rsp.segments[6], gSegments[4], gSegments[6] };
+    uintptr_t segments[NUM_SEGMENTS * 2];
+    for (unsigned int i = 0; i < NUM_SEGMENTS; i++) {
+        segments[i] = (uintptr_t)rsp.segments[i];
+        segments[NUM_SEGMENTS + i] = gSegments[i];
+    }
     struct NativeMesh* mesh = NULL;
     for (unsigned int i = 0; i < OOT_PSP_NATIVE_MESH_ENTRIES; i++) {
         struct NativeMesh* candidate = &sNativeMeshes[i];
-        if (candidate->commands == *cursor && candidate->generation == generation &&
+        if (candidate->commands == *cursor &&
             memcmp(candidate->segments, segments, sizeof(segments)) == 0 &&
-            memcmp(&candidate->material, &material, sizeof(material)) == 0) {
+            memcmp(&candidate->material, &material, sizeof(material)) == 0 && gfx_native_matches(candidate)) {
             mesh = candidate;
             break;
         }
@@ -7176,8 +7129,10 @@ static GFX_DL_HANDLER bool gfx_native_try(Gfx** cursor) {
             if (!candidate->pinned && !candidate->pending_groups) { mesh = candidate; break; }
         }
         if (!mesh) return false;
+        /* A changed source gets separate storage while old draws or deferred
+         * RSP slots still refer to a previous snapshot. Failed builds are
+         * retried next time: a writer may turn a fallback list into a mesh. */
         mesh->commands = *cursor;
-        mesh->generation = generation;
         mesh->material = material;
         memcpy(mesh->segments, segments, sizeof(segments));
         mesh->valid = gfx_native_build(mesh, *cursor);

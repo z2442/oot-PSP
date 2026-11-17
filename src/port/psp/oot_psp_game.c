@@ -368,8 +368,6 @@ static s32 OotPsp_IsStaticStorageRange(const void* ptr, size_t size) {
 }
 
 static s32 OotPsp_IsKnownNativePointer(uintptr_t addr, size_t size) {
-    u32 loadedFlags;
-
     addr = OotPsp_StripKernelAlias(addr);
 
     if (!OotPsp_IsNativeUserRange(addr, size)) {
@@ -390,10 +388,6 @@ static s32 OotPsp_IsKnownNativePointer(uintptr_t addr, size_t size) {
     }
 
     if (OotPsp_IsRuntimeByteRange((void*)addr, size)) {
-        return true;
-    }
-
-    if (OotPsp_GetLoadedExternalAssetRangeFlags((void*)addr, size, &loadedFlags)) {
         return true;
     }
 

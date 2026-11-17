@@ -47,6 +47,15 @@ not scanned or converted again.
 
 Delete `data/segments/oot_psp_assets.bin` to force a rebuild from the ROM.
 
+Packed textures retain the existing compiler-word layout on disk. The asset
+reader converts only the generated texture/TLUT ranges to N64 byte order before
+publishing them to game memory or logical caches. Partial reads use the original
+texture's word boundaries, including unaligned starts and incomplete final
+words. Existing packed files work without rebuilding. Linked texture refills
+perform the same conversion during startup; generated textures and decoded JPEG
+images already write canonical bytes. Texture consumers read bytes directly and
+do not infer byte order from RAM addresses or loaded-asset flags.
+
 The conversion metadata snapshot is maintained from a private reference build
 with:
 

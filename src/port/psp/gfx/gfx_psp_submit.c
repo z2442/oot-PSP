@@ -30,11 +30,15 @@ extern int ge_list_executed[2];
 
 static unsigned char sVertexArena[GFX_PSP_VERTEX_ARENA_BYTES] __attribute__((aligned(64)));
 static size_t sVertexArenaUsed;
+/* Arena bytes below this offset have been written back to RAM. The arena is a
+ * bump allocator, so every unpublished upload lies in [published, used). */
+static size_t sVertexArenaPublished;
 static unsigned int sPendingDraws;
 static unsigned int sPendingTriangles;
 
 void gfx_psp_submit_reset(void) {
     sVertexArenaUsed = 0;
+    sVertexArenaPublished = 0;
     sPendingDraws = sPendingTriangles = 0;
 }
 
@@ -54,10 +58,21 @@ void* gfx_psp_submit_alloc_vertices(size_t bytes) {
     return result;
 }
 
-void gfx_psp_submit_writeback_vertices(const void* vertices, size_t bytes) {
-    /* Allocations never share a cache line. Publish the entire upload before
-     * its PRIM is appended: font/SDK calls may also advance the GE cursor. */
-    sceKernelDcacheWritebackRange(vertices, (bytes + 63U) & ~(size_t)63U);
+void gfx_psp_submit_publish_vertices(void) {
+    /* The GE executes only up to the stall address, so uploads need to reach
+     * RAM just before a stall update, not when each one is written. One
+     * writeback per publication replaces a kernel call per draw. Allocations
+     * are 64-byte aligned, so the range covers whole cache lines. */
+    if (sVertexArenaUsed > sVertexArenaPublished) {
+        sceKernelDcacheWritebackRange(sVertexArena + sVertexArenaPublished,
+                                      sVertexArenaUsed - sVertexArenaPublished);
+        sVertexArenaPublished = sVertexArenaUsed;
+    }
+}
+
+int gfx_psp_submit_finish(void) {
+    gfx_psp_submit_publish_vertices();
+    return sceGuFinish();
 }
 
 void* gfx_psp_submit_get_memory(int bytes) {
@@ -121,6 +136,7 @@ void gfx_psp_submit_draw_array(int primitive, int format, int count, const void*
     sPendingTriangles += TriangleCount(primitive, count);
     if (gu_object_stack_depth == 0 &&
         (sPendingDraws >= GFX_PSP_GE_BATCH_DRAWS || sPendingTriangles >= GFX_PSP_GE_BATCH_TRIANGLES)) {
+        gfx_psp_submit_publish_vertices();
         sceGeListUpdateStallAddr(ge_list_executed[0], cursor);
         sPendingDraws = sPendingTriangles = 0;
     }

@@ -46,6 +46,8 @@ void sceKernelDcacheWritebackRange(const void* data,unsigned int bytes) {
 }
 int sceGeListUpdateStallAddr(int id,void* end) {
     assert(id==7 && end>=((void*)list) && end<=(void*)(list+sizeof(list)/sizeof(list[0])));
+    // Every arena upload must reach RAM before the GE may execute its draw.
+    assert(sVertexArenaPublished==sVertexArenaUsed);
     published=end; publishedWords=(unsigned int*)end-list; updates++; return 0;
 }
 void sceGuDrawArray(int prim,int format,int count,const void* indices,const void* vertices) {
@@ -58,10 +60,12 @@ static int sColorPixelFormat=3;
 #define BUF_WIDTH 512
 #define GU_LIST_COMMAND_RESERVE 4096
 static int sceGuCheckList(void) { return (gu_list->current-gu_list->start)*sizeof(unsigned); }
-static void sceGuFinish(void) {
+int sceGuFinish(void) {
     *gu_list->current++=0x0f000000;*gu_list->current++=0x0c000000;
-    sceGeListUpdateStallAddr(7,gu_list->current); finishes++;
+    sceGeListUpdateStallAddr(7,gu_list->current); finishes++; return 0;
 }
+// Mirror gfx_scegu.c: every backend finish publishes pending arena uploads.
+#define sceGuFinish gfx_psp_submit_finish
 static void sceGuSync(int mode,int what) {
     (void)mode;(void)what;
     // Delayed GPU reads must see the original immutable uploads at every fence.
@@ -130,12 +134,16 @@ int main(void) {
     assert(gfx_psp_submit_get_memory(0)==NULL && gfx_psp_submit_get_memory(-1)==NULL);
     draw(3);sceGuFinish();assert(updates==1);
     // Uploads are line aligned, immutable and distinct across material passes.
-    reset();unsigned char source[128];memset(source,0x5a,sizeof(source));
+    // They are written back together, once, before the GE can see them.
+    reset();writebacks=0;unsigned char source[128];memset(source,0x5a,sizeof(source));
     void* base=gfx_scegu_upload_vertices(source,65);
-    assert(((uintptr_t)base&63)==0 && uploadSizes[0]==128);
+    assert(((uintptr_t)base&63)==0 && writebacks==0);
     memset(source,0xa5,sizeof(source));void* overlay=gfx_scegu_upload_vertices(source,65);
     assert((unsigned char*)overlay-(unsigned char*)base==128);
-    assert(*(unsigned char*)base==0x5a && *(unsigned char*)overlay==0xa5 && writebacks==2);
+    assert(*(unsigned char*)base==0x5a && *(unsigned char*)overlay==0xa5 && writebacks==0);
+    gfx_psp_submit_publish_vertices();
+    assert(writebacks==1 && uploads[uploadCount-1]==base && uploadSizes[uploadCount-1]==256);
+    gfx_psp_submit_publish_vertices();assert(writebacks==1); // Nothing new to publish.
     assert(gfx_psp_submit_alloc_vertices(0)==NULL);
     assert(gfx_psp_submit_alloc_vertices(GFX_PSP_VERTEX_ARENA_BYTES+1)==NULL);
     // Exhaustion cannot recycle an in-flight upload. The backend fences first.
@@ -155,12 +163,26 @@ int main(void) {
     reset();for (int i=0;i<120;i++) draw(3);
     assert(updates==10);sceGuFinish();assert(updates==11);
     sceGuSync(0,0);
-    printf("GE submit: command parity, 12 draws/220 triangles, arena lifetime, multipass uploads and rollover passed\n");
+    // With an upload per draw, writebacks follow publications, not draws:
+    // 120 kernel writebacks become 10 (plus nothing left for the finish).
+    reset();writebacks=0;
+    for (int i=0;i<120;i++) {
+        void* v=gfx_scegu_upload_vertices(source,108);
+        gfx_psp_submit_draw_array(GU_TRIANGLES,0x123,3,NULL,v);
+        if (uploadCount==32) sceGuSync(0,0); // Keep the stub's record bounded.
+    }
+    assert(updates==10 && writebacks==10);
+    void* tail=gfx_scegu_upload_vertices(source,108);
+    gfx_psp_submit_draw_array(GU_TRIANGLES,0x123,3,NULL,tail);
+    assert(writebacks==10);sceGuFinish();assert(writebacks==11 && updates==11);
+    sceGuSync(0,0);
+    printf("GE submit: command parity, 12 draws/220 triangles, batched writeback, arena lifetime, multipass uploads and rollover passed\n");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='oot-ge-submit-') as directory:
     path=Path(directory)
     (path/'pspgu.h').write_text('''#pragma once
+int sceGuFinish(void);
 #define GU_DIRECT 0
 #define GU_CALL 1
 #define GU_POINTS 0

@@ -25,8 +25,6 @@
 #include "player.h"
 #include "save.h"
 #if PLATFORM_PSP
-#include "oot_psp_asset_loader.h"
-#include "oot_psp_compat.h"
 #include "oot_psp_gfx_ext.h"
 #endif
 
@@ -1249,41 +1247,10 @@ Gfx* Gfx_TextureI8(Gfx* displayListHead, void* texture, s16 textureWidth, s16 te
 }
 
 #if PLATFORM_PSP
-typedef struct InterfacePspTexture {
-    /* 0x00 */ const u8* data;
-    /* 0x04 */ s32 byteSwap;
-} InterfacePspTexture;
-
 static u8 sPspCounterDigitTextures[ARRAY_COUNT(sCounterDigitTextures)]
                                     [gCounterDigit0Tex_WIDTH * gCounterDigit0Tex_HEIGHT * 2]
     __attribute__((aligned(8)));
 static s32 sPspCounterDigitTexturesInitialized = false;
-
-static InterfacePspTexture Interface_GetPspTexture(void* texture) {
-    InterfacePspTexture source;
-    u32 loadedFlags;
-
-    source.data = SEGMENTED_TO_VIRTUAL(texture);
-    source.byteSwap = false;
-
-    if (OotPsp_GetLoadedExternalAssetRangeFlags(source.data, 1, &loadedFlags)) {
-        source.byteSwap = (loadedFlags & OOT_PSP_EXTERNAL_ASSET_NATIVE) != 0;
-    } else if (!OotPsp_IsRuntimeByteRange(source.data, 1)) {
-        source.byteSwap = true;
-    }
-
-    return source;
-}
-
-static u8 Interface_ReadPspTextureByte(InterfacePspTexture texture, size_t offset) {
-    const u8* source = texture.data + offset;
-
-    if (texture.byteSwap) {
-        source = (const u8*)((uintptr_t)source ^ 7U);
-    }
-
-    return *source;
-}
 
 static void Interface_InitPspCounterDigitTextures(void) {
     s32 digit;
@@ -1294,12 +1261,12 @@ static void Interface_InitPspCounterDigitTextures(void) {
     }
 
     for (digit = 0; digit < ARRAY_COUNT(sPspCounterDigitTextures); digit++) {
-        InterfacePspTexture source = Interface_GetPspTexture(COUNTER_DIGIT_TEXTURE(digit));
+        const u8* source = SEGMENTED_TO_VIRTUAL(COUNTER_DIGIT_TEXTURE(digit));
         u8* dst = sPspCounterDigitTextures[digit];
 
         for (texel = 0; texel < gCounterDigit0Tex_WIDTH * gCounterDigit0Tex_HEIGHT; texel++) {
             *dst++ = 255;
-            *dst++ = Interface_ReadPspTextureByte(source, texel);
+            *dst++ = source[texel];
         }
     }
 

@@ -12,8 +12,6 @@
 #define OOT_PSP_ASSET_READ_NOT_EXTERNAL 1
 #define OOT_PSP_EXTERNAL_ASSET_NATIVE 1
 #define OOT_PSP_EXTERNAL_ASSET_TEXTURE_WORDS 2
-/* Audited static mesh assets only; in-place writers must never use this flag. */
-#define OOT_PSP_EXTERNAL_ASSET_IMMUTABLE_MESH 4
 
 typedef struct OotPspExternalAsset {
     uintptr_t vromStart;
@@ -61,18 +59,10 @@ s32 OotPsp_AssetResume(void);
 const char* OotPsp_ResolveRootPath(const char* path, char* buffer, size_t bufferSize);
 uintptr_t OotPsp_NormalizeVrom(uintptr_t vrom);
 void OotPsp_NormalizeRomFile(RomFile* file);
-s32 OotPsp_IsNativeExternalTextureRange(const void* ptr, size_t size);
 s32 OotPsp_IsLoadedNativeExternalAssetRange(const void* ptr, size_t size);
-s32 OotPsp_GetLoadedExternalAssetRangeFlags(const void* ptr, size_t size, u32* flags);
-/* Runtime patches first read original asset bytes, then transform selected
- * ranges into the linked PSP representation. Record properties of that final
- * representation so renderers do not interpret it as raw N64 data. */
-s32 OotPsp_MarkLoadedExternalAssetRangeFlags(const void* ptr, size_t size, u32 flags);
-u32 OotPsp_GetExternalAssetGeneration(void);
 u32 OotPsp_GetExternalAssetRangeSerial(const void* ptr, size_t size);
-s32 OotPsp_GetNativeExternalTextureMappingRange(const void* ptr, uintptr_t* ramStart, uintptr_t* ramEnd);
-s32 OotPsp_GetNativeExternalTextureRangeStart(const void* ptr, size_t size, uintptr_t* ramStart);
-s32 OotPsp_MapNativeExternalTextureByte(const void* ptr, const void** mapped);
+/* Texture and TLUT bytes returned by reads/cache pointers are always in N64
+ * byte order; structured asset fields retain their PSP-native representation. */
 s32 OotPsp_AssetRead(void* ram, uintptr_t vrom, size_t size);
 s32 OotPsp_AssetReadAudio(void* ram, uintptr_t vrom, size_t size);
 s32 OotPsp_AssetReadAudioUrgent(void* ram, uintptr_t vrom, size_t size);

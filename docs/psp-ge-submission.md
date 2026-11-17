@@ -17,10 +17,23 @@ their original behavior. The SDK ABI is checked at compile time on PSP.
 
 Base and fog passes upload into a **2 MiB cached vertex arena**, inspired by
 [Sonic-R-PSP's cached frame arena](https://github.com/ghurone/Sonic-R-PSP/blob/main/src/psp/render_gu.c).
-Each upload gets its own 64-byte-aligned allocation and is written back before
-its draw command becomes visible to the GE. This also makes early publication
-by a font or SDK call safe. Secondary texture and fog passes retain separate
-copies, so changing their UVs or alpha cannot modify a queued base pass.
+Each upload gets its own 64-byte-aligned allocation. Uploads are not written
+back one at a time: the arena is a bump allocator, so everything not yet
+visible to the GE is the single range since the last publication.
+`gfx_psp_submit_publish_vertices` writes that range back with one
+`sceKernelDcacheWritebackRange` immediately before the stall address advances:
+at the 12-draw/220-triangle threshold, in `sceGuFinish` (redirected to
+`gfx_psp_submit_finish` in the backend), and before intraFont, which publishes
+through the SDK. The GE never executes past the stall address, so every draw
+still sees its vertices in RAM. A Gerudo Fortress gprof capture measured about
+11 µs per per-draw writeback call at roughly 300 draws per frame; publication
+batching reduces those kernel calls by about a factor of twelve. Secondary
+texture and fog passes retain separate copies, so changing their UVs or alpha
+cannot modify a queued base pass.
+
+Anything new that can advance the GE stall address outside
+`gfx_psp_submit.c` (another SDK draw/list call, a font library, a call list)
+must call `gfx_psp_submit_publish_vertices` first.
 
 Arena exhaustion, texture-cache eviction and command-list rollover finish and
 synchronize the previous list before recycling storage. Every list restart
