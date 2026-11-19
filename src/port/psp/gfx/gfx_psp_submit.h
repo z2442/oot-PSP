@@ -16,6 +16,11 @@ void* gfx_psp_submit_alloc_vertices(size_t bytes);
  * anything that can advance the GE stall address outside this file (SDK draw,
  * memory or finish calls, intraFont). Draw thresholds and finish do it here. */
 void gfx_psp_submit_publish_vertices(void);
+/* Reserve up to maxBytes for a batch written in place, then commit its final
+ * size before drawing it. Commit before anything else allocates, so the
+ * unused tail returns to the arena. A list reset keeps an open reservation. */
+void* gfx_psp_submit_reserve_vertices(size_t maxBytes);
+void gfx_psp_submit_commit_vertices(size_t bytes);
 int gfx_psp_submit_finish(void);
 void* gfx_psp_submit_get_memory(int bytes);
 void gfx_psp_submit_draw_array(int primitive, int format, int count, const void* indices, const void* vertices);

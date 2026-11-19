@@ -1,4 +1,5 @@
 #include "oot_psp_video_thread.h"
+#include "oot_psp_zone_profile.h"
 
 #include <pspkernel.h>
 #include <stdbool.h>
@@ -65,6 +66,7 @@ static void OotPspVideoThread_Init(void) {
 }
 
 void OotPspVideoThread_Wait(void) {
+    OOT_PSP_ZONE(OOT_PSP_ZONE_WAIT);
     if (sFramePending) {
         sceKernelWaitSema(sCompleteSema, 1, NULL);
         sFramePending = false;

@@ -20,6 +20,7 @@ dispatch = source.split("            case G_NOOP:\n", 1)[1].split("             
 macro = extensions[extensions.index("#define gOotPspShadowMask("):extensions.rindex("#endif")]
 preamble = r'''
 #include <assert.h>
+#define OOT_PSP_ZONE(zone) ((void)0) /* Release builds compile zones out. */
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>

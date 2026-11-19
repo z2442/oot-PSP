@@ -24,6 +24,7 @@ emit = source[start:end]
 
 preamble = r'''
 #include <assert.h>
+#define OOT_PSP_ZONE(zone) ((void)0) /* Release builds compile zones out. */
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -79,6 +80,24 @@ static void fog(float* buffer,size_t bytes,size_t tris,bool textured,bool restor
     trace.fogCalls++;
     trace.fogBias=appliedDepthBias;
     if (alpha) { trace.visibleFogCalls++; trace.fogHash=trace.fogHash*31+hash(buffer,bytes); }
+}
+/* In-place arena batches: the base pass draws buf_vbo itself, and the
+ * two-texture overlay pass edits a separate copy. */
+static const void* queuedBatch;
+static size_t queuedBatchBytes;
+static unsigned queuedBatchHash;
+static psp_fast_t overlayCopy[12];
+void gfx_scegu_draw_batch_triangles(const void* vertices,size_t bytes,size_t tris) {
+    queuedBatch=vertices; queuedBatchBytes=bytes; queuedBatchHash=hash(vertices,bytes);
+    base((float*)vertices,bytes,tris);
+}
+void* gfx_scegu_copy_batch_vertices(const void* vertices,size_t bytes) {
+    assert(vertices==queuedBatch && bytes<=sizeof(overlayCopy));
+    memcpy(overlayCopy,vertices,bytes); return overlayCopy;
+}
+void gfx_scegu_draw_copied_triangles(const void* vertices,size_t tris) {
+    assert(vertices==overlayCopy);
+    base((float*)vertices,tris*3*sizeof(psp_fast_t),tris);
 }
 static void set_alpha(bool b) { (void)b; }
 static void select_texture(int slot,unsigned id) { (void)slot;(void)id; }
@@ -137,6 +156,8 @@ int main(void) {
             prepare(mode,values[a],mix,variant==1,variant==2);
             bool visible=sBatchHasVisibleFog;
             gfx_flush();
+            // The queued base batch must be unchanged after every later pass.
+            assert(hash(queuedBatch,queuedBatchBytes)==queuedBatchHash);
             assert(trace.baseCalls==expected.baseCalls && trace.baseHash==expected.baseHash);
             assert(trace.visibleFogCalls==expected.visibleFogCalls && trace.fogHash==expected.fogHash);
             assert(trace.fogCalls==(visible ? expected.fogCalls : 0));

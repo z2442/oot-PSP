@@ -37,6 +37,7 @@
 #include "psp_texture_manager.h"
 #include "gfx_fast3d.h"
 #include "gfx_psp_submit.h"
+#include "oot_psp_zone_profile.h"
 
 /* Limit batching to this backend, including its shadow pass. SDK/intraFont
  * entry points retain their normal behavior; all arena uploads are already
@@ -165,7 +166,10 @@ static void gfx_scegu_reserve_list_memory(size_t dataSize) {
     }
 
     sceGuFinish();
-    sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
+    {
+        OOT_PSP_ZONE(OOT_PSP_ZONE_WAIT);
+        sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
+    }
     gfx_scegu_start_list();
 }
 
@@ -174,7 +178,10 @@ void gfx_scegu_sync_texture_cache(void) {
      * sure every draw that references the old contents has completed before
      * the allocator overwrites them, then continue the frame in a fresh list. */
     sceGuFinish();
-    sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
+    {
+        OOT_PSP_ZONE(OOT_PSP_ZONE_WAIT);
+        sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
+    }
     gfx_scegu_start_list();
 }
 
@@ -478,7 +485,10 @@ void gfx_scegu_apply_vismono(uint8_t primR, uint8_t primG, uint8_t primB, uint8_
      * filters the active GU buffer. A new direct list preserves the GE state
      * and lets later overlay commands continue in their original order. */
     sceGuFinish();
-    sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
+    {
+        OOT_PSP_ZONE(OOT_PSP_ZONE_WAIT);
+        sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
+    }
 
     framebuffer = gfx_scegu_vram_cpu_addr(sDrawBuffer);
 
@@ -1820,6 +1830,70 @@ static void gfx_scegu_draw_triangles(float buf_vbo[], UNUSED size_t buf_vbo_len,
                    GU_VERTEX_32BITF | GU_TRANSFORM_3D, 3 * buf_vbo_num_tris, 0, buf);
 }
 
+/* 3D batches are emitted straight into the cached vertex arena instead of a
+ * static staging buffer that was then copied (~280 KB per frame in a busy
+ * scene). The renderer reserves a maximum-size batch, writes vertices in
+ * place, and commits the used size when the batch is drawn. */
+void *gfx_scegu_reserve_batch_vertices(size_t maxBytes) {
+    void *vertices = gfx_psp_submit_reserve_vertices(maxBytes);
+
+    if (vertices == NULL) {
+        /* No allocation can be recycled while an older PRIM still reads it. */
+        gfx_scegu_sync_texture_cache();
+        vertices = gfx_psp_submit_reserve_vertices(maxBytes);
+    }
+    if (vertices == NULL) {
+        abort();
+    }
+    return vertices;
+}
+
+static void gfx_scegu_draw_arena_triangles(const void *vertices, size_t numTris) {
+    if (!is_shader_enabled(cur_shader->shader_id)) {
+        gfx_scegu_apply_shader(get_shader_from_id(get_shader_remap(cur_shader->shader_id)));
+    }
+    sceGuDrawArray(GU_TRIANGLES, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_NORMAL_32BITF |
+                   GU_VERTEX_32BITF | GU_TRANSFORM_3D, 3 * numTris, 0, vertices);
+}
+
+/* Draw the open reservation. Command-list space is secured first: a list
+ * rollover resets the arena, which keeps an open reservation but would
+ * reclaim a committed one before its draw is queued. */
+void gfx_scegu_draw_batch_triangles(const void *vertices, size_t bytes, size_t numTris) {
+    gfx_scegu_reserve_list_memory(0);
+    gfx_psp_submit_commit_vertices(bytes);
+    gfx_scegu_draw_arena_triangles(vertices, numTris);
+}
+
+/* A separate arena copy of a queued batch, for passes that change UVs or
+ * alpha. The caller edits the copy, then draws it with the function below. */
+void *gfx_scegu_copy_batch_vertices(const void *vertices, size_t bytes) {
+    void *copy;
+
+    gfx_scegu_reserve_list_memory(0);
+    copy = gfx_psp_submit_alloc_vertices(bytes);
+    if (copy == NULL) {
+        gfx_scegu_sync_texture_cache();
+        copy = gfx_psp_submit_alloc_vertices(bytes);
+    }
+    if (copy == NULL) {
+        abort();
+    }
+    /* A rollover above resets the arena while the source batch is still
+     * being read, so the copy may now start inside it. */
+    if (((const char *)copy < (const char *)vertices + bytes) &&
+        ((const char *)vertices < (const char *)copy + bytes)) {
+        memmove(copy, vertices, bytes);
+    } else {
+        OotPsp_MemcpyVfpu(copy, vertices, bytes);
+    }
+    return copy;
+}
+
+void gfx_scegu_draw_copied_triangles(const void *vertices, size_t numTris) {
+    gfx_scegu_draw_arena_triangles(vertices, numTris);
+}
+
 /* Retained buffers stay pinned until the next frame joins the video worker. */
 void gfx_scegu_draw_native_mesh(const void* vertices, const uint16_t* indices,
                                unsigned int count, const float model[4][4], uint32_t cull) {
@@ -2017,7 +2091,10 @@ static void gfx_scegu_configure_gu_buffers(void) {
     sceGuTexOffset(0.0f, 0.0f);
     sceGuTexWrap(GU_REPEAT, GU_REPEAT);
     sceGuFinish();
-    sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
+    {
+        OOT_PSP_ZONE(OOT_PSP_ZONE_WAIT);
+        sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
+    }
     sceDisplayWaitVblankStart();
     sceGuDisplay(GU_TRUE);
 }
@@ -2086,7 +2163,10 @@ int gfx_scegu_apply_video_mode(void) {
         return -1000;
     }
 
-    sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
+    {
+        OOT_PSP_ZONE(OOT_PSP_ZONE_WAIT);
+        sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
+    }
     if (sPendingBuffer != NULL) {
         sceDisplayWaitVblankStart();
         sPendingBuffer = NULL;
@@ -2362,7 +2442,10 @@ static void gfx_scegu_present_interlaced(void) {
                    (void *)(dst + ((uintptr_t)BUF_WIDTH * TV_INTERLACED_FIELD_OFFSET * sColorPixelSize)));
     sceGuTexSync();
     sceGuFinish();
-    sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
+    {
+        OOT_PSP_ZONE(OOT_PSP_ZONE_WAIT);
+        sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
+    }
 
     sDrawBuffer = sPrimaryBuffer;
     sDisplayBuffer = sSecondaryBuffer;
@@ -2401,7 +2484,10 @@ static int sFrameVSync;
 static void gfx_scegu_complete_frame(void) {
     void *previousDrawBuffer = sDrawBuffer;
 
-    sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
+    {
+        OOT_PSP_ZONE(OOT_PSP_ZONE_WAIT);
+        sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
+    }
     if (sColorBufferCount == 3) {
         gfx_scegu_present_triple(sFrameVSync);
         return;

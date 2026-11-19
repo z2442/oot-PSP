@@ -30,6 +30,7 @@
 #if defined(TARGET_PSP)
 #include "buffers.h"
 #include "oot_psp_frame_interpolation.h"
+#include "oot_psp_zone_profile.h"
 #endif
 #include "oot_port_macros.h"
 #include "oot_psp_asset_loader.h"
@@ -816,7 +817,15 @@ typedef union psp_fog_buffer_t {
 } psp_fog_buffer_t;
 typedef char psp_fog_color_t_size_check[(sizeof(psp_fog_color_t) == 16) ? 1 : -1];
 typedef char psp_fog_textured_t_size_check[(sizeof(psp_fog_textured_t) == 24) ? 1 : -1];
-static psp_fast_t buf_vbo[MAX_BUFFERED  * 3] __attribute__ ((aligned (32))); // 3 vertices in a triangle and 26 floats per vtx
+/* The current 3D batch is written directly into the GE vertex arena: buf_vbo
+ * points at an open arena reservation from the first emitted polygon until
+ * gfx_flush draws it. There is no staging copy. */
+#define GFX_BATCH_VERTEX_CAPACITY (MAX_BUFFERED * 3)
+static psp_fast_t* buf_vbo;
+extern void* gfx_scegu_reserve_batch_vertices(size_t maxBytes);
+extern void gfx_scegu_draw_batch_triangles(const void* vertices, size_t bytes, size_t numTris);
+extern void* gfx_scegu_copy_batch_vertices(const void* vertices, size_t bytes);
+extern void gfx_scegu_draw_copied_triangles(const void* vertices, size_t numTris);
 static psp_uv_t buf_vbo_tex1[MAX_BUFFERED * 3] __attribute__((aligned(32)));
 static psp_fog_buffer_t buf_vbo_fog __attribute__((aligned(32)));
 static uint8_t buf_vbo_fog_tex1_alpha[MAX_BUFFERED * 3] __attribute__((aligned(32)));
@@ -1397,6 +1406,7 @@ void gfx_clip_single_vert(struct LoadedVertex* p_p_vertices, size_t* p_num_verti
 
 static void gfx_flush(void) {
     if (buf_vbo_len > 0) {
+        OOT_PSP_ZONE(OOT_PSP_ZONE_RENDER_FLUSH);
         //int num = buf_vbo_num_tris;
         //unsigned long t0 = get_time();
 #if defined(TARGET_PSP)
@@ -1450,13 +1460,17 @@ static void gfx_flush(void) {
 #endif
         gfx_rapi->set_depth_bias(sBatchDepthBias);
         gfx_scegu_set_lighting(sBatchUsesLighting ? &sBatchLighting : NULL);
-        gfx_rapi->draw_triangles((float *)buf_vbo, buf_vbo_len, buf_vbo_num_tris);
 #if defined(TARGET_PSP)
+        gfx_scegu_draw_batch_triangles(buf_vbo, buf_vbo_len, buf_vbo_num_tris);
         if (twoTextureBlend) {
+            /* The base pass is queued from the arena batch itself, so the
+             * overlay pass edits a separate copy. */
+            psp_fast_t* overlay = gfx_scegu_copy_batch_vertices(buf_vbo, buf_vbo_len);
+
             for (size_t i = 0; i < buf_num_vert; i++) {
-                buf_vbo[i].u = buf_vbo_tex1[i].u;
-                buf_vbo[i].v = buf_vbo_tex1[i].v;
-                buf_vbo[i].color.a = buf_vbo_tex1[i].alpha;
+                overlay[i].u = buf_vbo_tex1[i].u;
+                overlay[i].v = buf_vbo_tex1[i].v;
+                overlay[i].color.a = buf_vbo_tex1[i].alpha;
             }
 
             /*
@@ -1467,7 +1481,7 @@ static void gfx_flush(void) {
              * programmed LOD fraction.
              */
             gfx_rapi->select_texture(1, rendering_state.textures[1]->texture_id);
-            gfx_rapi->draw_triangles((float *)buf_vbo, buf_vbo_len, buf_vbo_num_tris);
+            gfx_scegu_draw_copied_triangles(overlay, buf_vbo_num_tris);
             gfx_rapi->set_use_alpha(rendering_state.alpha_blend);
             gfx_rapi->select_texture(0, rendering_state.textures[0]->texture_id);
             rendering_state.bound_texture_id = rendering_state.textures[0]->texture_id;
@@ -2569,6 +2583,7 @@ static void import_texture_ci8(int tile) {
 }
 
 static void import_texture(int tile) {
+    OOT_PSP_ZONE(OOT_PSP_ZONE_RENDER_TEX_IMPORT);
     const TextureTileState* tileState = gfx_get_texture_tile(tile);
     uint8_t fmt = tileState->fmt;
     uint8_t siz = tileState->siz;
@@ -3186,6 +3201,7 @@ static void gfx_prepare_tri_pipeline_state(void) {
     if (!rendering_state.tri_pipeline_dirty) {
         return;
     }
+    OOT_PSP_ZONE(OOT_PSP_ZONE_RENDER_PREPARE);
 
 #if defined(TARGET_PSP)
     const bool flame_texture_atlas =
@@ -4448,7 +4464,10 @@ static void gfx_sp_triangles(uint32_t packed0, uint32_t packed1, uint8_t triangl
     size_t clipped_vertices_num = 3;
     /* A triangle clipped against six planes can become a nine-vertex polygon. */
     if (clip_flags & CLIP_TEST_FLAGS) {
-        gfx_clip_single_vert(sClippedVertices, &clipped_vertices_num, v_arr, clip_flags);
+        {
+            OOT_PSP_ZONE(OOT_PSP_ZONE_RENDER_CLIP);
+            gfx_clip_single_vert(sClippedVertices, &clipped_vertices_num, v_arr, clip_flags);
+        }
 
         if (!clipped_vertices_num) {
             /* No idea if this is possible */
@@ -4491,7 +4510,7 @@ static void gfx_sp_triangles(uint32_t packed0, uint32_t packed1, uint8_t triangl
 #endif
 
 #if defined(TARGET_PSP)
-    if ((buf_num_vert + clipped_vertices_num) > (sizeof(buf_vbo) / sizeof(buf_vbo[0]))) {
+    if ((buf_num_vert + clipped_vertices_num) > GFX_BATCH_VERTEX_CAPACITY) {
         gfx_flush();
     }
 #endif
@@ -4506,13 +4525,27 @@ static void gfx_sp_triangles(uint32_t packed0, uint32_t packed1, uint8_t triangl
         sBatchDepthBias = bias;
     }
 
-    if (gfx_emit_simple_vertices(clipped_vertices, clipped_vertices_num, state)) {
+#if defined(TARGET_PSP)
+    /* Every flush for this polygon has happened above; open the arena batch
+     * the emitters write into. */
+    if (buf_num_vert == 0) {
+        buf_vbo = gfx_scegu_reserve_batch_vertices(sizeof(psp_fast_t) * GFX_BATCH_VERTEX_CAPACITY);
+    }
+#endif
+    bool emittedSimple;
+    {
+        OOT_PSP_ZONE(OOT_PSP_ZONE_RENDER_EMIT);
+        emittedSimple = gfx_emit_simple_vertices(clipped_vertices, clipped_vertices_num, state);
+        if (!emittedSimple) {
+            gfx_emit_general_vertices(clipped_vertices, clipped_vertices_num, state);
+        }
+    }
+    if (emittedSimple) {
         buf_vbo_num_tris += new_tri_count;
         if (buf_vbo_num_tris >= MAX_BUFFERED) gfx_flush();
         continue;
     }
 
-    gfx_emit_general_vertices(clipped_vertices, clipped_vertices_num, state);
     buf_vbo_num_tris += new_tri_count;
     if (buf_vbo_num_tris >= MAX_BUFFERED) {
         gfx_flush();
@@ -6446,6 +6479,7 @@ static inline void* gfx_runtime_symbol_addr(uintptr_t addr) {
 }
 
 static __attribute__((noinline)) void *gfx_resolve_segmented_address_slow(uintptr_t w1) {
+    OOT_PSP_ZONE(OOT_PSP_ZONE_RENDER_SEG_ADDR);
     void* runtimeSymbol = gfx_runtime_symbol_addr(w1);
 
     if (runtimeSymbol != NULL) {
@@ -7202,13 +7236,15 @@ static void gfx_run_dl(Gfx* cmd) {
         
         switch (opcode) {
             // RSP commands:
-            case G_MTX:
+            case G_MTX: {
+                OOT_PSP_ZONE(OOT_PSP_ZONE_RENDER_MTX);
 #ifdef F3DEX_GBI_2
                 gfx_sp_matrix(C0(0, 8) ^ G_MTX_PUSH, (const int32_t *) seg_addr(cmd->words.w1));
 #else
                 gfx_sp_matrix(C0(16, 8), (const int32_t *) seg_addr(cmd->words.w1));
 #endif
                 break;
+            }
             case (uint8_t)G_POPMTX:
 #ifdef F3DEX_GBI_2
                 gfx_sp_pop_matrix(cmd->words.w1 / 64);
@@ -7257,10 +7293,18 @@ static void gfx_run_dl(Gfx* cmd) {
                     continue;
                 }
                 break;
-            case G_VTX:
-                if (gfx_native_try(&cmd)) continue;
+            case G_VTX: {
+                bool nativeMesh;
+                {
+                    OOT_PSP_ZONE(OOT_PSP_ZONE_RENDER_NATIVE_MESH);
+                    nativeMesh = gfx_native_try(&cmd);
+                }
+                if (nativeMesh) continue;
+            }
+            {
 #ifdef F3DEX_GBI_2
 #if defined(TARGET_PSP)
+                OOT_PSP_ZONE(OOT_PSP_ZONE_RENDER_VTX);
                 if (!gfx_sp_vertex_f3dex2(cmd->words.w0, cmd->words.w1)) {
                     return;
                 }
@@ -7279,6 +7323,7 @@ static void gfx_run_dl(Gfx* cmd) {
                 }
 #endif
                 break;
+            }
             case (uint8_t)G_CULLDL:
             {
                 uint32_t firstVertex;
@@ -7349,7 +7394,8 @@ static void gfx_run_dl(Gfx* cmd) {
                 gfx_sp_geometry_mode(cmd->words.w1, 0);
                 break;
 #endif
-            case (uint8_t)G_TRI1:
+            case (uint8_t)G_TRI1: {
+                OOT_PSP_ZONE(OOT_PSP_ZONE_RENDER_TRI);
 #ifdef F3DEX_GBI_2
                 gfx_sp_triangles(cmd->words.w0, 0, 1);
 #elif defined(F3DEX_GBI) || defined(F3DLP_GBI)
@@ -7358,15 +7404,20 @@ static void gfx_run_dl(Gfx* cmd) {
                 gfx_sp_triangles(cmd->words.w1, 0, 1);
 #endif
                 break;
+            }
 #if defined(F3DEX_GBI_2) || defined(F3DEX_GBI) || defined(F3DLP_GBI)
-            case (uint8_t)G_TRI2:
+            case (uint8_t)G_TRI2: {
+                OOT_PSP_ZONE(OOT_PSP_ZONE_RENDER_TRI);
                 gfx_sp_triangles(cmd->words.w0, cmd->words.w1, 2);
                 break;
+            }
 #endif
 #ifdef F3DEX_GBI_2
-            case (uint8_t)G_QUAD:
+            case (uint8_t)G_QUAD: {
+                OOT_PSP_ZONE(OOT_PSP_ZONE_RENDER_TRI);
                 gfx_sp_triangles(cmd->words.w0, cmd->words.w1, 2);
                 break;
+            }
 #endif
             case (uint8_t)G_SETOTHERMODE_L:
 #ifdef F3DEX_GBI_2
@@ -7397,24 +7448,36 @@ static void gfx_run_dl(Gfx* cmd) {
             case G_RDPSETOTHERMODE:
                 gfx_dp_set_other_mode(cmd->words.w0 & 0x00FFFFFFU, cmd->words.w1);
                 break;
-            case G_SETTIMG:
+            case G_SETTIMG: {
+                OOT_PSP_ZONE(OOT_PSP_ZONE_RENDER_TEX_CMDS);
                 gfx_dp_set_texture_image(C0(21, 3), C0(19, 2), C0(0, 12) + 1, seg_addr(cmd->words.w1));
                 break;
-            case G_LOADBLOCK:
+            }
+            case G_LOADBLOCK: {
+                OOT_PSP_ZONE(OOT_PSP_ZONE_RENDER_TEX_CMDS);
                 gfx_dp_load_block(C1(24, 3), C0(12, 12), C0(0, 12), C1(12, 12), C1(0, 12));
                 break;
-            case G_LOADTILE:
+            }
+            case G_LOADTILE: {
+                OOT_PSP_ZONE(OOT_PSP_ZONE_RENDER_TEX_CMDS);
                 gfx_dp_load_tile(C1(24, 3), C0(12, 12), C0(0, 12), C1(12, 12), C1(0, 12));
                 break;
-            case G_SETTILE:
+            }
+            case G_SETTILE: {
+                OOT_PSP_ZONE(OOT_PSP_ZONE_RENDER_TEX_CMDS);
                 gfx_dp_set_tile(C0(21, 3), C0(19, 2), C0(9, 9), C0(0, 9), C1(24, 3), C1(20, 4), C1(18, 2), C1(14, 4), C1(10, 4), C1(8, 2), C1(4, 4), C1(0, 4));
                 break;
-            case G_SETTILESIZE:
+            }
+            case G_SETTILESIZE: {
+                OOT_PSP_ZONE(OOT_PSP_ZONE_RENDER_TEX_CMDS);
                 gfx_dp_set_tile_size(C1(24, 3), C0(12, 12), C0(0, 12), C1(12, 12), C1(0, 12));
                 break;
-            case G_LOADTLUT:
+            }
+            case G_LOADTLUT: {
+                OOT_PSP_ZONE(OOT_PSP_ZONE_RENDER_TEX_CMDS);
                 gfx_dp_load_tlut(C1(24, 3), C1(14, 10));
                 break;
+            }
             case G_SETENVCOLOR:
                 gfx_dp_set_env_color(C1(24, 8), C1(16, 8), C1(8, 8), C1(0, 8));
                 break;
@@ -7430,9 +7493,11 @@ static void gfx_run_dl(Gfx* cmd) {
             case G_SETPRIMDEPTH:
                 gfx_dp_set_prim_depth(C1(16, 16));
                 break;
-            case G_SETCOMBINE:
+            case G_SETCOMBINE: {
+                OOT_PSP_ZONE(OOT_PSP_ZONE_RENDER_COMBINE);
                 gfx_dp_set_combine(cmd->words.w0, cmd->words.w1);
                 break;
+            }
             // G_SETPRIMCOLOR, G_CCMUX_PRIMITIVE, G_ACMUX_PRIMITIVE, is used by Goddard
             // G_CCMUX_TEXEL1, LOD_FRACTION is used in Bowser room 1
             case G_TEXRECT:
@@ -7464,6 +7529,7 @@ static void gfx_run_dl(Gfx* cmd) {
                 dsdx = C1(16, 16);
                 dtdy = C1(0, 16);
 #endif
+                OOT_PSP_ZONE(OOT_PSP_ZONE_RENDER_RECT);
                 gfx_dp_texture_rectangle(ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy, opcode == G_TEXRECTFLIP);
                 break;
             }
@@ -7476,12 +7542,16 @@ static void gfx_run_dl(Gfx* cmd) {
                 ++cmd;
                 ulx = (int32_t)(C0(0, 24) << 8) >> 8;
                 uly = (int32_t)(C1(0, 24) << 8) >> 8;
+                OOT_PSP_ZONE(OOT_PSP_ZONE_RENDER_RECT);
                 gfx_dp_fill_rectangle(ulx, uly, lrx, lry);
                 break;
             }
 #else
+            {
+                OOT_PSP_ZONE(OOT_PSP_ZONE_RENDER_RECT);
                 gfx_dp_fill_rectangle(C1(12, 12), C1(0, 12), C0(12, 12), C0(0, 12));
                 break;
+            }
 #endif
             case G_SETSCISSOR:
                 gfx_dp_set_scissor(C1(24, 2), C0(12, 12), C0(0, 12), C1(12, 12), C1(0, 12));
@@ -7612,6 +7682,7 @@ struct GfxRenderingAPI *gfx_get_current_rendering_api(void) {
 }
 
 void gfx_start_frame(void) {
+    OOT_PSP_ZONE(OOT_PSP_ZONE_RENDER_FRAME);
     //sceIoWrite(1, "----START FRAME!\n", 18);
 #if defined(TARGET_PSP)
     /* The previous tick's GE/presentation waits ran on the video thread while
@@ -7646,6 +7717,7 @@ void gfx_start_frame(void) {
 }
 
 void gfx_run(Gfx *commands) {
+    OOT_PSP_ZONE(OOT_PSP_ZONE_RENDER_FRAME);
 #if defined(TARGET_PSP) && defined(OOTDEBUG)
     uint64_t displayListStartUsec;
     uint64_t displayListEndUsec;
@@ -7672,8 +7744,11 @@ void gfx_run(Gfx *commands) {
 #if defined(TARGET_PSP) && defined(OOTDEBUG)
     displayListStartUsec = OotPspPerformance_Now();
 #endif
-    gfx_run_dl(commands);
-    gfx_flush();
+    {
+        OOT_PSP_ZONE(OOT_PSP_ZONE_RENDER_DL);
+        gfx_run_dl(commands);
+        gfx_flush();
+    }
 #if defined(TARGET_PSP) && defined(OOTDEBUG)
     displayListEndUsec = OotPspPerformance_Now();
 #endif
@@ -7693,7 +7768,8 @@ void gfx_run(Gfx *commands) {
 }
 
 void gfx_end_frame(void) {
-    
+    OOT_PSP_ZONE(OOT_PSP_ZONE_RENDER_FRAME);
+    OotPspZoneProfile_FrameRendered();
     //sceIoWrite(1, "----END FRAME!\n", 16);
     if (!dropped_frame) {
         gfx_rapi->finish_render();

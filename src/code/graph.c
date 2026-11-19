@@ -35,6 +35,7 @@
 #include "oot_psp_video.h"
 #include "oot_psp_video_thread.h"
 #include "oot_psp_performance.h"
+#include "oot_psp_zone_profile.h"
 #endif
 
 #define GFXPOOL_HEAD_MAGIC 0x1234
@@ -399,7 +400,14 @@ void Graph_Update(GraphicsContext* gfxCtx, GameState* gameState) {
     }
 #endif
     GameState_ReqPadData(gameState);
+#if PLATFORM_PSP
+    {
+        OOT_PSP_ZONE(OOT_PSP_ZONE_GAME_UPDATE);
+        GameState_Update(gameState);
+    }
+#else
     GameState_Update(gameState);
+#endif
 #if PLATFORM_PSP
     OotPspFrameInterpolation_End();
 #endif

@@ -11,6 +11,7 @@ source = (ROOT/'src/port/psp/sched_psp.c').read_text()
 source = re.sub(r'^#include [^\n]+\n', '', source, flags=re.M)
 stubs = r'''
 #include <assert.h>
+#define OOT_PSP_ZONE(zone) ((void)0) /* Release builds compile zones out. */
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>

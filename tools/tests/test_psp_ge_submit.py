@@ -17,6 +17,7 @@ def function(name):
 
 stubs = r'''
 #include <assert.h>
+#define OOT_PSP_ZONE(zone) ((void)0) /* Release builds compile zones out. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -47,7 +48,9 @@ void sceKernelDcacheWritebackRange(const void* data,unsigned int bytes) {
 int sceGeListUpdateStallAddr(int id,void* end) {
     assert(id==7 && end>=((void*)list) && end<=(void*)(list+sizeof(list)/sizeof(list[0])));
     // Every arena upload must reach RAM before the GE may execute its draw.
-    assert(sVertexArenaPublished==sVertexArenaUsed);
+    // Only an open (not yet drawable) batch may remain unpublished.
+    if (sReserveOpen) assert(sVertexArenaPublished==sReserveStart);
+    else assert(sVertexArenaPublished==sVertexArenaUsed);
     published=end; publishedWords=(unsigned int*)end-list; updates++; return 0;
 }
 void sceGuDrawArray(int prim,int format,int count,const void* indices,const void* vertices) {
@@ -176,7 +179,58 @@ int main(void) {
     gfx_psp_submit_draw_array(GU_TRIANGLES,0x123,3,NULL,tail);
     assert(writebacks==10);sceGuFinish();assert(writebacks==11 && updates==11);
     sceGuSync(0,0);
-    printf("GE submit: command parity, 12 draws/220 triangles, batched writeback, arena lifetime, multipass uploads and rollover passed\n");
+    // In-place batches: reserve, write, commit, draw.
+    reset();writebacks=0;
+    unsigned char* before=gfx_psp_submit_alloc_vertices(100); // Unrelated earlier upload.
+    unsigned char* batch=gfx_psp_submit_reserve_vertices(4096);
+    assert(batch==before+128 && sReserveOpen && sVertexArenaUsed==128+4096);
+    memset(batch,0x11,96);
+    // Publishing while the batch is open writes back what precedes it, never
+    // the batch itself, and does not mark the batch published.
+    gfx_psp_submit_publish_vertices();
+    assert(writebacks==1 && uploads[uploadCount-1]==before && uploadSizes[uploadCount-1]==128);
+    assert(sVertexArenaPublished==128);
+    memset(batch+96,0x22,96); // Still writing after that publication.
+    gfx_psp_submit_commit_vertices(192);
+    assert(!sReserveOpen && sVertexArenaUsed==128+192); // Tail returned to the arena.
+    draw(3);for (int i=0;i<11;i++) draw(3); // Threshold publication after commit.
+    assert(writebacks==2 && uploads[uploadCount-1]==batch && uploadSizes[uploadCount-1]==192);
+    assert(batch[0]==0x11 && batch[191]==0x22);
+    sceGuFinish();sceGuSync(0,0);
+    // An allocation made while a batch is open lands after its maximum
+    // extent; commit then keeps the tail rather than freeing live memory.
+    reset();writebacks=0;
+    batch=gfx_psp_submit_reserve_vertices(1024);
+    unsigned char* during=gfx_psp_submit_alloc_vertices(64);
+    assert(during==batch+1024);
+    gfx_psp_submit_publish_vertices(); // Allocation after the batch is written back...
+    assert(writebacks==1 && uploads[uploadCount-1]==during && sVertexArenaPublished==0);
+    gfx_psp_submit_commit_vertices(64);
+    assert(sVertexArenaUsed==1024+64); // ...and nothing is trimmed from under it.
+    gfx_psp_submit_publish_vertices();
+    assert(writebacks==2 && uploads[uploadCount-1]==batch && uploadSizes[uploadCount-1]==1024+64);
+    sceGuFinish();sceGuSync(0,0);
+    // A command-list rollover with a batch open keeps the batch's storage.
+    reset();
+    gfx_psp_submit_alloc_vertices(256);
+    batch=gfx_psp_submit_reserve_vertices(512);
+    assert(batch==sVertexArena+256);
+    gu_list->current=list+sizeof(list)/sizeof(list[0])-16;
+    gfx_scegu_reserve_list_memory(0); // Finish, sync, restart, reset.
+    assert(sReserveOpen && sVertexArenaUsed==256+512 && sVertexArenaPublished==256);
+    unsigned char* after=gfx_psp_submit_alloc_vertices(64);
+    assert(after==batch+512); // Cannot overlap the open batch.
+    gfx_psp_submit_commit_vertices(128);
+    assert(sVertexArenaUsed==256+512+64);
+    // A second reservation releases an abandoned one first.
+    reset();
+    batch=gfx_psp_submit_reserve_vertices(512);
+    unsigned char* again=gfx_psp_submit_reserve_vertices(512);
+    assert(again==batch && sReserveOpen && sVertexArenaUsed==512);
+    gfx_psp_submit_commit_vertices(0);assert(sVertexArenaUsed==0);
+    assert(gfx_psp_submit_reserve_vertices(GFX_PSP_VERTEX_ARENA_BYTES+1)==NULL && !sReserveOpen);
+    sceGuFinish();sceGuSync(0,0);
+    printf("GE submit: command parity, 12 draws/220 triangles, batched writeback, in-place batches, arena lifetime, multipass uploads and rollover passed\n");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='oot-ge-submit-') as directory:

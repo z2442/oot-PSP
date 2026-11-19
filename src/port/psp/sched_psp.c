@@ -1,3 +1,4 @@
+#include "oot_psp_zone_profile.h"
 #include "sched.h"
 
 #include "array_count.h"
@@ -219,7 +220,10 @@ void Sched_Notify(Scheduler* sc) {
 #endif
                     /* Pace before rendering so each intermediate frame has its
                      * own deadline. Overruns rebase without running catch-up ticks. */
-                    SchedPsp_PaceGfxTask(updateRate / passes);
+                    {
+                        OOT_PSP_ZONE(OOT_PSP_ZONE_WAIT);
+                        SchedPsp_PaceGfxTask(updateRate / passes);
+                    }
 #if defined(OOTDEBUG)
                     OotPspPerformance_RecordPacing(OotPspPerformance_Now() - paceStartUsec);
 #endif

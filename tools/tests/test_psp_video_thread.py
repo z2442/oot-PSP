@@ -19,6 +19,8 @@ def function(source, name):
 
 stubs = r'''
 #include <assert.h>
+#define OOT_PSP_ZONE(zone) ((void)0) /* Release builds compile zones out. */
+#define OotPspZoneProfile_FrameRendered() ((void)0)
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>

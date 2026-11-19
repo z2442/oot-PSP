@@ -33,12 +33,24 @@ static size_t sVertexArenaUsed;
 /* Arena bytes below this offset have been written back to RAM. The arena is a
  * bump allocator, so every unpublished upload lies in [published, used). */
 static size_t sVertexArenaPublished;
+/* An open reservation is a batch the renderer is still writing in place:
+ * [start, end) is held at its maximum size until commit trims it. */
+static int sReserveOpen;
+static size_t sReserveStart;
+static size_t sReserveEnd;
 static unsigned int sPendingDraws;
 static unsigned int sPendingTriangles;
 
 void gfx_psp_submit_reset(void) {
-    sVertexArenaUsed = 0;
-    sVertexArenaPublished = 0;
+    if (sReserveOpen) {
+        /* The GE is idle, so everything else is dead, but the open batch is
+         * still being written. Keep its region; reclaim the rest next time. */
+        sVertexArenaUsed = sReserveEnd;
+        sVertexArenaPublished = sReserveStart;
+    } else {
+        sVertexArenaUsed = 0;
+        sVertexArenaPublished = 0;
+    }
     sPendingDraws = sPendingTriangles = 0;
 }
 
@@ -63,11 +75,58 @@ void gfx_psp_submit_publish_vertices(void) {
      * RAM just before a stall update, not when each one is written. One
      * writeback per publication replaces a kernel call per draw. Allocations
      * are 64-byte aligned, so the range covers whole cache lines. */
+    if (sReserveOpen) {
+        /* No draw can reference an uncommitted batch, and it is still being
+         * written. Publish around it and keep `published` at its start, so
+         * the batch is written back after commit, in its final state. */
+        if (sReserveStart > sVertexArenaPublished) {
+            sceKernelDcacheWritebackRange(sVertexArena + sVertexArenaPublished,
+                                          sReserveStart - sVertexArenaPublished);
+            sVertexArenaPublished = sReserveStart;
+        }
+        if (sVertexArenaUsed > sReserveEnd) {
+            sceKernelDcacheWritebackRange(sVertexArena + sReserveEnd, sVertexArenaUsed - sReserveEnd);
+        }
+        return;
+    }
     if (sVertexArenaUsed > sVertexArenaPublished) {
         sceKernelDcacheWritebackRange(sVertexArena + sVertexArenaPublished,
                                       sVertexArenaUsed - sVertexArenaPublished);
         sVertexArenaPublished = sVertexArenaUsed;
     }
+}
+
+void gfx_psp_submit_commit_vertices(size_t bytes) {
+    size_t aligned;
+
+    if (!sReserveOpen) {
+        return;
+    }
+    sReserveOpen = 0;
+    aligned = (bytes + 63U) & ~(size_t)63U;
+    if (aligned > sReserveEnd - sReserveStart) {
+        aligned = sReserveEnd - sReserveStart;
+    }
+    /* Trim only if nothing was allocated after the reservation. Otherwise
+     * the unused tail stays allocated until the next reset. */
+    if (sVertexArenaUsed == sReserveEnd) {
+        sVertexArenaUsed = sReserveStart + aligned;
+    }
+}
+
+void* gfx_psp_submit_reserve_vertices(size_t maxBytes) {
+    unsigned char* result;
+
+    /* An abandoned reservation holds no queued draw; release it. */
+    gfx_psp_submit_commit_vertices(0);
+    result = gfx_psp_submit_alloc_vertices(maxBytes);
+    if (result == NULL) {
+        return NULL;
+    }
+    sReserveOpen = 1;
+    sReserveStart = (size_t)(result - sVertexArena);
+    sReserveEnd = sVertexArenaUsed;
+    return result;
 }
 
 int gfx_psp_submit_finish(void) {

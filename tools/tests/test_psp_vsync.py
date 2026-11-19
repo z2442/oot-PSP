@@ -19,6 +19,7 @@ def function(source, name):
 
 stubs = r'''
 #include <assert.h>
+#define OOT_PSP_ZONE(zone) ((void)0) /* Release builds compile zones out. */
 #include <stdbool.h>
 #include <stdint.h>
 int OotPspDve_GetModel(void) { return 0; }

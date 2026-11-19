@@ -1,3 +1,4 @@
+#include "oot_psp_zone_profile.h"
 #include "ultra64.h"
 
 #include "attributes.h"
@@ -1039,6 +1040,9 @@ s32 osContStartReadData(UNUSED OSMesgQueue* mq) {
 
         OotPspProfiler_OnButtons(pad.Buttons);
     }
+#endif
+#if defined(OOT_PSP_ZONE_PROFILE) && OOT_PSP_ZONE_PROFILE
+    OotPspZoneProfile_OnButtons(pad.Buttons);
 #endif
 
     sControllerPads[0].button = OotPspControls_MapButtons(pad.Buttons);
