@@ -30,7 +30,7 @@ preamble = r'''
 struct LoadedVertex { float x,y,z,_x,_y,_z,_w,normal[3]; uint16_t decal_lifted; };
 static struct { bool decal_mode; struct { unsigned width,height; } viewport; } rendering_state;
 static unsigned int sBatchDepthBias,sAppliedDepthBias=~0U,offsetCalls,guOffset;
-static void sceGuDepthOffset(unsigned int bias) { guOffset=bias;offsetCalls++; }
+static void sceGuSendCommandf(int command,float bias) { assert(command==0x47);guOffset=(unsigned)bias;offsetCalls++; }
 static unsigned int flushes;
 static void gfx_flush(void) { flushes++;sBatchDepthBias=0; }
 static const float projection[4][4]={{1.3f,0,0,0},{0,1.7f,0,0},

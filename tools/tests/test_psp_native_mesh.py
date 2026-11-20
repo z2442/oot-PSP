@@ -70,6 +70,7 @@ struct TriPipelineState { bool use_texture,use_fog,use_alpha,texture_tint_colors
     float tex_u_scale[2],tex_v_scale[2],tex_u_bias[2],tex_v_bias[2]; struct ColorCombiner* comb; };
 struct { struct TriPipelineState tri_pipeline; } rendering_state;
 uintptr_t gSegments[16];
+#define sClipProjection rsp.P_matrix /* Projection encoding is tested by test_psp_frustum.py. */
 float sNdcAspectScale = 1;
 unsigned validation_calls, draws, transforms;
 bool readable = true;

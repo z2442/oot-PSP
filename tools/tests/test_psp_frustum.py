@@ -2,6 +2,7 @@
 """Check CPU/GU clip-volume agreement and roads crossing screen/near edges."""
 from pathlib import Path
 import os
+import re
 import subprocess
 import tempfile
 
@@ -29,13 +30,27 @@ struct LoadedVertex {
 };
 static bool anchored,sHudViewportFullscreen;
 static float sNdcAspectScale,sHudAnchorOffsetNdc,uploaded[4][4];
+static float sUploadedProjection[4][4],sClipProjection[4][4];
+static bool sUploadedProjectionValid;
+typedef struct { float m[4][4]; } ScePspFMatrix4;
+#define GU_PROJECTION 0
+static unsigned uploads;
+static void sceGuSetMatrix(unsigned mode,const ScePspFMatrix4* matrix) {
+    assert(mode==GU_PROJECTION);uploads++;
+    for (unsigned row=0;row<4;row++) for (unsigned col=0;col<4;col++) {
+        uint32_t bits;memcpy(&bits,&matrix->m[row][col],sizeof(bits));
+        bits &= 0xFFFFFF00U;memcpy(&uploaded[row][col],&bits,sizeof(bits));
+    }
+}
 static struct { float P_matrix[4][4]; } rsp;
 static bool gfx_hud_anchor_enabled(void) { return anchored; }
-static void gfx_upload_projection_matrix(const float m[4][4]) { memcpy(uploaded,m,sizeof(uploaded)); }
 '''
-projection = section("static inline __attribute__((always_inline)) void gfx_apply_projection_matrix(",
+projection = section("static inline void gfx_upload_projection_matrix(",
                      "static void gfx_apply_modelview_matrix(")
 clip_x = section("static inline float gfx_transform_clip_x(", "static void gfx_update_screen_metrics(")
+# Compile the production transform's projection selection alongside upload and clipping.
+projection_name = re.search(r'const struct GfxVfpuTransformState transformState = \{\s*[^,]+,\s*(\w+(?:\.\w+)?),', source)[1]
+projection += 'static const float (*cpu_projection(void))[4] { return ' + projection_name + '; }\n'
 load_x = section("        float w = d->_w;", "        const float y = d->_y;")
 classify = section("        uint32_t clipRej = 0;", "\n#if !defined(TARGET_PSP)\n        d->x = model_vec[0];")
 clipping = section("// Bits for clipping", "static inline float vec3_dot(")
@@ -51,10 +66,11 @@ static void classify(struct LoadedVertex* d) {
 ''' + classify + r'''
 }
 static void project(struct LoadedVertex* d) {
-    d->_x=d->x*uploaded[0][0]+d->z*uploaded[2][0]+uploaded[3][0];
-    d->_y=d->y*uploaded[1][1];
-    d->_z=d->z*uploaded[2][2]+uploaded[3][2];
-    d->_w=d->z*uploaded[2][3]+uploaded[3][3];
+    const float (*cpu)[4]=cpu_projection();
+    d->_x=d->x*cpu[0][0]+d->z*cpu[2][0]+cpu[3][0];
+    d->_y=d->y*cpu[1][1];
+    d->_z=d->z*cpu[2][2]+cpu[3][2];
+    d->_w=d->z*cpu[2][3]+cpu[3][3];
     d->w=d->_w;classify(d);
 }
 static float area(const struct LoadedVertex* a,const struct LoadedVertex* b,const struct LoadedVertex* c) {
@@ -78,11 +94,45 @@ int main(void) {
         for (unsigned i=0;i<4;i++) rsp.P_matrix[i][i]=1;
         gfx_apply_projection_matrix();
         for (int step=-24;step<=24;step++) {
-            struct LoadedVertex d={._x=step/20.0f,._w=1};
-            float gpuX=d._x*uploaded[0][0]+uploaded[3][0];
+            float modelX=step/20.0f;
+            const float (*cpu)[4]=cpu_projection();
+            struct LoadedVertex d={._x=modelX*cpu[0][0]+cpu[3][0],._w=1};
+            float gpuX=modelX*uploaded[0][0]+uploaded[3][0];
             assert(fabsf(loaded_x(&d)-gpuX)<0.000001f);
         }
     }
+    // Matrix-command truncation matters when camera offsets cancel large
+    // world coordinates. These positions come from Hyrule Field road meshes.
+    // Keep full source precision for later matrix multiplication/cache keys.
+    const float road[][3]={{-120,0,2220},{-371,0,3055},{-195,0,3218},
+        {120,0,2220},{-1004,-100,3699},{-864,-106,3899}};
+    anchored=false;
+    const float camera[][4]={{1.234567f,0,0.145678f,-0.1234567f},
+        {0,1.7654321f,-0.543210f,-0.54321f},
+        {-0.234567f,0,-0.987654f,-0.987650f},
+        {1023.9876f,0,2345.6789f,2356.9876f}};
+    memcpy(rsp.P_matrix,camera,sizeof(camera));gfx_apply_projection_matrix();
+    assert(memcmp(rsp.P_matrix,camera,sizeof(camera))==0);
+    for (unsigned row=0;row<4;row++) for (unsigned col=0;col<4;col++) {
+        float expected=col==2 ? uploaded[row][3]-2*uploaded[row][2] : uploaded[row][col];
+        assert(cpu_projection()[row][col]==expected);
+    }
+    unsigned before=uploads;gfx_apply_projection_matrix();assert(uploads==before);
+    float maxOldError=0;
+    for (unsigned vertex=0;vertex<sizeof(road)/sizeof(road[0]);vertex++) {
+        for (unsigned col=0;col<4;col++) {
+            float original=camera[3][col],gpu=col==2 ? uploaded[3][3]-2*uploaded[3][2] : uploaded[3][col],cpu=cpu_projection()[3][col];
+            for (unsigned row=0;row<3;row++) {
+                original+=road[vertex][row]*camera[row][col];
+                gpu+=road[vertex][row]*(col==2 ? uploaded[row][3]-2*uploaded[row][2] : uploaded[row][col]);
+                cpu+=road[vertex][row]*cpu_projection()[row][col];
+            }
+            assert(cpu==gpu);
+            if (fabsf(original-gpu)>maxOldError) maxOldError=fabsf(original-gpu);
+        }
+    }
+    assert(maxOldError>0.01f);
+    printf("Projection precision: GE float24 operands match CPU; old road-coordinate error %g\n",maxOldError);
     // Each individual rejection bit must select the plane which rejected it.
     const uint32_t bits[]={X_POS,X_NEG,Y_POS,Y_NEG,Z_POS,Z_NEG};
     for (unsigned plane=0;plane<6;plane++) {
@@ -125,6 +175,9 @@ int main(void) {
                 inside(&result[i]);
                 // Reproject the modelview positions actually submitted to GE.
                 struct LoadedVertex repro=result[i];project(&repro);inside(&repro);
+                float geZ=result[i].z*uploaded[2][2]+uploaded[3][2];
+                float geW=result[i].z*uploaded[2][3]+uploaded[3][3];
+                assert(geZ>=-geW*0.00002f && geZ<=geW*1.00002f);
                 assert(fabsf(repro._x-result[i]._x)<0.002f);
             }
             for (unsigned i=0;i<count;i+=3) actual+=area(&result[i],&result[i+1],&result[i+2]);

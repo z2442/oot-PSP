@@ -397,6 +397,8 @@ static float sHudAnchorOffsetPixels;
 static float sHudAnchorOffsetNdc;
 static float sUploadedProjection[4][4] __attribute__((aligned(16)));
 static bool sUploadedProjectionValid;
+/* Effective GE projection decoded back to N64 clip-space depth. */
+static float sClipProjection[4][4] __attribute__((aligned(16)));
 
 #if defined(TARGET_PSP)
 static uint8_t sInvalidTextureBuf[256] __attribute__((aligned(16))) = { 0xff, 0xff, 0xff, 0xff };
@@ -3697,8 +3699,29 @@ static inline void gfx_upload_projection_matrix(const float matrix[4][4]) {
         return;
     }
 
-    sceGuSetMatrix(GU_PROJECTION, (const ScePspFMatrix4*)matrix);
+    float geProjection[4][4] __attribute__((aligned(16)));
+    memcpy(geProjection, matrix, sizeof(geProjection));
+    /* Evaluate reversed depth directly: D = (W - Z) / (2 W). The normal
+     * viewport expression subtracts nearly equal float24 values at distance,
+     * letting road and terrain tessellations disagree by several depth units.
+     * Form the small depth coefficients before GE command truncation. */
+    for (size_t row = 0; row < 4; row++) {
+        geProjection[row][2] = (matrix[row][3] - matrix[row][2]) * 0.5f;
+        for (size_t col = 0; col < 4; col++) {
+            uint32_t bits;
+            memcpy(&bits, &geProjection[row][col], sizeof(bits));
+            bits &= 0xFFFFFF00U; /* sceGuSetMatrix sends float bits >> 8. */
+            memcpy(&geProjection[row][col], &bits, sizeof(bits));
+        }
+    }
+    sceGuSetMatrix(GU_PROJECTION, (const ScePspFMatrix4*)geProjection);
     memcpy(sUploadedProjection, matrix, sizeof(sUploadedProjection));
+    memcpy(sClipProjection, geProjection, sizeof(sClipProjection));
+    /* CPU clipping and fog keep their N64 -W..W depth convention. Decode it
+     * from the encoded GE operands, including the effective HUD adjustment. */
+    for (size_t row = 0; row < 4; row++) {
+        sClipProjection[row][2] = geProjection[row][3] - 2.0f * geProjection[row][2];
+    }
     sUploadedProjectionValid = true;
 }
 
@@ -3928,7 +3951,7 @@ static bool gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
     {
         const struct GfxVfpuTransformState transformState = {
             rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1],
-            rsp.P_matrix,
+            sClipProjection,
             rsp.fog_mul * sFogProjection.scale,
             rsp.fog_offset + rsp.fog_mul * sFogProjection.offset,
             (geometryMode & G_FOG) != 0,
@@ -3957,10 +3980,11 @@ static bool gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
 #if defined(TARGET_PSP)
         if ((rdp.other_mode_l & ZMODE_DEC) == ZMODE_DEC &&
             (geometryMode & G_LIGHTING) && !(geometryMode & G_TEXTURE_GEN)) {
-            d->decal_lifted = gfx_lift_floor_decal(d, rsp.P_matrix);
+            d->decal_lifted = gfx_lift_floor_decal(d, sClipProjection);
         }
         float w = d->_w;
-        float x = gfx_transform_clip_x(d->_x, w);
+        /* sClipProjection already contains the effective HUD adjustment. */
+        float x = d->_x;
         const float y = d->_y;
         const float z = d->_z;
 #else
@@ -7106,7 +7130,7 @@ static bool gfx_native_visible(const struct NativeMesh* mesh) {
         for (unsigned int axis = 0; axis < 3; axis++) v[axis] = (i & (1 << axis)) ? mesh->max[axis] : mesh->min[axis];
         v[3] = 1;
         gfx_transform_vec4(model, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], v);
-        gfx_transform_vec4(clip, rsp.P_matrix, model);
+        gfx_transform_vec4(clip, sClipProjection, model);
         const float w = clip[3];
         if (!(w > 0.001f && fabsf(clip[0]) < w &&
               fabsf(clip[1]) < w && fabsf(clip[2]) < w)) return false;
@@ -7201,7 +7225,7 @@ static GFX_DL_HANDLER bool gfx_native_try(Gfx** cursor) {
         p->mesh = mesh;
         mesh->pending_groups++;
         memcpy(p->model, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], sizeof(p->model));
-        memcpy(p->projection, rsp.P_matrix, sizeof(p->projection));
+        memcpy(p->projection, sClipProjection, sizeof(p->projection));
         p->aspect = 1.0f; /* Native meshes use the unadjusted world projection. */
         p->s = rsp.texture_scaling_factor.s;
         p->t = rsp.texture_scaling_factor.t;

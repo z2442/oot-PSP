@@ -1722,8 +1722,9 @@ static void gfx_scegu_set_depth_mask(bool z_upd) {
 
 static void gfx_scegu_set_depth_bias(unsigned int bias) {
     if (sAppliedDepthBias != bias) {
-        /* GE uses reversed depth: positive offsets pull decals forward. */
-        sceGuDepthOffset(bias);
+        /* Projection produces reversed 0..W depth directly. Keep the offset
+         * on that zero-centered viewport instead of restoring SDK -W..W. */
+        sceGuSendCommandf(0x47 /* VIEWPORTZCENTER */, (float)bias);
         sAppliedDepthBias = bias;
     }
 }
@@ -2069,7 +2070,11 @@ static void gfx_scegu_configure_gu_buffers(void) {
     sceGuDepthBuffer(sDepthBuffer, BUF_WIDTH);
     sceGuOffset(2048 - (SCR_WIDTH / 2), 2048 - (SCR_HEIGHT / 2));
     sceGuViewport(2048, 2048, SCR_WIDTH, SCR_HEIGHT);
-    sceGuDepthRange(0xffff, 0);
+    sceGuDepthRange(0xffff, 0); /* Retain the full fragment MinZ/MaxZ range. */
+    /* gfx_upload_projection_matrix produces reversed 0..W clip depth. Avoid
+     * subtracting nearly equal float24 values in the GE viewport transform. */
+    sceGuSendCommandf(0x44 /* VIEWPORTZSCALE */, 65535.0f);
+    sceGuSendCommandf(0x47 /* VIEWPORTZCENTER */, 0.0f);
     sceGuScissor(0, 0, SCR_WIDTH, SCR_HEIGHT);
     sScissorBounds[0] = sScissorBounds[1] = 0;
     sScissorBounds[2] = SCR_WIDTH;

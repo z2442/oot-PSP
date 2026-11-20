@@ -72,6 +72,7 @@ struct GfxVfpuTransformState {
 };
 static struct { float modelview_matrix_stack[1][4][4],P_matrix[4][4];
                 unsigned modelview_matrix_stack_size; int16_t fog_mul,fog_offset; } rsp={.modelview_matrix_stack_size=1};
+#define sClipProjection rsp.P_matrix /* GE operand encoding is checked by test_psp_frustum.py. */
 typedef void OotPspShadowMask;
 static const OotPspShadowMask* sPendingShadowMask;
 static void gfx_flush(void) { assert(0); }

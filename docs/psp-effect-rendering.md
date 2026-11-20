@@ -69,6 +69,22 @@ switching offset classes. Color and fog share the same depth; ordinary
 geometry uses zero bias and depth testing remains enabled. Decals bypass
 the native mesh shortcut so the bounded displacement is applied.
 
+The GE projection now evaluates reversed depth directly as `(W - Z) / (2 W)`.
+The previous viewport subtracted nearly equal float24 values, and real Hyrule
+Field road/terrain fixtures could disagree by several depth units despite the
+bounded lift. Forming the small depth coefficients before matrix-command
+truncation and using a zero-centered depth viewport removes those failures in
+the precision model. CPU clipping, fog, and deferred native vertices use the
+encoded projection decoded back to N64 clip-space depth. The road lift and
+rounding bias remain one world unit and two depth units; depth tests still
+occlude roads with foreground geometry.
+
+The [GE arithmetic](https://www.ppsspp.org/docs/psp-hardware/gpu/arithmetic/)
+and [viewport precision](https://www.ppsspp.org/docs/psp-hardware/gpu/ge-vertex-pipeline/#precision)
+documentation describe the modeled precision. The regression uses actual
+Hyrule Field meshes, but approximates the GE reciprocal with a truncated
+divide. It does not replace a hardware image comparison.
+
 The Temple of Time crossfades normal and blue floor textures using
 environment alpha. Its room lists use both SHADE and PRIMITIVE as their
 second-cycle multiplier. Both now use the two-texture GU path, preserving
@@ -122,6 +138,7 @@ Host regression checks:
 - `python3 tools/tests/test_psp_get_item_materials.py`
 - `python3 tools/tests/test_psp_frustum.py`
 - `python3 tools/tests/test_psp_decal_depth.py`
+- `python3 tools/tests/test_psp_road_depth_precision.py`
 - `python3 tools/tests/test_psp_close_camera.py`
 - `python3 tools/tests/test_psp_first_person.py`
 - `python3 tools/tests/test_psp_rectangle_scissor.py`
